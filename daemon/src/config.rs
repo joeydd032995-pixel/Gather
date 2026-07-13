@@ -36,6 +36,16 @@ pub struct Config {
     pub ollama_model: String,
     /// Embedding model (must produce 768-dim vectors to match the schema).
     pub ollama_embed_model: String,
+    /// Run the background contradiction scanner.
+    pub scan_enabled: bool,
+    /// Seconds between scan passes.
+    pub scan_interval_secs: u64,
+    /// Max unscanned units claimed per pass.
+    pub scan_batch: i64,
+    /// Minimum score for a pair to be recorded as a contradiction.
+    pub scan_threshold: f32,
+    /// Max candidates per blocking strategy per unit.
+    pub scan_max_candidates: i64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -115,6 +125,27 @@ impl Config {
                 .unwrap_or_else(|_| "llama3.2:3b".to_string()),
             ollama_embed_model: std::env::var("GATHER_OLLAMA_EMBED_MODEL")
                 .unwrap_or_else(|_| "nomic-embed-text".to_string()),
+            scan_enabled: env_bool("GATHER_SCAN_ENABLED", true),
+            scan_interval_secs: std::env::var("GATHER_SCAN_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|v: u64| v.max(1))
+                .unwrap_or(600),
+            scan_batch: std::env::var("GATHER_SCAN_BATCH")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|v: i64| v.clamp(1, 512))
+                .unwrap_or(32),
+            scan_threshold: std::env::var("GATHER_SCAN_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|v: f32| v.clamp(0.0, 1.0))
+                .unwrap_or(0.65),
+            scan_max_candidates: std::env::var("GATHER_SCAN_MAX_CANDIDATES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|v: i64| v.clamp(1, 200))
+                .unwrap_or(25),
         })
     }
 
@@ -135,6 +166,11 @@ impl Config {
             ollama_url: None,
             ollama_model: "llama3.2:3b".to_string(),
             ollama_embed_model: "nomic-embed-text".to_string(),
+            scan_enabled: true,
+            scan_interval_secs: 600,
+            scan_batch: 32,
+            scan_threshold: 0.65,
+            scan_max_candidates: 25,
         }
     }
 }

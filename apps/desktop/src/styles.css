@@ -32,3 +32,51 @@ h1 { font-size: 1.5rem; margin: 0 0 1rem; }
 .status-accepted { color: #2e9e5b; }
 .status-deduplicated { color: #c99700; }
 .status-rejected { color: #b3423a; }
+
+/* tabs */
+.tabs { display: flex; gap: 0.5rem; margin: 0 0 1rem; border-bottom: 1px solid #8883; }
+.tab {
+  background: none; border: none; border-bottom: 2px solid transparent;
+  padding: 0.4rem 0.75rem; font-size: 0.95rem; cursor: pointer; color: inherit;
+}
+.tab.active { border-bottom-color: #4a7dff; font-weight: 600; }
+
+/* contradiction review */
+.all-clear { color: #2e9e5b; }
+.conflict-list { list-style: none; margin: 0; padding: 0; }
+.conflict-item { border: 1px solid #8883; border-radius: 10px; margin-bottom: 0.75rem; overflow: hidden; }
+.conflict-row {
+  display: flex; gap: 0.75rem; align-items: center; width: 100%;
+  background: none; border: none; padding: 0.6rem 0.75rem; cursor: pointer;
+  text-align: left; color: inherit; font-size: 0.9rem;
+}
+.conflict-row:hover { background: #4a7dff10; }
+.score { font-weight: 700; color: #b3423a; min-width: 2.5rem; }
+.statements { flex: 1; display: flex; flex-direction: column; gap: 0.15rem; }
+.statements .vs { color: #888; font-size: 0.75rem; }
+.method { font-size: 0.75rem; color: #888; white-space: nowrap; }
+.conflict-detail { padding: 0.75rem; border-top: 1px solid #8883; }
+.conflict-sides { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+.conflict-side h4 { margin: 0 0 0.3rem; font-size: 0.8rem; text-transform: uppercase; color: #888; }
+.conflict-side .statement { margin: 0 0 0.3rem; font-weight: 500; }
+.valid-from { font-size: 0.75rem; color: #888; margin: 0 0 0.3rem; }
+.prov-list { list-style: none; margin: 0; padding: 0; font-size: 0.8rem; }
+.prov-list li { margin-bottom: 0.4rem; }
+.prov-list blockquote { margin: 0.2rem 0 0; padding-left: 0.6rem; border-left: 2px solid #8885; color: #666; }
+.prov-badge {
+  background: #4a7dff22; color: #4a7dff; border-radius: 4px;
+  padding: 0.05rem 0.35rem; margin-right: 0.4rem; font-weight: 600;
+}
+.prov-kind { color: #888; margin-right: 0.4rem; }
+.prov-file { margin-right: 0.4rem; }
+.prov-time { color: #888; }
+.prov-empty { font-size: 0.8rem; color: #888; }
+.explanation { font-size: 0.85rem; color: #666; font-style: italic; }
+.conflict-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.6rem; }
+.conflict-actions input { flex: 1 1 12rem; padding: 0.35rem 0.5rem; border: 1px solid #8886; border-radius: 6px; }
+.conflict-actions button {
+  padding: 0.35rem 0.7rem; border: 1px solid #8886; border-radius: 6px; cursor: pointer;
+}
+.conflict-actions button:disabled { opacity: 0.5; cursor: default; }
+.audit { margin-top: 0.6rem; font-size: 0.8rem; color: #888; }
+.audit ul { margin: 0.3rem 0 0; padding-left: 1.1rem; }

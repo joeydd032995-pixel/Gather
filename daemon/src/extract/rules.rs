@@ -49,7 +49,7 @@ fn patterns() -> &'static Patterns {
         )
         .unwrap(),
         first_person: Regex::new(
-            r"(?i)^\s*(?:I|we)\s+(prefer|use|have|am|live\s+in|work\s+(?:at|for|on))\s+(.{2,80}?)[\s.]*$",
+            r"(?i)^\s*(?:I|we)\s+(?:(never|don't|do\s+not|no\s+longer)\s+)?(prefer|use|have|am|live\s+in|work\s+(?:at|for|on))\s+(.{2,80}?)[\s.]*$",
         )
         .unwrap(),
         numeric: Regex::new(
@@ -164,8 +164,9 @@ pub fn extract_units(text: &str) -> Vec<ExtractedUnit> {
         }
 
         if let Some(c) = p.first_person.captures(sentence) {
-            let verb = c.get(1).unwrap().as_str().to_lowercase();
-            let object = tidy(c.get(2).unwrap().as_str());
+            let negated = c.get(1).is_some();
+            let verb = c.get(2).unwrap().as_str().to_lowercase();
+            let object = tidy(c.get(3).unwrap().as_str());
             let (kind, relation): (&'static str, &str) = match verb.as_str() {
                 "prefer" => ("preference", "prefers"),
                 "use" => ("fact", "uses"),
@@ -174,15 +175,22 @@ pub fn extract_units(text: &str) -> Vec<ExtractedUnit> {
                 v if v.starts_with("live") => ("fact", "lives_in"),
                 _ => ("fact", "works_at"),
             };
+            // A negated statement is still a fact worth keeping (and pairing
+            // in the contradiction scan) but asserts no positive graph edge.
+            let objects = if negated {
+                vec![]
+            } else {
+                vec![(clean(&object), relation.to_string())]
+            };
             units.push(ExtractedUnit {
                 kind,
                 statement,
                 subject: Some("Me".to_string()),
-                objects: vec![(clean(&object), relation.to_string())],
+                objects,
                 char_start: span.0,
                 char_end: span.1,
                 confidence: BASE_CONFIDENCE,
-                attrs: json!({ "pattern": "first_person", "verb": verb }),
+                attrs: json!({ "pattern": "first_person", "verb": verb, "negated": negated }),
                 event_time: None,
             });
             continue;
@@ -255,6 +263,18 @@ mod tests {
         );
         assert_eq!(units[1].kind, "preference");
         assert_eq!(units[1].objects[0].1, "prefers");
+    }
+
+    #[test]
+    fn negated_first_person_keeps_unit_but_drops_edge() {
+        let units = extract_units("I never use MongoDB for anything.");
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].attrs["negated"], serde_json::json!(true));
+        assert!(
+            units[0].objects.is_empty(),
+            "negation must not assert a positive edge"
+        );
+        assert!(units[0].statement.contains("never"));
     }
 
     #[test]

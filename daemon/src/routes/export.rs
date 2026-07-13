@@ -68,7 +68,8 @@ const TABLES: &[(&str, &str)] = &[
         "atomic_units",
         "id, kind, statement, statement_hash, subject_entity_id, confidence, \
          extraction_method, extraction_model, embedding, valid_from, valid_to, \
-         status, superseded_by_unit_id, attrs, created_at, updated_at",
+         status, superseded_by_unit_id, attrs, created_at, updated_at, \
+         contradiction_scanned_at",
     ),
     (
         "atomic_unit_provenance",
