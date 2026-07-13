@@ -128,6 +128,75 @@ impl OllamaClient {
 
         Ok(parse_llm_units(&parsed, chunk))
     }
+
+    /// Contradiction judge (write-up §6.2): asks the local model whether two
+    /// statements conflict. Used by the scanner only on pairs a structural
+    /// rule already flagged, so call volume stays small.
+    pub async fn judge(&self, statement_a: &str, statement_b: &str) -> Result<Judgement, String> {
+        let response = self
+            .http
+            .post(format!("{}/api/chat", self.base))
+            .json(&json!({
+                "model": self.model,
+                "stream": false,
+                "format": "json",
+                "messages": [
+                    { "role": "system", "content": JUDGE_SYSTEM_PROMPT },
+                    { "role": "user",
+                      "content": format!("A: {statement_a}\nB: {statement_b}") },
+                ],
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("ollama judge request: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("ollama judge status: {e}"))?;
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| format!("ollama judge decode: {e}"))?;
+        let content = body
+            .pointer("/message/content")
+            .and_then(Value::as_str)
+            .ok_or("ollama judge response missing message.content")?;
+        let parsed: Value = serde_json::from_str(content)
+            .map_err(|e| format!("judge returned non-JSON content: {e}"))?;
+        parse_judgement(&parsed)
+    }
+}
+
+const JUDGE_SYSTEM_PROMPT: &str = "You judge whether two statements contradict each other. \
+Two statements contradict when they cannot both be true at the same time. \
+Respond with JSON only: {\"contradicts\": true|false, \"confidence\": 0.0-1.0, \
+\"why\": \"one short sentence\"}. No commentary.";
+
+pub struct Judgement {
+    pub contradicts: bool,
+    pub confidence: f32,
+    pub why: String,
+}
+
+pub(crate) fn parse_judgement(parsed: &Value) -> Result<Judgement, String> {
+    let contradicts = parsed
+        .get("contradicts")
+        .and_then(Value::as_bool)
+        .ok_or("judge output missing boolean 'contradicts'")?;
+    let confidence = parsed
+        .get("confidence")
+        .and_then(Value::as_f64)
+        .map(|c| (c as f32).clamp(0.0, 1.0))
+        .unwrap_or(0.5);
+    let why = parsed
+        .get("why")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    Ok(Judgement {
+        contradicts,
+        confidence,
+        why,
+    })
 }
 
 const VALID_KINDS: &[(&str, &str)] = &[

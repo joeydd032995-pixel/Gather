@@ -5,6 +5,7 @@ pub mod db;
 pub mod error;
 pub mod extract;
 pub mod routes;
+pub mod scan;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -66,6 +67,14 @@ pub fn describe_metrics() {
     metrics::describe_counter!(
         "gather_contradictions_resolved_total",
         "Contradictions resolved, by resolution"
+    );
+    metrics::describe_counter!(
+        "gather_contradictions_detected_total",
+        "Contradictions detected by the scanner, by detection method"
+    );
+    metrics::describe_histogram!(
+        "gather_scan_duration_seconds",
+        "Contradiction scan pass duration"
     );
     metrics::describe_gauge!(
         "gather_contradictions_open",

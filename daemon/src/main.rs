@@ -44,6 +44,14 @@ async fn main() -> anyhow::Result<()> {
     } else {
         tracing::info!("extraction worker disabled via GATHER_EXTRACTION_ENABLED=false");
     }
+    if config.scan_enabled {
+        tokio::spawn(gather_daemon::scan::worker_loop(
+            pool.clone(),
+            config.clone(),
+        ));
+    } else {
+        tracing::info!("contradiction scanner disabled via GATHER_SCAN_ENABLED=false");
+    }
 
     let app = routes::build_router(state);
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;

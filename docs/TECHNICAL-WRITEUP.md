@@ -5,9 +5,9 @@ Everything runs on your machine. Nothing leaves it unless you explicitly opt in.
 
 This document is the engineering specification for the system in this repository. The runnable
 skeleton (daemon, schema, Docker, CI, observability, desktop shell) is committed alongside it;
-the extraction worker (§5) is implemented in `daemon/src/extract/`; sections marked
-*[pipeline — Phase 1]* describe remaining logic specified here in pseudocode and built out
-during the 8-week MVP on top of the committed schema and API.
+the extraction worker (§5, `daemon/src/extract/`) and the contradiction scanner (§6,
+`daemon/src/scan/`) are implemented; the pseudocode in those sections is the behavioral spec
+the implementations follow. Remaining *[pipeline — Phase 1]* markers denote MVP build-out items.
 
 ---
 
@@ -908,7 +908,8 @@ indistinguishable to extraction and everything downstream — only their provena
 
 ## 6. Contradiction detection
 
-### 6.1 Scan algorithm *[pipeline — Phase 1; review workflow shipped]*
+### 6.1 Scan algorithm *(shipped: `daemon/src/scan/` — worker in `mod.rs`, pure scoring rules
+in `score.rs`; the Ollama judge is opt-in and runs only on structurally flagged pairs)*
 
 ```
 loop every SCAN_INTERVAL (default 10 min), incremental over units created since last scan:
