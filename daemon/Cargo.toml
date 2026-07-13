@@ -35,6 +35,8 @@ metrics-exporter-prometheus = { version = "0.17", default-features = false }
 anyhow = "1"
 thiserror = "2"
 mime_guess = "2"
+keyring = { version = "3", features = ["sync-secret-service", "vendored", "apple-native", "windows-native"] }
+getrandom = "0.3"
 regex = "1"
 pdf-extract = "0.12"
 lopdf = "0.44"

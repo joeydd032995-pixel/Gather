@@ -15,6 +15,9 @@ pub struct Config {
     /// Optional bearer token. When set, every /api/v1 request must carry
     /// `Authorization: Bearer <token>`. Health and metrics stay open (loopback only).
     pub api_token: Option<String>,
+    /// Token source: "env" (GATHER_API_TOKEN or open loopback) or "keychain"
+    /// (OS-keychain get-or-create; the packaged desktop default).
+    pub auth_mode: String,
     /// Upload cap per request body, in megabytes.
     pub max_upload_mb: usize,
     /// Emit JSON logs instead of human-readable ones.
@@ -98,10 +101,15 @@ impl Config {
                 .unwrap_or(default)
         };
 
+        let auth_mode = std::env::var("GATHER_AUTH_MODE")
+            .map(|v| v.to_lowercase())
+            .unwrap_or_else(|_| "env".to_string());
+
         Ok(Self {
             bind_addr,
             database_url,
             api_token,
+            auth_mode,
             max_upload_mb,
             log_json,
             allow_non_loopback,
@@ -156,6 +164,7 @@ impl Config {
             bind_addr: "127.0.0.1:0".parse().expect("static addr"),
             database_url,
             api_token: None,
+            auth_mode: "env".to_string(),
             max_upload_mb: 16,
             log_json: false,
             allow_non_loopback: false,
