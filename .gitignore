@@ -1,0 +1,19 @@
+# Rust
+target/
+
+# Node / frontend
+node_modules/
+apps/desktop/dist/
+
+# Tauri generated schemas
+apps/desktop/src-tauri/gen/
+
+# Local environment & secrets — never commit
+.env
+*.tfvars
+*.tfstate*
+.terraform/
+.terraform.lock.hcl
+
+# OS noise
+.DS_Store

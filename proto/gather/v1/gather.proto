@@ -1,0 +1,325 @@
+// Gather — local gRPC API, v1.
+//
+// Served on 127.0.0.1 only (offline-by-default), mirroring the REST API for
+// downstream agents and tools that prefer gRPC. Every message maps 1:1 to
+// columns in daemon/migrations/0001_init.sql; field comments name the
+// backing table.column.
+
+syntax = "proto3";
+
+package gather.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+option go_package = "gather/v1;gatherv1";
+
+// ---------------------------------------------------------------------------
+// Shared enums (mirror Postgres enum types)
+// ---------------------------------------------------------------------------
+
+enum ArtifactKind {
+  ARTIFACT_KIND_UNSPECIFIED = 0;
+  ARTIFACT_KIND_CHAT_EXPORT = 1;
+  ARTIFACT_KIND_AGENT_LOG = 2;
+  ARTIFACT_KIND_DOCUMENT_PDF = 3;
+  ARTIFACT_KIND_DOCUMENT_MARKDOWN = 4;
+  ARTIFACT_KIND_DOCUMENT_TEXT = 5;
+  ARTIFACT_KIND_IMAGE_PHOTO = 6;
+  ARTIFACT_KIND_IMAGE_SCREENSHOT = 7;
+}
+
+enum UnitKind {
+  UNIT_KIND_UNSPECIFIED = 0;
+  UNIT_KIND_FACT = 1;
+  UNIT_KIND_CLAIM = 2;
+  UNIT_KIND_DECISION = 3;
+  UNIT_KIND_PREFERENCE = 4;
+  UNIT_KIND_EVENT = 5;
+}
+
+enum UnitStatus {
+  UNIT_STATUS_UNSPECIFIED = 0;
+  UNIT_STATUS_ACTIVE = 1;
+  UNIT_STATUS_SUPERSEDED = 2;
+  UNIT_STATUS_RETRACTED = 3;
+  UNIT_STATUS_DISPUTED = 4;
+}
+
+enum ContradictionStatus {
+  CONTRADICTION_STATUS_UNSPECIFIED = 0;
+  CONTRADICTION_STATUS_OPEN = 1;
+  CONTRADICTION_STATUS_RESOLVED_A = 2;
+  CONTRADICTION_STATUS_RESOLVED_B = 3;
+  CONTRADICTION_STATUS_BOTH_VALID = 4;
+  CONTRADICTION_STATUS_DISMISSED = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Core resources
+// ---------------------------------------------------------------------------
+
+message Artifact {
+  string id = 1;                                   // artifacts.id (uuid)
+  ArtifactKind kind = 2;                           // artifacts.kind
+  string source_platform = 3;                      // artifacts.source_platform
+  string source_format_version = 4;                // artifacts.source_format_version
+  string original_filename = 5;                    // artifacts.original_filename
+  string media_type = 6;                           // artifacts.media_type
+  int64 byte_size = 7;                             // artifacts.byte_size
+  string content_hash = 8;                         // artifacts.content_hash (sha-256 hex)
+  int32 version = 9;                               // artifacts.version
+  string supersedes_artifact_id = 10;              // artifacts.supersedes_artifact_id
+  google.protobuf.Timestamp source_created_at = 11; // artifacts.source_created_at
+  google.protobuf.Timestamp ingested_at = 12;      // artifacts.ingested_at
+  google.protobuf.Struct metadata = 13;            // artifacts.metadata (jsonb)
+}
+
+message AtomicUnit {
+  string id = 1;                                   // atomic_units.id
+  UnitKind kind = 2;                               // atomic_units.kind
+  string statement = 3;                            // atomic_units.statement
+  float confidence = 4;                            // atomic_units.confidence
+  string extraction_method = 5;                    // atomic_units.extraction_method
+  string extraction_model = 6;                     // atomic_units.extraction_model
+  google.protobuf.Timestamp valid_from = 7;        // atomic_units.valid_from
+  google.protobuf.Timestamp valid_to = 8;          // atomic_units.valid_to
+  UnitStatus status = 9;                           // atomic_units.status
+  string subject_entity_id = 10;                   // atomic_units.subject_entity_id
+  string superseded_by_unit_id = 11;               // atomic_units.superseded_by_unit_id
+  repeated Provenance provenance = 12;             // atomic_unit_provenance rows
+}
+
+message Provenance {
+  string artifact_id = 1;                          // atomic_unit_provenance.artifact_id
+  ArtifactKind artifact_kind = 2;                  // artifacts.kind (joined)
+  string source_platform = 3;                      // artifacts.source_platform (joined)
+  string message_id = 4;                           // atomic_unit_provenance.message_id
+  string document_segment_id = 5;                  // atomic_unit_provenance.document_segment_id
+  string image_id = 6;                             // atomic_unit_provenance.image_id
+  int32 char_start = 7;                            // atomic_unit_provenance.char_start
+  int32 char_end = 8;                              // atomic_unit_provenance.char_end
+  string quote = 9;                                // atomic_unit_provenance.quote
+}
+
+message Entity {
+  string id = 1;                                   // entities.id
+  string name = 2;                                 // entities.name
+  string kind = 3;                                 // entities.kind
+  string description = 4;                          // entities.description
+}
+
+message Relationship {
+  string id = 1;                                   // relationships.id
+  string source_entity_id = 2;                     // relationships.source_entity_id
+  string target_entity_id = 3;                     // relationships.target_entity_id
+  string relation_type = 4;                        // relationships.relation_type
+  float confidence = 5;                            // relationships.confidence
+  int32 depth = 6;                                 // entity_neighborhood(...) result depth
+}
+
+message Contradiction {
+  string id = 1;                                   // contradictions.id
+  AtomicUnit unit_a = 2;                           // joined via contradictions.unit_a_id
+  AtomicUnit unit_b = 3;                           // joined via contradictions.unit_b_id
+  float score = 4;                                 // contradictions.score
+  string detection_method = 5;                     // contradictions.detection_method
+  string explanation = 6;                          // contradictions.explanation
+  ContradictionStatus status = 7;                  // contradictions.status
+  google.protobuf.Timestamp detected_at = 8;       // contradictions.detected_at
+  google.protobuf.Timestamp resolved_at = 9;       // contradictions.resolved_at
+  string resolved_by = 10;                         // contradictions.resolved_by
+  string resolution_note = 11;                     // contradictions.resolution_note
+}
+
+// ---------------------------------------------------------------------------
+// IngestService — mirrors POST /api/v1/ingest/*
+// ---------------------------------------------------------------------------
+
+service IngestService {
+  // Chat export from any platform (chatgpt | claude | generic schema).
+  rpc IngestChatExport(IngestChatExportRequest) returns (IngestResponse);
+  // Agent/session JSONL logs (claude_code | goose | aider | generic).
+  rpc IngestAgentLog(IngestAgentLogRequest) returns (IngestResponse);
+  // Manual file upload, client-streamed in chunks (documents and images).
+  rpc IngestFile(stream IngestFileChunk) returns (IngestFileResponse);
+}
+
+message IngestChatExportRequest {
+  string platform = 1;                             // -> artifacts.source_platform
+  bytes data_json = 2;                             // raw export JSON bytes
+  string filename = 3;                             // -> artifacts.original_filename
+}
+
+message IngestAgentLogRequest {
+  string platform = 1;
+  string jsonl = 2;
+  string session_id = 3;
+  string title = 4;
+}
+
+message IngestResponse {
+  string job_id = 1;                               // ingestion_jobs.id
+  string artifact_id = 2;                          // artifacts.id
+  bool deduplicated = 3;                           // content_hash matched existing row
+  int32 conversations = 4;                         // conversations rows created
+  int32 messages = 5;                              // messages rows created
+}
+
+message IngestFileChunk {
+  // First chunk must carry meta; subsequent chunks carry data only.
+  message Meta {
+    string filename = 1;                           // -> artifacts.original_filename
+    string media_type = 2;                         // -> artifacts.media_type
+    ArtifactKind kind_override = 3;                // optional explicit kind
+  }
+  oneof payload {
+    Meta meta = 1;
+    bytes data = 2;
+  }
+}
+
+message IngestFileResponse {
+  string job_id = 1;
+  string artifact_id = 2;
+  ArtifactKind kind = 3;
+  bool deduplicated = 4;
+  int32 segments = 5;                              // document_segments rows created
+}
+
+// ---------------------------------------------------------------------------
+// QueryService — mirrors GET /api/v1/{artifacts,atomic-units,entities}/…
+// ---------------------------------------------------------------------------
+
+service QueryService {
+  rpc ListArtifacts(ListArtifactsRequest) returns (ListArtifactsResponse);
+  rpc GetArtifact(GetArtifactRequest) returns (Artifact);
+  rpc ListAtomicUnits(ListAtomicUnitsRequest) returns (ListAtomicUnitsResponse);
+  rpc GetEntityGraph(GetEntityGraphRequest) returns (GetEntityGraphResponse);
+  rpc SemanticSearch(SemanticSearchRequest) returns (SemanticSearchResponse);
+}
+
+message ListArtifactsRequest {
+  ArtifactKind kind = 1;                           // filter on artifacts.kind
+  string source_platform = 2;                      // filter on artifacts.source_platform
+  int32 limit = 3;
+  int32 offset = 4;
+}
+
+message ListArtifactsResponse {
+  repeated Artifact items = 1;
+}
+
+message GetArtifactRequest {
+  string id = 1;
+}
+
+message ListAtomicUnitsRequest {
+  UnitKind kind = 1;
+  UnitStatus status = 2;
+  string subject_entity_id = 3;
+  int32 limit = 4;
+  int32 offset = 5;
+}
+
+message ListAtomicUnitsResponse {
+  repeated AtomicUnit items = 1;
+}
+
+message GetEntityGraphRequest {
+  string entity_id = 1;                            // entities.id (root)
+  int32 depth = 2;                                 // entity_neighborhood(max_depth), 1..5
+}
+
+message GetEntityGraphResponse {
+  Entity root = 1;
+  repeated Entity nodes = 2;
+  repeated Relationship edges = 3;
+  uint64 query_ms = 4;
+}
+
+message SemanticSearchRequest {
+  string text = 1;                                 // full-text (websearch) query
+  repeated float embedding = 2;                    // 768-dim vector, optional
+  string scope = 3;                                // atomic_units | messages | document_segments
+  int32 limit = 4;
+}
+
+message SemanticSearchResponse {
+  message Hit {
+    string id = 1;
+    string scope = 2;
+    string content = 3;
+    double score = 4;                              // cosine similarity or ts_rank
+    string artifact_id = 5;
+  }
+  repeated Hit hits = 1;
+}
+
+// ---------------------------------------------------------------------------
+// ContradictionService — mirrors /api/v1/contradictions/…
+// ---------------------------------------------------------------------------
+
+service ContradictionService {
+  rpc ListContradictions(ListContradictionsRequest) returns (ListContradictionsResponse);
+  rpc GetContradiction(GetContradictionRequest) returns (Contradiction);
+  rpc ResolveContradiction(ResolveContradictionRequest) returns (Contradiction);
+  rpc AnnotateContradiction(AnnotateContradictionRequest) returns (AnnotateContradictionResponse);
+}
+
+message ListContradictionsRequest {
+  ContradictionStatus status = 1;
+  int32 limit = 2;
+  int32 offset = 3;
+}
+
+message ListContradictionsResponse {
+  repeated Contradiction items = 1;
+}
+
+message GetContradictionRequest {
+  string id = 1;
+}
+
+message ResolveContradictionRequest {
+  string id = 1;
+  ContradictionStatus resolution = 2;              // RESOLVED_A/RESOLVED_B/BOTH_VALID/DISMISSED
+  string note = 3;                                 // -> contradictions.resolution_note + audit
+  string actor = 4;                                // -> contradictions.resolved_by
+}
+
+message AnnotateContradictionRequest {
+  string id = 1;
+  string note = 2;                                 // -> contradiction_audit.note
+  string actor = 3;
+}
+
+message AnnotateContradictionResponse {
+  string audit_id = 1;                             // contradiction_audit.id
+}
+
+// ---------------------------------------------------------------------------
+// ExportService — mirrors GET /api/v1/export, POST /api/v1/import
+// ---------------------------------------------------------------------------
+
+service ExportService {
+  // Streams the gather-bundle-v1 NDJSON document, chunked.
+  rpc ExportBundle(ExportBundleRequest) returns (stream BundleChunk);
+  // Accepts a chunked gather-bundle-v1 NDJSON document.
+  rpc ImportBundle(stream BundleChunk) returns (ImportBundleResponse);
+}
+
+message ExportBundleRequest {}
+
+message BundleChunk {
+  bytes data = 1;                                  // raw NDJSON bytes
+}
+
+message ImportBundleResponse {
+  message TableCount {
+    string table = 1;
+    int64 in_bundle = 2;
+    int64 inserted = 3;
+  }
+  repeated TableCount tables = 1;
+}

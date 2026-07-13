@@ -1,0 +1,34 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+body { margin: 0; }
+.app { max-width: 720px; margin: 0 auto; padding: 2rem 1.5rem; }
+header { display: flex; align-items: baseline; justify-content: space-between; }
+h1 { font-size: 1.5rem; margin: 0 0 1rem; }
+.health { font-size: 0.85rem; }
+.health.ok { color: #2e9e5b; }
+.health.warn { color: #c99700; }
+.health.down { color: #b3423a; }
+.dropzone {
+  border: 2px dashed #8884;
+  border-radius: 12px;
+  padding: 3rem 1rem;
+  text-align: center;
+  transition: border-color 0.15s, background 0.15s;
+}
+.dropzone.dragging { border-color: #4a7dff; background: #4a7dff14; }
+.dropzone button {
+  font-size: 1rem;
+  padding: 0.5rem 1.25rem;
+  border-radius: 8px;
+  border: 1px solid #8886;
+  cursor: pointer;
+}
+.dropzone button:disabled { opacity: 0.5; cursor: default; }
+.error { color: #b3423a; }
+.results { width: 100%; margin-top: 1.5rem; border-collapse: collapse; font-size: 0.9rem; }
+.results th, .results td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #8883; }
+.status-accepted { color: #2e9e5b; }
+.status-deduplicated { color: #c99700; }
+.status-rejected { color: #b3423a; }
