@@ -72,15 +72,38 @@ async fn delete_fixture_artifact(state: &AppState, filename: &str) {
         .unwrap();
 }
 
+/// Run extraction passes until every queue is empty. The integration tests
+/// run in parallel, so "my pass claimed nothing" is not the same as "nothing
+/// is in flight" — a sibling test's pass may hold rows in 'processing' or be
+/// mid-write. Wait on the actual queue state instead, with a generous cap.
 async fn drain_extraction(state: &AppState) {
-    for _ in 0..10 {
-        let stats = extract::run_one_pass(&state.pool, &state.config, None)
+    for _ in 0..200 {
+        extract::run_one_pass(&state.pool, &state.config, None)
             .await
             .expect("extraction pass");
-        if stats.pdfs_processed + stats.images_processed + stats.chunks_processed == 0 {
-            break;
+        let (busy,): (i64,) = sqlx::query_as(
+            r#"
+            SELECT
+              (SELECT count(*) FROM documents
+               WHERE extraction_status IN ('pending','processing'))
+            + (SELECT count(*) FROM images
+               WHERE ocr_status IN ('pending','processing'))
+            + (SELECT count(*) FROM messages WHERE units_extracted_at IS NULL)
+            + (SELECT count(*) FROM document_segments WHERE units_extracted_at IS NULL)
+            + (SELECT count(*) FROM images
+               WHERE units_extracted_at IS NULL AND ocr_status = 'completed'
+                 AND ocr_text IS NOT NULL AND length(trim(ocr_text)) > 0)
+            "#,
+        )
+        .fetch_one(&state.pool)
+        .await
+        .expect("queue state query");
+        if busy == 0 {
+            return;
         }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+    panic!("extraction queues did not drain within the deadline");
 }
 
 #[tokio::test]
