@@ -41,7 +41,7 @@ const TABLES: &[(&str, &str)] = &[
     (
         "messages",
         "id, conversation_id, external_id, parent_message_id, seq, role, author, \
-         model, content, created_at, metadata",
+         model, content, created_at, metadata, units_extracted_at",
     ),
     (
         "documents",
@@ -50,12 +50,13 @@ const TABLES: &[(&str, &str)] = &[
     ),
     (
         "document_segments",
-        "id, document_id, seq, page, heading, content, content_hash, embedding, metadata",
+        "id, document_id, seq, page, heading, content, content_hash, embedding, metadata, \
+         units_extracted_at",
     ),
     (
         "images",
         "id, artifact_id, width, height, exif, taken_at, ocr_text, ocr_confidence, \
-         ocr_status, caption, caption_model, metadata",
+         ocr_status, caption, caption_model, metadata, units_extracted_at",
     ),
     (
         "entities",

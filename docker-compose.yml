@@ -46,6 +46,15 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-gather}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-gather}
       GATHER_API_TOKEN: ${GATHER_API_TOKEN:-}
       GATHER_MAX_UPLOAD_MB: ${GATHER_MAX_UPLOAD_MB:-256}
+      GATHER_EXTRACTION_ENABLED: ${GATHER_EXTRACTION_ENABLED:-true}
+      GATHER_EXTRACTION_INTERVAL_SECS: ${GATHER_EXTRACTION_INTERVAL_SECS:-30}
+      GATHER_EXTRACTION_BATCH: ${GATHER_EXTRACTION_BATCH:-8}
+      GATHER_TESSERACT_PATH: ${GATHER_TESSERACT_PATH:-tesseract}
+      # OPT-IN local LLM; from a container, host Ollama is not loopback —
+      # leave empty (default) unless you deliberately route it.
+      GATHER_OLLAMA_URL: ${GATHER_OLLAMA_URL:-}
+      GATHER_OLLAMA_MODEL: ${GATHER_OLLAMA_MODEL:-llama3.2:3b}
+      GATHER_OLLAMA_EMBED_MODEL: ${GATHER_OLLAMA_EMBED_MODEL:-nomic-embed-text}
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
     ports:
       - "127.0.0.1:${GATHER_PORT:-7601}:7601"

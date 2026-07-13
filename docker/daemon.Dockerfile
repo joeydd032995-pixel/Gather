@@ -32,6 +32,7 @@ FROM debian:bookworm-slim
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl tini \
+        tesseract-ocr tesseract-ocr-eng \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --home /var/lib/gather --create-home --shell /usr/sbin/nologin gather
 

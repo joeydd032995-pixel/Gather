@@ -36,6 +36,14 @@ async fn main() -> anyhow::Result<()> {
     };
 
     tokio::spawn(gather_daemon::gauge_refresher(pool.clone()));
+    if config.extraction_enabled {
+        tokio::spawn(gather_daemon::extract::worker_loop(
+            pool.clone(),
+            config.clone(),
+        ));
+    } else {
+        tracing::info!("extraction worker disabled via GATHER_EXTRACTION_ENABLED=false");
+    }
 
     let app = routes::build_router(state);
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
