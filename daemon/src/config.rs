@@ -19,6 +19,23 @@ pub struct Config {
     pub max_upload_mb: usize,
     /// Emit JSON logs instead of human-readable ones.
     pub log_json: bool,
+    /// Explicit opt-out of the loopback-only policy (bind address and
+    /// Ollama URL checks). Containers set this; desktops should not.
+    pub allow_non_loopback: bool,
+    /// Run the background extraction worker (PDF/OCR/atomic units).
+    pub extraction_enabled: bool,
+    /// Seconds between extraction passes.
+    pub extraction_interval_secs: u64,
+    /// Max rows claimed per queue per pass.
+    pub extraction_batch: i64,
+    /// Tesseract CLI binary (name on PATH or absolute path).
+    pub tesseract_path: String,
+    /// Ollama base URL; None/empty disables all LLM/embedding features.
+    pub ollama_url: Option<String>,
+    /// Chat model for LLM-assisted extraction.
+    pub ollama_model: String,
+    /// Embedding model (must produce 768-dim vectors to match the schema).
+    pub ollama_embed_model: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -65,12 +82,59 @@ impl Config {
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
+        let env_bool = |name: &str, default: bool| {
+            std::env::var(name)
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(default)
+        };
+
         Ok(Self {
             bind_addr,
             database_url,
             api_token,
             max_upload_mb,
             log_json,
+            allow_non_loopback,
+            extraction_enabled: env_bool("GATHER_EXTRACTION_ENABLED", true),
+            extraction_interval_secs: std::env::var("GATHER_EXTRACTION_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|v: u64| v.max(1))
+                .unwrap_or(30),
+            extraction_batch: std::env::var("GATHER_EXTRACTION_BATCH")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|v: i64| v.clamp(1, 256))
+                .unwrap_or(8),
+            tesseract_path: std::env::var("GATHER_TESSERACT_PATH")
+                .unwrap_or_else(|_| "tesseract".to_string()),
+            ollama_url: std::env::var("GATHER_OLLAMA_URL")
+                .ok()
+                .filter(|u| !u.is_empty()),
+            ollama_model: std::env::var("GATHER_OLLAMA_MODEL")
+                .unwrap_or_else(|_| "llama3.2:3b".to_string()),
+            ollama_embed_model: std::env::var("GATHER_OLLAMA_EMBED_MODEL")
+                .unwrap_or_else(|_| "nomic-embed-text".to_string()),
         })
+    }
+
+    /// Baseline config for tests: loopback bind, auth off, extraction knobs
+    /// at defaults, Ollama disabled.
+    pub fn for_tests(database_url: String) -> Self {
+        Self {
+            bind_addr: "127.0.0.1:0".parse().expect("static addr"),
+            database_url,
+            api_token: None,
+            max_upload_mb: 16,
+            log_json: false,
+            allow_non_loopback: false,
+            extraction_enabled: true,
+            extraction_interval_secs: 30,
+            extraction_batch: 8,
+            tesseract_path: "tesseract".to_string(),
+            ollama_url: None,
+            ollama_model: "llama3.2:3b".to_string(),
+            ollama_embed_model: "nomic-embed-text".to_string(),
+        }
     }
 }

@@ -60,6 +60,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: daemon
+      - name: install tesseract (OCR integration tests)
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
       - name: cargo test
         working-directory: daemon
         run: cargo test --all-targets

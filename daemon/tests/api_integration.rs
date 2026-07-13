@@ -23,13 +23,7 @@ async fn test_state() -> Option<AppState> {
     };
     let pool = db::connect(&database_url).await.expect("db connect");
     db::migrate(&pool).await.expect("migrations");
-    let config = Config {
-        bind_addr: "127.0.0.1:0".parse().unwrap(),
-        database_url,
-        api_token: None,
-        max_upload_mb: 16,
-        log_json: false,
-    };
+    let config = Config::for_tests(database_url);
     Some(AppState {
         pool,
         config: Arc::new(config),

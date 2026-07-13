@@ -5,8 +5,9 @@ Everything runs on your machine. Nothing leaves it unless you explicitly opt in.
 
 This document is the engineering specification for the system in this repository. The runnable
 skeleton (daemon, schema, Docker, CI, observability, desktop shell) is committed alongside it;
-sections marked *[pipeline — Phase 1]* describe extraction/contradiction logic specified here in
-pseudocode and built out during the 8-week MVP on top of the committed schema and API.
+the extraction worker (§5) is implemented in `daemon/src/extract/`; sections marked
+*[pipeline — Phase 1]* describe remaining logic specified here in pseudocode and built out
+during the 8-week MVP on top of the committed schema and API.
 
 ---
 
@@ -63,7 +64,8 @@ pseudocode and built out during the 8-week MVP on top of the committed schema an
 2. **Normalization** — adapters emit one canonical shape regardless of platform (§2), so
    everything downstream is source-agnostic.
 
-3. **Extraction** *[pipeline — Phase 1]* — workers turn normalized content into `atomic_units`
+3. **Extraction** *(shipped: `daemon/src/extract/`)* — a background worker turns normalized
+   content into `atomic_units`
    (facts/claims/decisions/preferences/events) with per-unit `atomic_unit_provenance` rows
    pointing at the exact message, document segment, or image they came from (§5).
 
@@ -798,12 +800,18 @@ the unit of optional VPS replication (§7.5).
 
 ## 5. Extraction pipeline design
 
-All four paths converge on `atomic_units` + `atomic_unit_provenance`. The committed daemon ships
-the synchronous parts (adapter normalization; markdown/text extraction + segmentation at upload
-time — `utf8-passthrough`, deterministic heading/paragraph splitter capped at 2000 chars); the
-worker loop below is the Phase 1 build-out (pseudocode as specified). Workers claim work via the
-`pending → processing → completed|failed` status columns with `FOR UPDATE SKIP LOCKED`, so a
-crash mid-extraction is self-healing.
+All four paths converge on `atomic_units` + `atomic_unit_provenance`. **The worker below is
+implemented and tested** (`daemon/src/extract/`: `mod.rs` loop, `pdf.rs`, `image.rs`, `rules.rs`,
+`ollama.rs`, `persist.rs`), alongside the synchronous upload-time parts (adapter normalization;
+markdown/text extraction + segmentation — `utf8-passthrough`, deterministic heading/paragraph
+splitter capped at 2000 chars). Workers claim work via the `pending → processing →
+completed|failed|skipped` status columns with `FOR UPDATE SKIP LOCKED` (stale `processing` rows
+reset at startup), and unit chunks are stamped `units_extracted_at` atomically with their units,
+so a crash mid-extraction is self-healing. Two §5.1 items are deliberately deferred: OCR fallback
+for scanned PDFs (needs a native rasterizer; such PDFs are marked `skipped` with
+`metadata.reason='scanned-pdf-needs-ocr'` and stay visible on the backlog gauge) and image
+captioning (vision model). The pseudocode below remains the behavioral spec the implementation
+follows.
 
 ### 5.1 Worker loop
 

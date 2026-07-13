@@ -3,6 +3,7 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod extract;
 pub mod routes;
 
 use std::sync::Arc;
@@ -57,6 +58,10 @@ pub fn describe_metrics() {
     metrics::describe_counter!(
         "gather_extraction_units_total",
         "Atomic units produced by the extraction pipeline, by method and status"
+    );
+    metrics::describe_counter!(
+        "gather_extraction_ocr_total",
+        "Image OCR attempts, by outcome status"
     );
     metrics::describe_counter!(
         "gather_contradictions_resolved_total",
