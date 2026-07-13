@@ -8,7 +8,11 @@
 
 pub mod chatgpt;
 pub mod claude;
+pub mod copilot;
+pub mod gemini;
 pub mod generic;
+pub mod grok;
+pub mod perplexity;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -36,7 +40,10 @@ pub struct NormalizedConversation {
 
 #[derive(Debug, thiserror::Error)]
 pub enum AdapterError {
-    #[error("unsupported platform '{0}'; supported: chatgpt, claude, generic")]
+    #[error(
+        "unsupported platform '{0}'; supported: chatgpt, claude, gemini, grok, perplexity, \
+         copilot, generic"
+    )]
     UnsupportedPlatform(String),
     #[error("malformed {platform} export: {reason}")]
     Malformed {
@@ -57,6 +64,10 @@ pub fn normalize(platform: &str, data: &Value) -> Result<AdapterOutput, AdapterE
     match platform {
         "chatgpt" => chatgpt::parse(data),
         "claude" => claude::parse(data),
+        "gemini" => gemini::parse(data),
+        "grok" => grok::parse(data),
+        "perplexity" => perplexity::parse(data),
+        "copilot" => copilot::parse(data),
         "generic" => generic::parse(data),
         other => Err(AdapterError::UnsupportedPlatform(other.to_string())),
     }
@@ -75,4 +86,8 @@ pub(crate) fn ts_from_epoch_f64(secs: f64) -> Option<DateTime<Utc>> {
     let whole = secs.trunc() as i64;
     let nanos = ((secs - secs.trunc()) * 1e9) as u32;
     DateTime::from_timestamp(whole, nanos)
+}
+
+pub(crate) fn ts_from_epoch_ms(millis: f64) -> Option<DateTime<Utc>> {
+    ts_from_epoch_f64(millis / 1000.0)
 }

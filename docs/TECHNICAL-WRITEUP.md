@@ -113,10 +113,10 @@ adapter file plus a dispatch line.
 | Claude.ai | `claude` | `conversations.json` from data export; `chat_messages[]` with `sender`, `text`/`content[]` blocks, RFC 3339 timestamps | **Shipped** (`adapters/claude.rs`) |
 | Any platform / manual | `generic` | `gather-generic-v1` JSON (below) | **Shipped** (`adapters/generic.rs`) |
 | Claude Code / Goose / Aider | `claude_code`, `goose`, `aider` | JSONL session logs, one `{role, content, timestamp}` object per line (string, `{text}`, or content-block arrays all accepted) | **Shipped** via the agent-log route, which converts JSONL to `gather-generic-v1` |
-| Google Gemini | `gemini` | Takeout "My Activity" HTML/JSON: parse `MyActivity.json` entries, pair prompt (`title` beginning "Prompted") with response (`safeHtmlItem`), fold into generic schema | Phase 1 (spec: convert → generic) |
-| Grok / xAI | `grok` | Account export JSON: `conversations[].responses[]` with `sender` ∈ {human, assistant}, epoch-ms `create_time` | Phase 1 |
-| Perplexity | `perplexity` | Thread export JSON: `entries[]` with `query`/`answer` pairs and `timestamp` | Phase 1 |
-| Copilot / VS Code chat | `copilot` | `chat.json` session files from VS Code workspace storage: `requests[]` with `message.text` and `response[].value` | Phase 1 |
+| Google Gemini | `gemini` | Takeout `MyActivity.json`: prompt from `title` ("Prompted …"), response from tag-stripped `safeHtmlItem.htmlValue` (often absent in Takeout — prompt-only records still ingest) | **Shipped** (`adapters/gemini.rs`, `google-takeout-myactivity-v1`) |
+| Grok / xAI | `grok` | Account export JSON: `conversations[].responses[]` with `sender` ∈ {human, assistant}, epoch-ms `create_time` (number or numeric string); bare top-level arrays accepted | **Shipped** (`adapters/grok.rs`, `xai-export-v1`) |
+| Perplexity | `perplexity` | Thread export JSON: `threads[].entries[]` with `query`/`answer` pairs and RFC 3339 `timestamp`; single-thread top-level `entries` accepted | **Shipped** (`adapters/perplexity.rs`, `perplexity-thread-export-v1`) |
+| Copilot / VS Code chat | `copilot` | `chat.json` session files from VS Code workspace storage: `requests[]` with `message.text` and concatenated `response[].value` | **Shipped** (`adapters/copilot.rs`, `vscode-chat-session-v1`) |
 
 Every artifact records `source_platform` + `source_format_version` (e.g.
 `openai-conversations-json-v1`), so provenance, search, and contradiction detection treat all
@@ -983,11 +983,14 @@ no desktop application can defend those.
 
 - The daemon binds `127.0.0.1:7601` and **refuses to start** on a non-loopback address unless
   `GATHER_ALLOW_NON_LOOPBACK=true` is set explicitly (implemented in `config.rs`; exercised by CI).
-- Desktop flow: at first run the daemon supervisor generates a 256-bit random token and stores it
-  in the OS keychain — macOS Keychain / Windows Credential Manager / Secret Service (via the
-  `keyring` crate) — under the current OS user. The Tauri app reads the same keychain entry and
-  sends `Authorization: Bearer <token>`. Keychain ACLs make the token unreadable to other OS
-  users, which is what binds API access to the OS user session.
+- Desktop flow (**implemented**: `daemon/src/auth_token.rs` + the Tauri `get_api_token`
+  command): with `GATHER_AUTH_MODE=keychain` the daemon get-or-creates a 256-bit random token in
+  the OS keychain — macOS Keychain / Windows Credential Manager / Secret Service (`keyring`
+  crate), entry `gather-daemon`/`api-token` — under the current OS user. The Tauri app reads the
+  same entry at startup and sends `Authorization: Bearer <token>`. Keychain ACLs make the token
+  unreadable to other OS users, which is what binds API access to the OS user session. On hosts
+  without a keychain (headless/containers) the daemon logs a prominent warning and continues
+  loopback-open rather than failing; containers keep using `env` mode.
 - The daemon compares tokens in constant time (`auth.rs`) and exempts only
   `/healthz`, `/readyz`, `/metrics` (loopback-only, non-sensitive).
 - Verified on the running stack: no token → 401, wrong token → 401, correct token → 200.

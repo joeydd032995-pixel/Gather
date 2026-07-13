@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   checkHealth,
+  setApiToken,
   uploadFiles,
   type FileResult,
   type HealthState,
@@ -43,6 +44,20 @@ export default function App() {
   const [results, setResults] = useState<FileResult[]>([]);
   const [error, setError] = useState<string | null>(null);
   const fallbackInput = useRef<HTMLInputElement>(null);
+
+  // In the packaged app, pick up the daemon's bearer token from the OS
+  // keychain (written by the daemon in GATHER_AUTH_MODE=keychain).
+  useEffect(() => {
+    if (!isTauri) return;
+    import("@tauri-apps/api/core")
+      .then(({ invoke }) => invoke<string | null>("get_api_token"))
+      .then((token) => {
+        if (token) setApiToken(token);
+      })
+      .catch(() => {
+        /* keychain empty or unavailable: dev daemons run open on loopback */
+      });
+  }, []);
 
   useEffect(() => {
     let cancelled = false;

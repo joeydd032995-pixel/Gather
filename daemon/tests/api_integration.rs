@@ -190,3 +190,108 @@ async fn export_bundle_has_manifest() {
     assert_eq!(manifest["type"], json!("manifest"));
     assert_eq!(manifest["row"]["format"], json!("gather-bundle-v1"));
 }
+
+/// One fixture export per newly added platform adapter, pushed through the
+/// real router; asserts platform tagging and normalized message counts.
+#[tokio::test]
+async fn new_platform_adapters_ingest_through_the_api() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let app = routes::build_router(state.clone());
+    let salt = uuid::Uuid::new_v4().simple().to_string();
+
+    let cases: Vec<(&str, Value, usize, usize)> = vec![
+        (
+            "gemini",
+            json!([{
+                "title": format!("Prompted what is plan {salt}"),
+                "time": "2026-05-01T08:00:00Z",
+                "safeHtmlItem": {"htmlValue": "<p>The plan is <b>local-first</b>.</p>"}
+            }]),
+            1, // conversations
+            2, // messages
+        ),
+        (
+            "grok",
+            json!({"conversations": [{
+                "conversation_id": format!("grok-{salt}"),
+                "title": "vps",
+                "create_time": 1767225600000i64,
+                "responses": [
+                    {"sender": "human", "message": format!("salt {salt}: pick a region")},
+                    {"sender": "assistant", "message": "Nuremberg."}
+                ]
+            }]}),
+            1,
+            2,
+        ),
+        (
+            "perplexity",
+            json!({"threads": [{
+                "id": format!("px-{salt}"),
+                "title": "research",
+                "entries": [{"query": format!("salt {salt}: cheapest EU VPS?"),
+                             "answer": "Hetzner CX22.",
+                             "timestamp": "2026-05-01T09:00:00Z"}]
+            }]}),
+            1,
+            2,
+        ),
+        (
+            "copilot",
+            json!({
+                "sessionId": format!("cop-{salt}"),
+                "requesterUsername": "joey",
+                "requests": [{
+                    "message": {"text": format!("salt {salt}: add a readyz probe")},
+                    "timestamp": 1767225600000i64,
+                    "response": [{"value": "Added /readyz."}]
+                }]
+            }),
+            1,
+            2,
+        ),
+    ];
+
+    for (platform, data, conversations, messages) in cases {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/ingest/chat-export")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({"platform": platform, "data": data}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::ACCEPTED,
+            "{platform} ingest failed"
+        );
+        let out = body_json(res).await;
+        assert_eq!(out["deduplicated"], json!(false), "{platform}");
+        assert_eq!(out["conversations"], json!(conversations), "{platform}");
+        assert_eq!(out["messages"], json!(messages), "{platform}");
+
+        // Artifact carries the platform + format-version tags.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/v1/artifacts/{}",
+                    out["artifact_id"].as_str().unwrap()
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let artifact = body_json(res).await;
+        assert_eq!(artifact["source_platform"], json!(platform));
+        assert!(artifact["source_format_version"].as_str().unwrap().len() > 3);
+    }
+}

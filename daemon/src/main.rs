@@ -6,8 +6,9 @@ use metrics_exporter_prometheus::PrometheusBuilder;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config = Config::from_env()?;
+    let mut config = Config::from_env()?;
     gather_daemon::init_tracing(config.log_json);
+    gather_daemon::auth_token::resolve(&mut config);
 
     let metrics_handle = PrometheusBuilder::new()
         .set_buckets_for_metric(
