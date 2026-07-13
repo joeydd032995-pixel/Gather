@@ -1,0 +1,100 @@
+# Gather — local development stack: Rust daemon + Postgres/pgvector.
+#
+# Usage:
+#   cp .env.example .env        # then edit POSTGRES_PASSWORD
+#   docker compose up --build
+#
+# Offline-by-default: both ports bind to 127.0.0.1 only; neither container
+# initiates outbound connections. The optional observability stack lives in
+# observability/ (see docker compose --profile observability).
+
+name: gather
+
+services:
+  postgres:
+    build:
+      context: .
+      dockerfile: docker/postgres.Dockerfile
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-gather}
+      POSTGRES_USER: ${POSTGRES_USER:-gather}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # scram-sha-256 for password auth even on localhost
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gather} -d ${POSTGRES_DB:-gather}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2g
+
+  daemon:
+    build:
+      context: .
+      dockerfile: docker/daemon.Dockerfile
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-gather}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-gather}
+      GATHER_API_TOKEN: ${GATHER_API_TOKEN:-}
+      GATHER_MAX_UPLOAD_MB: ${GATHER_MAX_UPLOAD_MB:-256}
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+    ports:
+      - "127.0.0.1:${GATHER_PORT:-7601}:7601"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:7601/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 1g
+
+  # --------------------------------------------------------------------
+  # Optional observability (start with: docker compose --profile observability up)
+  # --------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    profiles: ["observability"]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafanadata:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  promdata:
+  grafanadata:

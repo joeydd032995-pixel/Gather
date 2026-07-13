@@ -1,0 +1,16 @@
+# Prometheus scrape configuration for the Gather daemon.
+# Used by the optional `observability` compose profile; for a bare-metal
+# daemon change the target to 127.0.0.1:7601.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: gather-daemon
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - daemon:7601
+        labels:
+          service: gather-daemon

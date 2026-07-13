@@ -1,0 +1,92 @@
+#cloud-config
+# Hardening + backup-target setup for the OPTIONAL Gather backup VM.
+# Runs once at first boot (referenced from main.tf user_data).
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - restic
+  - fail2ban
+  - unattended-upgrades
+  - cryptsetup
+
+users:
+  # Dedicated low-privilege account that restic connects as; no sudo.
+  - name: gatherbackup
+    shell: /bin/bash
+    lock_passwd: true
+
+write_files:
+  # SSH hardening: keys only, no root, no forwarding.
+  - path: /etc/ssh/sshd_config.d/99-gather-hardening.conf
+    permissions: "0644"
+    content: |
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin prohibit-password
+      X11Forwarding no
+      AllowTcpForwarding no
+      AllowAgentForwarding no
+      MaxAuthTries 3
+      LoginGraceTime 20
+
+  - path: /etc/fail2ban/jail.d/sshd.local
+    permissions: "0644"
+    content: |
+      [sshd]
+      enabled = true
+      maxretry = 4
+      bantime = 1h
+      findtime = 10m
+
+  - path: /etc/apt/apt.conf.d/51-gather-unattended
+    permissions: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+      Unattended-Upgrade::Automatic-Reboot "true";
+      Unattended-Upgrade::Automatic-Reboot-Time "04:30";
+
+  # First-login helper: initializes LUKS on the attached volume. Requires a
+  # passphrase typed interactively — it is never stored on the VM.
+  - path: /usr/local/sbin/gather-init-backup-volume
+    permissions: "0750"
+    content: |
+      #!/usr/bin/env bash
+      # Usage: sudo gather-init-backup-volume
+      # Formats the attached Hetzner volume with LUKS2 + ext4 and mounts it
+      # at /srv/backups. Run once after `terraform apply`.
+      set -euo pipefail
+      DEV=$(ls /dev/disk/by-id/scsi-0HC_Volume_* | head -n1)
+      if [ -z "$DEV" ]; then echo "no Hetzner volume attached" >&2; exit 1; fi
+      if cryptsetup isLuks "$DEV" 2>/dev/null; then
+        echo "$DEV is already LUKS-formatted; opening"
+      else
+        cryptsetup luksFormat --type luks2 "$DEV"
+      fi
+      cryptsetup open "$DEV" gatherbackup
+      if ! blkid /dev/mapper/gatherbackup >/dev/null 2>&1; then
+        mkfs.ext4 -L gatherbackup /dev/mapper/gatherbackup
+      fi
+      mkdir -p /srv/backups
+      mount /dev/mapper/gatherbackup /srv/backups
+      mkdir -p /srv/backups/restic
+      chown gatherbackup:gatherbackup /srv/backups/restic
+      echo "backup volume ready at /srv/backups/restic"
+
+runcmd:
+  - systemctl restart ssh
+  - systemctl enable --now fail2ban
+  # ufw as defense-in-depth behind the Hetzner cloud firewall.
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow 22/tcp
+  - ufw --force enable
+
+final_message: |
+  Gather backup target ready.
+  Next steps (from your LOCAL machine):
+    1. ssh root@<ip> gather-init-backup-volume   # one-time LUKS setup
+    2. copy your backup public key into /home/gatherbackup/.ssh/authorized_keys
+    3. restic -r sftp:gatherbackup@<ip>:/srv/backups/restic init
