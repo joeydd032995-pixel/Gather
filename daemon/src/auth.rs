@@ -34,7 +34,8 @@ pub async fn require_bearer(
 }
 
 /// Constant-time comparison to keep the token check timing-safe.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+/// pub(crate) so the gRPC auth interceptor can share the same implementation.
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

@@ -49,6 +49,10 @@ pub struct Config {
     pub scan_threshold: f32,
     /// Max candidates per blocking strategy per unit.
     pub scan_max_candidates: i64,
+    /// Enable the gRPC server (default true).
+    pub grpc_enabled: bool,
+    /// Address to bind the gRPC listener. Same loopback policy as bind_addr.
+    pub grpc_bind_addr: SocketAddr,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -105,6 +109,16 @@ impl Config {
             .map(|v| v.to_lowercase())
             .unwrap_or_else(|_| "env".to_string());
 
+        let grpc_enabled = env_bool("GATHER_GRPC_ENABLED", true);
+        let grpc_raw = std::env::var("GATHER_GRPC_BIND_ADDR")
+            .unwrap_or_else(|_| "127.0.0.1:7602".to_string());
+        let grpc_bind_addr: SocketAddr = grpc_raw
+            .parse()
+            .map_err(|_| ConfigError::BadBindAddr(grpc_raw.clone()))?;
+        if !grpc_bind_addr.ip().is_loopback() && !allow_non_loopback {
+            return Err(ConfigError::NonLoopbackBind(grpc_bind_addr));
+        }
+
         Ok(Self {
             bind_addr,
             database_url,
@@ -154,11 +168,14 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .map(|v: i64| v.clamp(1, 200))
                 .unwrap_or(25),
+            grpc_enabled,
+            grpc_bind_addr,
         })
     }
 
     /// Baseline config for tests: loopback bind, auth off, extraction knobs
-    /// at defaults, Ollama disabled.
+    /// at defaults, Ollama disabled, gRPC disabled (tests spawn grpc::serve
+    /// on ephemeral ports directly).
     pub fn for_tests(database_url: String) -> Self {
         Self {
             bind_addr: "127.0.0.1:0".parse().expect("static addr"),
@@ -180,6 +197,8 @@ impl Config {
             scan_batch: 32,
             scan_threshold: 0.65,
             scan_max_candidates: 25,
+            grpc_enabled: false,
+            grpc_bind_addr: "127.0.0.1:0".parse().expect("static addr"),
         }
     }
 }

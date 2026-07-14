@@ -5,6 +5,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod extract;
+pub mod grpc;
 pub mod routes;
 pub mod scan;
 
@@ -18,12 +19,16 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 
 use crate::config::Config;
+use crate::extract::ollama::OllamaClient;
 
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
     pub config: Arc<Config>,
     pub metrics: PrometheusHandle,
+    /// Shared Ollama client for server-side query embedding.
+    /// None when GATHER_OLLAMA_URL is unset.
+    pub ollama: Option<Arc<OllamaClient>>,
 }
 
 pub fn init_tracing(json: bool) {
