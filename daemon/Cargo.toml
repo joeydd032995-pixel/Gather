@@ -44,6 +44,14 @@ imagesize = "0.15"
 kamadak-exif = "0.6"
 tempfile = "3"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+tonic = { version = "0.12", features = ["transport"] }
+prost = "0.13"
+prost-types = "0.13"
+tokio-stream = "0.1"
+
+[build-dependencies]
+tonic-build = "0.12"
+protox = "0.7"
 
 [profile.release]
 lto = "thin"
@@ -52,3 +60,4 @@ strip = "symbols"
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+tonic = { version = "0.12", features = ["transport"] }
