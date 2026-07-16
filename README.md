@@ -30,7 +30,7 @@ in the write-up for Phase-0 validation, the desktop app, dashboards, and the opt
 |---|---|
 | `daemon/` | Axum daemon: ingestion (chat/agent/file), extraction worker (PDF text, image EXIF/OCR, rule-based + opt-in Ollama atomic units), query & search, export/import, contradiction scanner + review; schema in `daemon/migrations/` |
 | `apps/desktop/` | Tauri v2 + React shell with drag-and-drop / native-picker upload |
-| `proto/gather/v1/` | gRPC contract mirroring the REST API |
+| `proto/gather/v1/` | gRPC contract mirroring the REST API — served by the daemon on `127.0.0.1:7602` (tonic; `daemon/src/grpc/`) |
 | `docker/`, `docker-compose.yml` | Local stack (daemon + Postgres/pgvector, optional Prometheus/Grafana profile) |
 | `infra/terraform/` | **Optional, opt-in** Hetzner backup VM (firewall, LUKS volume, hardening) |
 | `observability/` | Prometheus scrape config + provisioned Grafana dashboard |
