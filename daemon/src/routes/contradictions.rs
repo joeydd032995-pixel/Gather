@@ -207,6 +207,21 @@ pub async fn resolve_contradiction(
     Path(id): Path<Uuid>,
     Json(req): Json<ResolveRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    let (status, actor) = resolve_core(&state.pool, id, req).await?;
+    Ok(Json(json!({
+        "id": id,
+        "status": status,
+        "resolved_by": actor,
+    })))
+}
+
+/// Shared resolution core (REST + gRPC): transactional status change, audit
+/// row, and supersede propagation into units and relationships.
+pub(crate) async fn resolve_core(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+    req: ResolveRequest,
+) -> Result<(String, String), ApiError> {
     let valid = ["resolved_a", "resolved_b", "both_valid", "dismissed"];
     if !valid.contains(&req.resolution.as_str()) {
         return Err(ApiError::BadRequest(format!(
@@ -218,7 +233,7 @@ pub async fn resolve_contradiction(
         .clone()
         .unwrap_or_else(|| "local-user".to_string());
 
-    let mut tx = state.pool.begin().await?;
+    let mut tx = pool.begin().await?;
 
     let row = sqlx::query(
         "SELECT unit_a_id, unit_b_id, status::text AS status FROM contradictions WHERE id = $1 FOR UPDATE",
@@ -297,11 +312,7 @@ pub async fn resolve_contradiction(
     metrics::counter!("gather_contradictions_resolved_total", "resolution" => req.resolution.clone())
         .increment(1);
 
-    Ok(Json(json!({
-        "id": id,
-        "status": req.resolution,
-        "resolved_by": actor,
-    })))
+    Ok((req.resolution, actor))
 }
 
 #[derive(Deserialize)]
@@ -315,12 +326,25 @@ pub async fn annotate_contradiction(
     Path(id): Path<Uuid>,
     Json(req): Json<AnnotateRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let (audit_id, actor) = annotate_core(&state.pool, id, req).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "id": audit_id, "contradiction_id": id, "actor": actor })),
+    ))
+}
+
+/// Shared annotation core (REST + gRPC).
+pub(crate) async fn annotate_core(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+    req: AnnotateRequest,
+) -> Result<(Uuid, String), ApiError> {
     if req.note.trim().is_empty() {
         return Err(ApiError::BadRequest("note must not be empty".to_string()));
     }
     let exists: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM contradictions WHERE id = $1")
         .bind(id)
-        .fetch_optional(&state.pool)
+        .fetch_optional(pool)
         .await?;
     if exists.is_none() {
         return Err(ApiError::NotFound(format!("contradiction {id}")));
@@ -337,11 +361,8 @@ pub async fn annotate_contradiction(
     .bind(id)
     .bind(&actor)
     .bind(req.note.trim())
-    .fetch_one(&state.pool)
+    .fetch_one(pool)
     .await?;
 
-    Ok((
-        StatusCode::CREATED,
-        Json(json!({ "id": audit_id, "contradiction_id": id, "actor": actor })),
-    ))
+    Ok((audit_id, actor))
 }

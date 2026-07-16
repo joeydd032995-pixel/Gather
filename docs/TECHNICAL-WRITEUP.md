@@ -18,7 +18,7 @@ the implementations follow. Remaining *[pipeline — Phase 1]* markers denote MV
 ```
 ┌──────────────────────────────── LOCAL MACHINE (trust boundary: OS user session) ─────────────────────────────────┐
 │                                                                                                                   │
-│  ┌───────────────────┐   loopback HTTP/gRPC (127.0.0.1:7601)    ┌────────────────────────────────────────────┐   │
+│  ┌───────────────────┐   loopback REST :7601 / gRPC :7602       ┌────────────────────────────────────────────┐   │
 │  │  Tauri v2 UI      │ ───────────────────────────────────────▶ │  gather-daemon (Rust / Axum)               │   │
 │  │  (React/TS)       │   Bearer token from OS keychain          │                                            │   │
 │  │  • drag-and-drop  │                                          │  ┌──────────┐  ┌────────────┐  ┌────────┐  │   │
@@ -81,8 +81,9 @@ the implementations follow. Remaining *[pipeline — Phase 1]* markers denote MV
    transactional: audit row, status change, losing unit superseded, dependent relationships
    deactivated. Implemented and tested in the committed daemon.
 
-7. **API/UI** — REST (implemented) and gRPC (contract in `proto/gather/v1/gather.proto`) expose
-   query, search, export/import, and the review workflow to the UI and downstream agents.
+7. **API/UI** — REST (`127.0.0.1:7601`) and gRPC (`127.0.0.1:7602`, contract in
+   `proto/gather/v1/gather.proto`, served by tonic from the same process) expose query, search,
+   export/import, and the review workflow to the UI and downstream agents.
 
 ### 1.3 Trust boundaries
 
@@ -701,7 +702,13 @@ When `GATHER_API_TOKEN` is set, every `/api/v1/*` request requires
 
 The gRPC contract in [`proto/gather/v1/gather.proto`](../proto/gather/v1/gather.proto) mirrors
 this surface 1:1 (`IngestService`, `QueryService`, `ContradictionService`, `ExportService`);
-every protobuf field is annotated with the `table.column` it maps to.
+every protobuf field is annotated with the `table.column` it maps to. It is **served** (tonic,
+same process, `daemon/src/grpc/`) on `127.0.0.1:7602` (`GATHER_GRPC_BIND_ADDR`, same
+loopback-unless-overridden policy as the HTTP bind; disable with `GATHER_GRPC_ENABLED=false`).
+Nontrivial logic — ingestion persistence, contradiction resolution, bundle build/import,
+search — is shared code with REST, so the two surfaces cannot drift. The same bearer token is
+enforced via `authorization: Bearer <token>` metadata (constant-time compare). File upload and
+bundle export/import stream in 64 KiB chunks (`IngestFile`, `ExportBundle`/`ImportBundle`).
 
 ### 4.1 Health & metrics
 
@@ -771,8 +778,11 @@ Per-file failures don't fail the batch:
 // response: { "scope": "...", "hits": [{ "id", "scope", "content", "score", "artifact_id" }] }
 ```
 
-Embeddings are computed by the caller (UI or pipeline) via local Ollama `nomic-embed-text`; the
-daemon itself never calls out, keeping the offline guarantee inside one process.
+When the caller supplies no `embedding` but `GATHER_OLLAMA_URL` is configured, the daemon embeds
+the query `text` server-side (local Ollama `nomic-embed-text`, loopback-only §5.3) and takes the
+vector path; if the embed call fails it degrades to full-text with a warning, so search never
+breaks when Ollama is down. Callers can still supply their own 768-dim `embedding` to skip that
+hop. With Ollama unset (the default) the daemon never calls out and full-text applies.
 `messages` are full-text only (embeddings live on units and segments by design).
 
 ### 4.4 Export / import — the `gather-bundle-v1` portable format
@@ -981,8 +991,11 @@ no desktop application can defend those.
 
 ### 7.2 Authentication — OS-user bound
 
-- The daemon binds `127.0.0.1:7601` and **refuses to start** on a non-loopback address unless
-  `GATHER_ALLOW_NON_LOOPBACK=true` is set explicitly (implemented in `config.rs`; exercised by CI).
+- The daemon binds `127.0.0.1:7601` (REST) and `127.0.0.1:7602` (gRPC) and **refuses to start**
+  on a non-loopback address unless `GATHER_ALLOW_NON_LOOPBACK=true` is set explicitly — the same
+  check guards both listeners (implemented in `config.rs`; exercised by CI). The gRPC
+  interceptor enforces the same bearer token as the REST middleware, with the same constant-time
+  comparison.
 - Desktop flow (**implemented**: `daemon/src/auth_token.rs` + the Tauri `get_api_token`
   command): with `GATHER_AUTH_MODE=keychain` the daemon get-or-creates a 256-bit random token in
   the OS keychain — macOS Keychain / Windows Credential Manager / Secret Service (`keyring`
@@ -1043,6 +1056,7 @@ variant. There is no telemetry, no update phone-home, no crash reporting.
 | Postgres image | `docker/postgres.Dockerfile` | `pgvector/pgvector:pg16` + initdb extension script + desktop-scale tuning |
 | Local stack | `docker-compose.yml` | loopback-only ports, healthcheck-gated startup, resource limits, `--profile observability` adds Prometheus+Grafana |
 | Optional VPS | `infra/terraform/` | Hetzner CX22 + 20 GB volume + default-deny firewall + cloud-init hardening; **~€5.25/mo (~$6)** list price (CX22 €3.79 + volume €0.96 + IPv4 €0.50) — ceiling $75 |
+| gRPC API | `daemon/src/grpc/` + `daemon/build.rs` | tonic server on `127.0.0.1:7602`; proto compiled at build time by `protox` (pure Rust — no system `protoc` in the image or CI) |
 | CI/CD | `.github/workflows/ci.yml` (single file) | fmt+clippy → unit+integration tests vs pgvector service → daemon release binary (+ loopback-guard smoke test) → Tauri bundles on Linux/Windows/macOS → artifacts attached to `v*` tag releases |
 | Observability | `observability/` | Prometheus scrape config + auto-provisioned 9-panel Grafana dashboard: ingestion throughput by kind, per-file document/image success rate, extraction success rate + backlog, open/resolved contradictions, graph p50/p95 vs 150 ms line, API p95 |
 
@@ -1057,9 +1071,10 @@ variant. There is no telemetry, no update phone-home, no crash reporting.
   dashboard in the Tauri app, remaining platform adapters (Gemini/Grok/Perplexity/Copilot),
   keychain token provisioning. **Go** when ≥70% of sampled units are judged usable and graph
   queries stay <150 ms at personal scale (already 5 ms at seed scale).
-- **Phase 2 — hardening**: gRPC server (contract already fixed in `gather.proto`), pgvector
-  semantic search end-to-end with local embeddings, LLM-assisted extraction, scheduled encrypted
-  export, restore drills. CI/IaC/observability are already in place from day one.
+- **Phase 2 — hardening**: gRPC server (✅ shipped: all four services on `127.0.0.1:7602`,
+  shared cores with REST), server-side query embeddings for semantic search (✅ shipped,
+  Ollama opt-in), LLM-assisted extraction (✅ shipped, §5.3), scheduled encrypted export,
+  restore drills. CI/IaC/observability are already in place from day one.
 - **Phase 3 — scale (only if measured)**: multi-user namespaces, VPS live replication.
   **Neo4j is explicitly deferred**: adopt only if recursive-CTE traversal p95 exceeds 150 ms at
   >1M relationship rows after index tuning — the `entity_neighborhood()` function is the single
@@ -1091,6 +1106,8 @@ curl -s "http://127.0.0.1:7601/api/v1/artifacts" | jq '.items[] | {kind, source_
 curl -s -X POST http://127.0.0.1:7601/api/v1/search/semantic \
      -H 'content-type: application/json' \
      -d '{"text":"<something you know is in there>","scope":"document_segments"}' | jq
+# gRPC surface (same data, 127.0.0.1:7602):
+(cd daemon && cargo run --example grpc_smoke)
 
 # 4. desktop app (drag-and-drop + native picker)
 cd apps/desktop && npm install && npm run tauri -- dev

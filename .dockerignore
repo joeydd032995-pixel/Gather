@@ -1,0 +1,7 @@
+# Keep the build context small: the Dockerfiles only COPY daemon sources,
+# migrations, proto/, and docker/ scripts.
+.git
+daemon/target
+apps/desktop/node_modules
+apps/desktop/dist
+apps/desktop/src-tauri/target

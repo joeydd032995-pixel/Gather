@@ -93,7 +93,7 @@ async fn store_artifact(
     }
 }
 
-async fn create_job(pool: &PgPool, source: &str) -> Result<Uuid, ApiError> {
+pub(crate) async fn create_job(pool: &PgPool, source: &str) -> Result<Uuid, ApiError> {
     let (id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO ingestion_jobs (source, status) VALUES ($1, 'processing') RETURNING id",
     )
@@ -103,7 +103,12 @@ async fn create_job(pool: &PgPool, source: &str) -> Result<Uuid, ApiError> {
     Ok(id)
 }
 
-async fn finish_job(pool: &PgPool, job_id: Uuid, ok: bool, stats: Value) -> Result<(), ApiError> {
+pub(crate) async fn finish_job(
+    pool: &PgPool,
+    job_id: Uuid,
+    ok: bool,
+    stats: Value,
+) -> Result<(), ApiError> {
     sqlx::query(
         r#"
         UPDATE ingestion_jobs
@@ -211,11 +216,22 @@ pub async fn ingest_chat_export(
     State(state): State<AppState>,
     Json(req): Json<ChatExportRequest>,
 ) -> Result<(StatusCode, Json<ChatExportResponse>), ApiError> {
+    let response = chat_export_core(&state, req, "rest").await?;
+    Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+/// Shared ingestion core used by both the REST handler and the gRPC
+/// IngestService (`source` distinguishes them in ingestion_jobs).
+pub(crate) async fn chat_export_core(
+    state: &AppState,
+    req: ChatExportRequest,
+    source: &str,
+) -> Result<ChatExportResponse, ApiError> {
     let normalized = adapters::normalize(&req.platform, &req.data)
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
     let raw = serde_json::to_vec(&req.data).map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    let job_id = create_job(&state.pool, "rest").await?;
+    let job_id = create_job(&state.pool, source).await?;
 
     let mut tx = state.pool.begin().await?;
     let stored = store_artifact(
@@ -251,16 +267,13 @@ pub async fn ingest_chat_export(
     metrics::counter!("gather_ingest_messages_total", "platform" => req.platform.clone())
         .increment(msg_count as u64);
 
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(ChatExportResponse {
-            job_id,
-            artifact_id: stored.id,
-            deduplicated: stored.deduplicated,
-            conversations: conv_count,
-            messages: msg_count,
-        }),
-    ))
+    Ok(ChatExportResponse {
+        job_id,
+        artifact_id: stored.id,
+        deduplicated: stored.deduplicated,
+        conversations: conv_count,
+        messages: msg_count,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +295,16 @@ pub async fn ingest_agent_log(
     State(state): State<AppState>,
     Json(req): Json<AgentLogRequest>,
 ) -> Result<(StatusCode, Json<ChatExportResponse>), ApiError> {
+    let response = agent_log_core(&state, req, "rest").await?;
+    Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+/// Shared agent-log core (REST + gRPC).
+pub(crate) async fn agent_log_core(
+    state: &AppState,
+    req: AgentLogRequest,
+    source: &str,
+) -> Result<ChatExportResponse, ApiError> {
     // Convert JSONL lines to the gather-generic-v1 shape, then reuse the
     // generic adapter so agent logs and chat exports share one code path.
     let mut messages = Vec::new();
@@ -320,7 +343,7 @@ pub async fn ingest_agent_log(
     let normalized = adapters::normalize("generic", &generic)
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
-    let job_id = create_job(&state.pool, "rest").await?;
+    let job_id = create_job(&state.pool, source).await?;
     let mut tx = state.pool.begin().await?;
     let stored = store_artifact(
         &mut tx,
@@ -355,16 +378,13 @@ pub async fn ingest_agent_log(
     metrics::counter!("gather_ingest_messages_total", "platform" => req.platform.clone())
         .increment(msg_count as u64);
 
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(ChatExportResponse {
-            job_id,
-            artifact_id: stored.id,
-            deduplicated: stored.deduplicated,
-            conversations: conv_count,
-            messages: msg_count,
-        }),
-    ))
+    Ok(ChatExportResponse {
+        job_id,
+        artifact_id: stored.id,
+        deduplicated: stored.deduplicated,
+        conversations: conv_count,
+        messages: msg_count,
+    })
 }
 
 /// Agent-log lines store content as a string, a {text} object, or an array of
@@ -546,7 +566,7 @@ fn classify(
     Ok(kind.to_string())
 }
 
-async fn ingest_one_file(
+pub(crate) async fn ingest_one_file(
     state: &AppState,
     job_id: Uuid,
     part_name: &str,

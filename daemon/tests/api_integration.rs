@@ -30,6 +30,7 @@ async fn test_state() -> Option<AppState> {
         metrics: metrics_exporter_prometheus::PrometheusBuilder::new()
             .build_recorder()
             .handle(),
+        ollama: None,
     })
 }
 

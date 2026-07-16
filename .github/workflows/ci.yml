@@ -87,6 +87,9 @@ jobs:
           GATHER_BIND_ADDR=0.0.0.0:7601 DATABASE_URL=postgres://x@localhost/x \
             ./target/release/gather-daemon
           test $? -ne 0 # must exit non-zero without GATHER_ALLOW_NON_LOOPBACK
+          GATHER_GRPC_BIND_ADDR=0.0.0.0:7602 DATABASE_URL=postgres://x@localhost/x \
+            ./target/release/gather-daemon
+          test $? -ne 0 # the gRPC listener obeys the same loopback guard
       - uses: actions/upload-artifact@v4
         with:
           name: gather-daemon-linux-x86_64
