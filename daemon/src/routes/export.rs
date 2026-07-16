@@ -97,6 +97,22 @@ const TABLES: &[(&str, &str)] = &[
 // ---------------------------------------------------------------------------
 
 pub async fn export_bundle(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
+    let out = build_bundle(&state.pool).await?;
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/x-ndjson"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"gather-bundle.ndjson\"",
+            ),
+        ],
+        out,
+    ))
+}
+
+/// Serialize the entire store as a gather-bundle-v1 NDJSON string (REST + gRPC).
+pub(crate) async fn build_bundle(pool: &sqlx::PgPool) -> Result<String, ApiError> {
     let mut out = String::new();
     out.push_str(
         &json!({
@@ -118,25 +134,14 @@ pub async fn export_bundle(State(state): State<AppState>) -> Result<impl IntoRes
             format!("SELECT row_to_json(t)::text AS j FROM (SELECT {columns} FROM {table}) t");
         // Safe: table/column names come from the TABLES constant, not input.
         let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
-            .fetch_all(&state.pool)
+            .fetch_all(pool)
             .await?;
         for row in rows {
             let j: String = row.get("j");
             out.push_str(&format!("{{\"type\":\"{table}\",\"row\":{j}}}\n"));
         }
     }
-
-    Ok((
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "application/x-ndjson"),
-            (
-                header::CONTENT_DISPOSITION,
-                "attachment; filename=\"gather-bundle.ndjson\"",
-            ),
-        ],
-        out,
-    ))
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +152,17 @@ pub async fn import_bundle(
     State(state): State<AppState>,
     body: String,
 ) -> Result<Json<Value>, ApiError> {
+    let counts = import_bundle_core(&state.pool, &body).await?;
+    Ok(Json(
+        json!({ "format": "gather-bundle-v1", "tables": counts }),
+    ))
+}
+
+/// Parse and apply a gather-bundle-v1 NDJSON document (REST + gRPC).
+pub(crate) async fn import_bundle_core(
+    pool: &sqlx::PgPool,
+    body: &str,
+) -> Result<serde_json::Map<String, Value>, ApiError> {
     // Group lines by table so inserts run in FK-dependency order regardless
     // of line order in the bundle.
     let mut by_table: std::collections::HashMap<&str, Vec<Value>> =
@@ -194,7 +210,7 @@ pub async fn import_bundle(
         ));
     }
 
-    let mut tx = state.pool.begin().await?;
+    let mut tx = pool.begin().await?;
     let mut counts = serde_json::Map::new();
     for (table, columns) in TABLES {
         let Some(rows) = by_table.get(table) else {
@@ -221,8 +237,5 @@ pub async fn import_bundle(
         );
     }
     tx.commit().await?;
-
-    Ok(Json(
-        json!({ "format": "gather-bundle-v1", "tables": counts }),
-    ))
+    Ok(counts)
 }

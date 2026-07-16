@@ -349,8 +349,41 @@ pub async fn semantic_search(
     State(state): State<AppState>,
     Json(req): Json<SemanticSearchRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let scope = req.scope.as_deref().unwrap_or("atomic_units");
+    let (scope, hits) = search_core(&state, req).await?;
+    Ok(Json(json!({ "scope": scope, "hits": hits })))
+}
+
+/// Shared semantic/full-text search core (REST + gRPC). When the caller
+/// supplies no embedding but Ollama is configured, the query text is embedded
+/// server-side so semantic ranking works out of the box; embedding failure
+/// degrades to full-text with a warning.
+pub(crate) async fn search_core(
+    state: &AppState,
+    mut req: SemanticSearchRequest,
+) -> Result<(String, Vec<SearchHit>), ApiError> {
+    let scope = req
+        .scope
+        .clone()
+        .unwrap_or_else(|| "atomic_units".to_string());
+    let scope = scope.as_str();
     let limit = clamp_limit(req.limit, 20, 100);
+
+    if req.embedding.is_none() && scope != "messages" {
+        if let (Some(text), Some(client)) = (
+            req.text.as_deref().map(str::trim).filter(|t| !t.is_empty()),
+            state.ollama.as_ref(),
+        ) {
+            match client.embed(&[text.to_string()]).await {
+                Ok(mut vectors) if vectors.first().map(Vec::len) == Some(768) => {
+                    req.embedding = vectors.pop();
+                }
+                Ok(_) => {
+                    tracing::warn!("embed model returned non-768-dim vector; full-text fallback")
+                }
+                Err(e) => tracing::warn!(error = %e, "query embedding failed; full-text fallback"),
+            }
+        }
+    }
 
     if req.embedding.is_none() && req.text.as_deref().map(str::trim).unwrap_or("").is_empty() {
         return Err(ApiError::BadRequest(
@@ -488,7 +521,7 @@ pub async fn semantic_search(
         }
     };
 
-    Ok(Json(json!({ "scope": scope, "hits": hits })))
+    Ok((scope.to_string(), hits))
 }
 
 fn hit(row: &sqlx::postgres::PgRow, scope: &str) -> SearchHit {

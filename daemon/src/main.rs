@@ -51,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
         pool: pool.clone(),
         config: Arc::new(config.clone()),
         metrics: metrics_handle,
-        ollama: ollama_client.clone(),
+        ollama: ollama_client,
     };
 
     tokio::spawn(gather_daemon::gauge_refresher(pool.clone()));
@@ -73,13 +73,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if config.grpc_enabled {
-        let grpc_pool = pool.clone();
-        let grpc_cfg = Arc::new(config.clone());
-        let grpc_ollama = ollama_client.clone();
+        let grpc_state = state.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                gather_daemon::grpc::serve(grpc_pool, grpc_cfg, grpc_ollama).await
-            {
+            if let Err(e) = gather_daemon::grpc::serve(grpc_state).await {
                 tracing::error!(error = %e, "gRPC server failed");
             }
         });

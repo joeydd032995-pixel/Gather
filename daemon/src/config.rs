@@ -110,8 +110,8 @@ impl Config {
             .unwrap_or_else(|_| "env".to_string());
 
         let grpc_enabled = env_bool("GATHER_GRPC_ENABLED", true);
-        let grpc_raw = std::env::var("GATHER_GRPC_BIND_ADDR")
-            .unwrap_or_else(|_| "127.0.0.1:7602".to_string());
+        let grpc_raw =
+            std::env::var("GATHER_GRPC_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:7602".to_string());
         let grpc_bind_addr: SocketAddr = grpc_raw
             .parse()
             .map_err(|_| ConfigError::BadBindAddr(grpc_raw.clone()))?;
