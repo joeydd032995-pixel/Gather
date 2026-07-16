@@ -1059,6 +1059,7 @@ variant. There is no telemetry, no update phone-home, no crash reporting.
 | gRPC API | `daemon/src/grpc/` + `daemon/build.rs` | tonic server on `127.0.0.1:7602`; proto compiled at build time by `protox` (pure Rust — no system `protoc` in the image or CI) |
 | CI/CD | `.github/workflows/ci.yml` (single file) | fmt+clippy → unit+integration tests vs pgvector service → daemon release binary (+ loopback-guard smoke test) → Tauri bundles on Linux/Windows/macOS → artifacts attached to `v*` tag releases |
 | Observability | `observability/` | Prometheus scrape config + auto-provisioned 9-panel Grafana dashboard: ingestion throughput by kind, per-file document/image success rate, extraction success rate + backlog, open/resolved contradictions, graph p50/p95 vs 150 ms line, API p95 |
+| Scheduled backup + restore drills | `scripts/` | OS-level scheduler (systemd `--user` timer / launchd LaunchAgent / Windows Task Scheduler) invokes `gather-backup.{sh,ps1}` on a timer — the daemon itself is never involved. Tier-1 CI drill (`ci-restore-drill.sh`) proves backup→restore→import on every push; Tier-2 (`vps-restore-drill.sh`) is a user-run runbook against a real VPS + scratch Postgres. See §11 and `docs/BACKUP-RUNBOOK.md`. |
 
 ## 9. Roadmap & go/no-go criteria
 
@@ -1073,8 +1074,11 @@ variant. There is no telemetry, no update phone-home, no crash reporting.
   queries stay <150 ms at personal scale (already 5 ms at seed scale).
 - **Phase 2 — hardening**: gRPC server (✅ shipped: all four services on `127.0.0.1:7602`,
   shared cores with REST), server-side query embeddings for semantic search (✅ shipped,
-  Ollama opt-in), LLM-assisted extraction (✅ shipped, §5.3), scheduled encrypted export,
-  restore drills. CI/IaC/observability are already in place from day one.
+  Ollama opt-in), LLM-assisted extraction (✅ shipped, §5.3), scheduled encrypted export
+  (✅ shipped: `scripts/gather-backup.{sh,ps1}` + per-OS scheduler installers — see §11),
+  restore drills (✅ shipped: Tier-1 CI drill `scripts/ci-restore-drill.sh`; Tier-2 user
+  runbook `scripts/vps-restore-drill.sh`, `docs/BACKUP-RUNBOOK.md`). CI/IaC/observability
+  are already in place from day one.
 - **Phase 3 — scale (only if measured)**: multi-user namespaces, VPS live replication.
   **Neo4j is explicitly deferred**: adopt only if recursive-CTE traversal p95 exceeds 150 ms at
   >1M relationship rows after index tuning — the `entity_neighborhood()` function is the single
@@ -1126,7 +1130,36 @@ terraform init && terraform plan \
 # 7. take a backup (only after 6, entirely at your initiative)
 curl -s http://127.0.0.1:7601/api/v1/export -o gather-bundle.ndjson
 restic -r sftp:gatherbackup@<vps-ip>:/srv/backups/restic backup gather-bundle.ndjson
+
+# 8. optional: install a recurring scheduled backup (formalizes step 7 — see §11)
+RESTIC_REPOSITORY=sftp:gatherbackup@<vps-ip>:/srv/backups/restic RESTIC_PASSWORD=<repo password> \
+  scripts/install-schedule-linux.sh   # or install-schedule-macos.sh / install-schedule-windows.ps1
+
+# 9. optional: periodically verify your off-site backup actually restores
+RESTIC_REPOSITORY=sftp:gatherbackup@<vps-ip>:/srv/backups/restic RESTIC_PASSWORD=<repo password> \
+  scripts/vps-restore-drill.sh
 ```
 
 Next engineering task after Phase-0 validation: the extraction worker loop (§5.1) —
 `documents`/`images` rows in `pending` state are already queuing work for it.
+
+## 11. Scheduled backups stay outside the daemon — on purpose
+
+§7.4 states the daemon's default outbound allowlist is empty and it initiates no
+outbound connections of its own; §7.5 states the VPS backup path is "never triggered by
+the daemon itself." Scheduled export (§9) is built entirely as OS-level automation —
+a systemd `--user` timer, a launchd LaunchAgent, or a Windows Scheduled Task — that
+invokes `scripts/gather-backup.{sh,ps1}` directly. That script does exactly what step 7
+above does by hand: export via the REST API, then `restic backup`. The daemon process is
+never aware any of this is happening and never opens an outbound connection to make it
+happen.
+
+**Do not "helpfully" move this into an in-daemon timer.** Doing so would silently break
+the security invariant this whole design is built to preserve. If unattended scheduling
+that survives logout is ever needed badly enough to reconsider this boundary, that is a
+deliberate architecture decision requiring its own review — not a refactor.
+
+See `scripts/README.md` and `docs/BACKUP-RUNBOOK.md` for the full operator guide,
+including the two-tier restore-drill design (a CI-safe synthetic round-trip, and a
+separate user-run runbook against the real VPS) and the OS-keychain/login-session
+caveats that come with scheduling a keychain-authenticated backup unattended.
