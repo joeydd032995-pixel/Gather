@@ -262,7 +262,31 @@ pub async fn resolve_or_create_entity(
     .fetch_optional(&mut **tx)
     .await?;
     if let Some((id,)) = existing {
-        return Ok(id);
+        // Re-read the resolved row under a shared lock before handing it back.
+        // A merge holds FOR UPDATE on both operands while it repoints units and
+        // relationships, and soft-deletes rather than removes the loser — so
+        // without this, an ingest that read the row just before the merge
+        // committed would still insert onto the retired node, after the
+        // repointing had already run, stranding the new data there.
+        //
+        // FOR SHARE makes both interleavings safe: if ingestion gets here
+        // first, the merge waits and repoints this unit along with the rest;
+        // if the merge got there first, this blocks until it commits and then
+        // observes merged_into_entity_id and follows it to the survivor.
+        // Only one row is ever locked here, so no cycle with the merge's
+        // ordered two-row lock is possible.
+        let merged_into: Option<Option<Uuid>> = sqlx::query_scalar(
+            "SELECT merged_into_entity_id FROM entities WHERE id = $1 FOR SHARE",
+        )
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        return match merged_into {
+            // Merges flatten descendants, so this is one hop; resolve_head_tx
+            // still walks defensively in case of rows from an older build.
+            Some(Some(head)) => crate::entities::merge::resolve_head_tx(tx, head).await,
+            _ => Ok(id),
+        };
     }
     let created: Option<(Uuid,)> = sqlx::query_as(
         r#"

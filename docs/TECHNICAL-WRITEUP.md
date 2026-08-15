@@ -1029,6 +1029,15 @@ readers on an intermediate whose units and relationships have already moved on.
 `GET /entities/{id}/graph` (REST and gRPC) resolves a merged-away id to its survivor, so stale
 links keep working.
 
+**Lock contract.** `resolve_or_create_entity` re-reads the entity it resolved with `FOR SHARE`
+before returning it, and follows `merged_into_entity_id` if set. This is what serializes ingestion
+against merging: the merge holds `FOR UPDATE` on both operands while it repoints, and soft-deletes
+rather than removes, so a plain read would let an in-flight ingest insert onto the retired node
+*after* the repointing had run — stranding that data where no query would find it. Under the lock,
+ingestion either commits first (and the merge repoints its rows with the rest) or waits and then
+resolves to the survivor. Resolution locks a single row, so it cannot form a cycle with the
+merge's ordered two-row lock.
+
 Merging also clears `contradiction_scanned_at` on both sides' units. §6.1 blocks candidate pairs
 on shared subject entity and the scanner only picks up units whose cursor is NULL (0003), so
 without that reset the merge would repoint the rows but never re-pair them — leaving exactly the

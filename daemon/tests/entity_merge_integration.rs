@@ -584,3 +584,135 @@ async fn bundle_imports_when_a_merged_row_precedes_its_winner() {
             .expect("read restored loser");
     assert_eq!(head, Some(winner), "merge state survives the round trip");
 }
+
+#[tokio::test]
+async fn concurrent_ingestion_never_lands_on_a_retired_entity() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let t = tag();
+    let winner = new_entity(&state.pool, &format!("Winner-{t}")).await;
+    let loser_name = format!("Loser-{t}");
+    let loser = new_entity(&state.pool, &loser_name).await;
+
+    // Drive the merge's critical section by hand so it can be held open mid
+    // transaction — merge_entities manages its own and cannot be paused.
+    let mut m = state.pool.begin().await.expect("begin merge txn");
+    sqlx::query("SELECT id FROM entities WHERE id IN ($1, $2) ORDER BY id FOR UPDATE")
+        .bind(winner)
+        .bind(loser)
+        .fetch_all(&mut *m)
+        .await
+        .expect("lock operands");
+    sqlx::query("UPDATE atomic_units SET subject_entity_id = $1 WHERE subject_entity_id = $2")
+        .bind(winner)
+        .bind(loser)
+        .execute(&mut *m)
+        .await
+        .expect("repoint units");
+    sqlx::query("UPDATE entities SET merged_into_entity_id = $1 WHERE id = $2")
+        .bind(winner)
+        .bind(loser)
+        .execute(&mut *m)
+        .await
+        .expect("soft-delete loser");
+    // Deliberately not committed yet.
+
+    // The extraction worker resolves the same name and writes a unit.
+    let pool = state.pool.clone();
+    let name_for_worker = loser_name.clone();
+    let statement = format!("late arrival {t}");
+    let worker = tokio::spawn(async move {
+        let mut w = pool.begin().await.expect("begin worker txn");
+        let resolved = extract::persist::resolve_or_create_entity(&mut w, &name_for_worker)
+            .await
+            .expect("resolve");
+        let unit: Uuid = sqlx::query_scalar(
+            "INSERT INTO atomic_units \
+                 (kind, statement, statement_hash, subject_entity_id, extraction_method) \
+             VALUES ('fact', $1, encode(digest($1,'sha256'),'hex'), $2, 'manual') RETURNING id",
+        )
+        .bind(&statement)
+        .bind(resolved)
+        .fetch_one(&mut *w)
+        .await
+        .expect("insert unit");
+        w.commit().await.expect("commit worker txn");
+        unit
+    });
+
+    // Let the worker reach whatever it blocks on before releasing the merge.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    m.commit().await.expect("commit merge txn");
+
+    let unit = worker.await.expect("worker task");
+
+    let subject: Uuid =
+        sqlx::query_scalar("SELECT subject_entity_id FROM atomic_units WHERE id = $1")
+            .bind(unit)
+            .fetch_one(&state.pool)
+            .await
+            .expect("read unit");
+    assert_eq!(
+        subject, winner,
+        "a unit ingested across a merge must attach to the survivor, not the retired node"
+    );
+}
+
+#[tokio::test]
+async fn a_merge_waits_for_in_flight_ingestion_rather_than_deadlocking() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let t = tag();
+    let winner = new_entity(&state.pool, &format!("Winner-{t}")).await;
+    let loser_name = format!("Loser-{t}");
+    let loser = new_entity(&state.pool, &loser_name).await;
+
+    // The reverse interleaving: ingestion resolves first and holds FOR SHARE,
+    // so the merge's FOR UPDATE must wait rather than deadlock or skip the row.
+    let mut w = state.pool.begin().await.expect("begin worker txn");
+    let resolved = extract::persist::resolve_or_create_entity(&mut w, &loser_name)
+        .await
+        .expect("resolve");
+    assert_eq!(resolved, loser, "nothing has merged yet");
+
+    let pool = state.pool.clone();
+    let merge =
+        tokio::spawn(
+            async move { entities::merge_entities(&pool, winner, loser, None, None).await },
+        );
+
+    // Give the merge time to reach the lock it must wait on.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let unit: Uuid = sqlx::query_scalar(
+        "INSERT INTO atomic_units \
+             (kind, statement, statement_hash, subject_entity_id, extraction_method) \
+         VALUES ('fact', $1, encode(digest($1,'sha256'),'hex'), $2, 'manual') RETURNING id",
+    )
+    .bind(format!("in flight {t}"))
+    .bind(resolved)
+    .fetch_one(&mut *w)
+    .await
+    .expect("insert unit");
+    w.commit().await.expect("commit worker txn");
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), merge)
+        .await
+        .expect("merge must not deadlock behind ingestion")
+        .expect("merge task")
+        .expect("merge");
+    assert!(outcome.units_repointed >= 1);
+
+    let subject: Uuid =
+        sqlx::query_scalar("SELECT subject_entity_id FROM atomic_units WHERE id = $1")
+            .bind(unit)
+            .fetch_one(&state.pool)
+            .await
+            .expect("read unit");
+    assert_eq!(
+        subject, winner,
+        "a unit written while the merge waited must be repointed with the rest"
+    );
+}
