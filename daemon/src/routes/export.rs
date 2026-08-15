@@ -90,6 +90,11 @@ const TABLES: &[(&str, &str)] = &[
         "contradiction_audit",
         "id, contradiction_id, action, actor, from_status, to_status, note, created_at",
     ),
+    // After "entities", whose rows it references on both sides.
+    (
+        "entity_merge_audit",
+        "id, winner_entity_id, loser_entity_id, action, actor, note, created_at",
+    ),
 ];
 
 // ---------------------------------------------------------------------------

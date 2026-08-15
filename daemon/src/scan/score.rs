@@ -171,7 +171,7 @@ fn antonym_predicate(a: &UnitFacts, b: &UnitFacts) -> Option<String> {
 // Text helpers
 // ---------------------------------------------------------------------------
 
-fn all_tokens(statement: &str) -> Vec<String> {
+pub(crate) fn all_tokens(statement: &str) -> Vec<String> {
     statement
         .to_lowercase()
         .split(|c: char| !c.is_alphanumeric() && c != '$' && c != '.')
@@ -200,7 +200,7 @@ fn is_negated(statement: &str) -> bool {
         .any(|t| NEGATORS.contains(&t.as_str()))
 }
 
-fn jaccard(a: &[String], b: &[String]) -> f32 {
+pub(crate) fn jaccard(a: &[String], b: &[String]) -> f32 {
     if a.is_empty() && b.is_empty() {
         return 0.0;
     }

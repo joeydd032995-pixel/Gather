@@ -143,6 +143,34 @@ curl_json POST "/api/v1/contradictions/$contradiction_id/resolve" \
   '{"resolution":"resolved_a","note":"ci-restore-drill fixture","actor":"ci-restore-drill"}' >/dev/null
 log "contradiction resolved"
 
+# Exercise the entity-resolution write path so entity_aliases and
+# entity_merge_audit carry real rows through the round trip. Extraction has
+# already created entities from the seeded conversations; we alias one and
+# merge a pair.
+log "seeding entity aliases + a merge (drives entity_aliases/entity_merge_audit)"
+entity_ids="$(curl_json GET '/api/v1/entities?limit=100' | jq -r '.items[].id')"
+first_entity="$(echo "$entity_ids" | sed -n 1p)"
+second_entity="$(echo "$entity_ids" | sed -n 2p)"
+
+if [ -z "$first_entity" ]; then
+  log "FAILED: extraction produced no entities to alias or merge"
+  exit 1
+fi
+
+curl_json POST "/api/v1/entities/$first_entity/aliases" \
+  "$(jq -n --arg a "$marker-alias" '{alias: $a}')" >/dev/null
+log "alias added to $first_entity"
+
+if [ -n "$second_entity" ]; then
+  curl_json POST "/api/v1/entities/$first_entity/merge" \
+    "$(jq -n --arg l "$second_entity" \
+      '{loser_id: $l, note: "ci-restore-drill fixture", actor: "ci-restore-drill"}')" >/dev/null
+  log "merged $second_entity into $first_entity"
+else
+  log "FAILED: expected at least two entities from the seeded fixtures"
+  exit 1
+fi
+
 # --------------------------------------------------------------- export ----
 before_bundle="$workdir/gather-bundle-before.ndjson"
 log "exporting bundle"
@@ -193,12 +221,11 @@ curl -fsS -X POST -H "Authorization: Bearer $TOKEN" \
 # table the format version covers), not a per-export indicator of which
 # tables actually hold data — so it cannot be used to detect "this table
 # should have had rows but didn't". Instead, assert against the specific
-# tables this drill's own seed data is known to drive. entity_aliases is
-# deliberately excluded: verified directly against the source (no `INSERT
-# INTO entity_aliases` exists anywhere in daemon/src today, confirmed by
-# grep — it is read-only dead weight in the current extraction pipeline,
-# a pre-existing product gap outside this drill's scope, not a regression).
-expected_populated_tables="ingestion_jobs artifacts conversations messages documents document_segments images entities atomic_units atomic_unit_provenance relationships contradictions contradiction_audit"
+# tables this drill's own seed data is known to drive. entity_aliases and
+# entity_merge_audit are now included: the entity-resolution write path seeds
+# both above. (They were previously excluded because nothing in daemon/src
+# ever wrote entity_aliases — that gap is what the merge feature closed.)
+expected_populated_tables="ingestion_jobs artifacts conversations messages documents document_segments images entities entity_aliases atomic_units atomic_unit_provenance relationships contradictions contradiction_audit entity_merge_audit"
 
 for table in $expected_populated_tables; do
   counts="$(jq -r --arg t "$table" '.tables[$t] // empty | "\(.in_bundle) \(.inserted)"' "$import_response")"

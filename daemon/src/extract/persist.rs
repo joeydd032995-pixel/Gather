@@ -234,7 +234,11 @@ pub async fn persist_chunk_units(
 
 /// Resolve an entity name against entities + aliases (case-insensitive),
 /// creating a kind='other' entity on first sight.
-async fn resolve_or_create_entity(
+///
+/// Public because it is the read counterpart to the merge write path in
+/// `crate::entities` — after a merge, the loser's name must resolve here to
+/// the winner, and the integration suite asserts exactly that.
+pub async fn resolve_or_create_entity(
     tx: &mut Transaction<'_, Postgres>,
     name: &str,
 ) -> Result<Uuid, ApiError> {

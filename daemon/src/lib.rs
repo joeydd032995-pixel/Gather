@@ -3,6 +3,7 @@ pub mod auth;
 pub mod auth_token;
 pub mod config;
 pub mod db;
+pub mod entities;
 pub mod error;
 pub mod extract;
 pub mod grpc;

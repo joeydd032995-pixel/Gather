@@ -196,6 +196,11 @@ impl pb::query_service_server::QueryService for QueryApi {
         let depth = req.depth.clamp(1, 5);
         let started = Instant::now();
 
+        // Merged-away ids resolve to the surviving entity, same as REST.
+        let entity_id = crate::entities::resolve_head(&self.state.pool, entity_id)
+            .await
+            .map_err(status_from)?;
+
         let root = sqlx::query(
             "SELECT id, name, kind::text AS kind, description FROM entities WHERE id = $1",
         )
