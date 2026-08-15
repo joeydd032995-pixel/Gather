@@ -207,19 +207,37 @@ pub async fn add_alias(
         return Err(ApiError::BadRequest("alias must not be empty".to_string()));
     }
 
-    let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM entities WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await?;
-    if exists.is_none() {
-        return Err(ApiError::NotFound(format!("entity {id}")));
+    // A client holding a stale id could otherwise hang the alias on a
+    // merged-away entity, which resolve_or_create_entity would then hand back
+    // — reviving the node the merge retired.
+    let target: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT merged_into_entity_id FROM entities WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.pool)
+            .await?;
+    match target {
+        None => return Err(ApiError::NotFound(format!("entity {id}"))),
+        Some(Some(head)) => {
+            return Err(ApiError::BadRequest(format!(
+                "entity {id} has been merged into {head}; alias that entity instead"
+            )))
+        }
+        Some(None) => {}
     }
 
-    // An alias that already names a different live entity would make
-    // resolve_or_create_entity ambiguous — that pair should be merged instead.
+    // An alias that already resolves to a different live entity — whether as
+    // that entity's name or as one of its aliases — would make
+    // resolve_or_create_entity's `UNION … LIMIT 1` nondeterministic. Such a
+    // pair should be merged instead.
     let clash: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM entities \
-         WHERE lower(name) = lower($1) AND id <> $2 AND merged_into_entity_id IS NULL",
+        "SELECT e.id FROM entities e \
+           WHERE lower(e.name) = lower($1) AND e.id <> $2 AND e.merged_into_entity_id IS NULL \
+         UNION \
+         SELECT a.entity_id FROM entity_aliases a \
+           JOIN entities e2 ON e2.id = a.entity_id \
+           WHERE lower(a.alias) = lower($1) AND a.entity_id <> $2 \
+             AND e2.merged_into_entity_id IS NULL \
+         LIMIT 1",
     )
     .bind(alias)
     .bind(id)
@@ -227,7 +245,7 @@ pub async fn add_alias(
     .await?;
     if let Some(other) = clash {
         return Err(ApiError::BadRequest(format!(
-            "'{alias}' is already the name of entity {other}; merge them instead"
+            "'{alias}' already resolves to entity {other}; merge them instead"
         )));
     }
 

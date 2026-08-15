@@ -24,10 +24,16 @@ pub struct MergeOutcome {
     /// loser's own name).
     pub aliases_added: u64,
     pub units_repointed: u64,
+    /// Units whose contradiction-scan cursor was cleared so the newly-shared
+    /// subject entity gets re-paired (both sides of the merge).
+    pub units_requeued_for_scan: u64,
     pub relationships_repointed: u64,
     /// Edges dropped because repointing them would have violated
     /// `relationships_no_self_loop` or `relationships_edge_uq`.
     pub relationships_dropped: u64,
+    /// Entities previously merged into the loser, repointed at the winner so
+    /// the merge graph stays exactly one level deep.
+    pub descendants_flattened: u64,
 }
 
 /// Merge `loser` into `winner` in one transaction.
@@ -85,9 +91,9 @@ pub async fn merge_entities(
         let id: Uuid = row.get("id");
         let name: String = row.get("name");
         let merged_into: Option<Uuid> = row.get("merged_into_entity_id");
-        // Merging into or from an already-merged entity would build a chain
-        // that every reader would then have to walk. Reject instead; the
-        // caller can re-target at the surviving head.
+        // Rejecting an already-merged operand is only half of keeping the
+        // merge graph one level deep — a live entity that has itself absorbed
+        // others is still a legal loser, so step 4b flattens its descendants.
         if let Some(head) = merged_into {
             return Err(ApiError::BadRequest(format!(
                 "entity {id} is already merged into {head}"
@@ -129,13 +135,34 @@ pub async fn merge_entities(
         .await?;
 
     // 2. Units whose subject was the loser now describe the winner.
-    let units_repointed =
-        sqlx::query("UPDATE atomic_units SET subject_entity_id = $1 WHERE subject_entity_id = $2")
-            .bind(winner_id)
-            .bind(loser_id)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
+    //
+    // Clearing contradiction_scanned_at requeues them: §6.1 blocks candidate
+    // pairs on shared subject entity, so these units could never be paired
+    // against the winner's while the entities were separate. The scanner only
+    // picks up units whose cursor is NULL (0003), so without this reset the
+    // merge would repoint the rows but never surface the conflicts that the
+    // split entity was suppressing — the whole point of resolving entities.
+    let units_repointed = sqlx::query(
+        "UPDATE atomic_units SET subject_entity_id = $1, contradiction_scanned_at = NULL \
+         WHERE subject_entity_id = $2",
+    )
+    .bind(winner_id)
+    .bind(loser_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+
+    // The winner's own units need re-pairing too: a unit is scanned once, so
+    // those already stamped would otherwise never see the newly-arrived ones.
+    let units_requeued = sqlx::query(
+        "UPDATE atomic_units SET contradiction_scanned_at = NULL \
+         WHERE subject_entity_id = $1 AND contradiction_scanned_at IS NOT NULL \
+           AND status = 'active'",
+    )
+    .bind(winner_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
 
     // 3a. An edge directly between the two entities becomes a self-loop once
     //     repointed, which `relationships_no_self_loop` rejects. Drop those.
@@ -204,6 +231,21 @@ pub async fn merge_entities(
         .execute(&mut *tx)
         .await?;
 
+    // 4b. Flatten: anything previously merged INTO the loser now points at the
+    //     winner directly. Rejecting already-merged operands (above) is not
+    //     enough to prevent chains — a live entity that has itself absorbed
+    //     others is a legal loser, so C→B followed by B→A would leave C→B→A.
+    //     Keeping depth at exactly one means resolve_head is always one hop
+    //     and never lands on an intermediate whose data has moved on.
+    let descendants_flattened = sqlx::query(
+        "UPDATE entities SET merged_into_entity_id = $1 WHERE merged_into_entity_id = $2",
+    )
+    .bind(winner_id)
+    .bind(loser_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+
     // 5. Audit trail, same intent as contradiction_audit.
     sqlx::query(
         "INSERT INTO entity_merge_audit (winner_entity_id, loser_entity_id, action, actor, note) \
@@ -227,8 +269,10 @@ pub async fn merge_entities(
         loser_name,
         aliases_added,
         units_repointed,
+        units_requeued_for_scan: units_repointed + units_requeued,
         relationships_repointed: sources + targets,
         relationships_dropped: self_loops + duplicates,
+        descendants_flattened,
     })
 }
 

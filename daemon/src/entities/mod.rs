@@ -22,9 +22,15 @@ pub use similarity::DEFAULT_THRESHOLD;
 /// far more.
 const TEXT_PASS_ENTITY_CAP: i64 = 2_000;
 
-/// Max cosine distance for the embedding pass; the complement of the score
-/// threshold, since `<=>` returns distance and callers think in similarity.
-const EMBEDDING_MAX_DISTANCE: f64 = 0.35;
+/// The embedding pass is filtered by `1 - threshold`, since `<=>` returns
+/// distance while callers think in similarity. Deriving it from the caller's
+/// threshold (rather than a fixed cutoff) keeps SQL and the API agreeing: a
+/// fixed 0.35 would silently drop pairs at cosine 0.62 that the default 0.6
+/// threshold accepts, and the text pass cannot recover them when the names
+/// differ.
+fn max_distance_for(threshold: f32) -> f64 {
+    (1.0 - threshold as f64).clamp(0.0, 1.0)
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EntityRef {
@@ -102,12 +108,22 @@ pub async fn merge_suggestions(
             JOIN entities b ON a.id < b.id
             WHERE a.merged_into_entity_id IS NULL AND b.merged_into_entity_id IS NULL
               AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL
-              AND (a.embedding <=> b.embedding) < $1
+              AND (a.embedding <=> b.embedding) <= $1
+              -- Filtered here rather than after LIMIT: dismissed pairs would
+              -- otherwise consume the budget on every request and starve
+              -- lower-ranked live ones, which the text pass cannot recover
+              -- when the names differ.
+              AND NOT EXISTS (
+                  SELECT 1 FROM entity_merge_audit d
+                  WHERE d.action = 'dismiss'
+                    AND ((d.winner_entity_id = a.id AND d.loser_entity_id = b.id)
+                      OR (d.winner_entity_id = b.id AND d.loser_entity_id = a.id))
+              )
             ORDER BY a.embedding <=> b.embedding
             LIMIT $2
             "#,
         )
-        .bind(EMBEDDING_MAX_DISTANCE)
+        .bind(max_distance_for(threshold))
         .bind(limit)
         .fetch_all(pool)
         .await?;

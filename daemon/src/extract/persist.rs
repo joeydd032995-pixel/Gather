@@ -248,7 +248,13 @@ pub async fn resolve_or_create_entity(
         SELECT e.id FROM entities e
         WHERE lower(e.name) = lower($1) AND e.merged_into_entity_id IS NULL
         UNION
-        SELECT a.entity_id FROM entity_aliases a WHERE lower(a.alias) = lower($1)
+        -- Resolve through the alias owner's merge pointer rather than trusting
+        -- it: an alias left on a merged-away entity would otherwise hand back
+        -- the retired node and attach new units to it.
+        SELECT coalesce(owner.merged_into_entity_id, owner.id)
+        FROM entity_aliases a
+        JOIN entities owner ON owner.id = a.entity_id
+        WHERE lower(a.alias) = lower($1)
         LIMIT 1
         "#,
     )

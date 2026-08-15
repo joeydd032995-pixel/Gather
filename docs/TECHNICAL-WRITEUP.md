@@ -1021,9 +1021,18 @@ make the naive "just repoint the foreign keys" version abort:
    index, and a later sighting of that name now resolves through the alias to the winner.
 5. An `entity_merge_audit` row records actor/note, mirroring `contradiction_audit`.
 
-Merging an already-merged entity is rejected rather than chained, so readers never walk a chain;
-`GET /entities/{id}/graph` (REST and gRPC) still resolves a merged-away id to its survivor, so
-stale links keep working. Nothing is auto-merged: every merge is a reviewer decision, taken in the
+The merge graph is kept exactly one level deep two ways: an already-merged entity is rejected as
+an operand, and anything previously merged **into** the loser is repointed at the winner in the
+same transaction. Rejection alone is insufficient — a live entity that has itself absorbed others
+is a legal loser, so `C→B` followed by `B→A` would otherwise leave the chain `C→B→A` and strand
+readers on an intermediate whose units and relationships have already moved on.
+`GET /entities/{id}/graph` (REST and gRPC) resolves a merged-away id to its survivor, so stale
+links keep working.
+
+Merging also clears `contradiction_scanned_at` on both sides' units. §6.1 blocks candidate pairs
+on shared subject entity and the scanner only picks up units whose cursor is NULL (0003), so
+without that reset the merge would repoint the rows but never re-pair them — leaving exactly the
+suppressed conflicts this feature exists to surface. Nothing is auto-merged: every merge is a reviewer decision, taken in the
 desktop app's **Entities** tab, which reuses the contradiction review-and-confirm shape.
 
 ---

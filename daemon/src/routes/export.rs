@@ -216,6 +216,17 @@ pub(crate) async fn import_bundle_core(
     }
 
     let mut tx = pool.begin().await?;
+
+    // TABLES fixes the order between tables, but not within one. `entities` is
+    // self-referential via merged_into_entity_id (DEFERRABLE INITIALLY
+    // IMMEDIATE, 0001), and the export emits its rows unordered — so a bundle
+    // where a merged-away row precedes its winner would abort on the FK before
+    // the winner exists. Deferring to COMMIT makes a bundle restorable
+    // regardless of row order and merge direction.
+    sqlx::query("SET CONSTRAINTS ALL DEFERRED")
+        .execute(&mut *tx)
+        .await?;
+
     let mut counts = serde_json::Map::new();
     for (table, columns) in TABLES {
         let Some(rows) = by_table.get(table) else {

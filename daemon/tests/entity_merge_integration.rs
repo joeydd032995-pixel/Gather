@@ -8,7 +8,10 @@
 
 use std::sync::Arc;
 
+use axum::body::Body;
+use axum::http::{header, Request, StatusCode};
 use sqlx::Row;
+use tower::ServiceExt;
 use uuid::Uuid;
 
 use gather_daemon::config::Config;
@@ -384,4 +387,200 @@ async fn merge_guards_reject_bad_input() {
             .is_err(),
         "merging an already-merged entity must be rejected"
     );
+}
+
+// --- regressions for the review findings on PR #9 ---------------------------
+
+#[tokio::test]
+async fn merge_requeues_both_sides_for_contradiction_scanning() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let t = tag();
+    let winner = new_entity(&state.pool, &format!("Winner-{t}")).await;
+    let loser = new_entity(&state.pool, &format!("Loser-{t}")).await;
+
+    // Both sides already scanned: §6.1 blocks candidates on shared subject
+    // entity, so these could never have been paired while the entities were
+    // separate — and the scanner only picks up units whose cursor is NULL.
+    let mut units = Vec::new();
+    for (owner, label) in [(winner, "winner"), (loser, "loser")] {
+        let id: Uuid = sqlx::query_scalar(
+            "INSERT INTO atomic_units \
+                 (kind, statement, statement_hash, subject_entity_id, extraction_method, \
+                  contradiction_scanned_at) \
+             VALUES ('fact', $1, encode(digest($1,'sha256'),'hex'), $2, 'manual', now()) \
+             RETURNING id",
+        )
+        .bind(format!("{label} statement {t}"))
+        .bind(owner)
+        .fetch_one(&state.pool)
+        .await
+        .expect("insert scanned unit");
+        units.push(id);
+    }
+
+    let outcome = entities::merge_entities(&state.pool, winner, loser, None, None)
+        .await
+        .expect("merge");
+    assert_eq!(outcome.units_requeued_for_scan, 2, "both sides requeued");
+
+    for id in units {
+        let cursor: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT contradiction_scanned_at FROM atomic_units WHERE id = $1")
+                .bind(id)
+                .fetch_one(&state.pool)
+                .await
+                .expect("read cursor");
+        assert!(
+            cursor.is_none(),
+            "merging must requeue units, or the conflicts it unblocks are never scanned"
+        );
+    }
+}
+
+#[tokio::test]
+async fn merging_a_previous_winner_flattens_instead_of_chaining() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let t = tag();
+    let a = new_entity(&state.pool, &format!("A-{t}")).await;
+    let b = new_entity(&state.pool, &format!("B-{t}")).await;
+    let c = new_entity(&state.pool, &format!("C-{t}")).await;
+
+    // C is absorbed by B; B is still live, so it is a legal loser afterwards.
+    entities::merge_entities(&state.pool, b, c, None, None)
+        .await
+        .expect("merge c into b");
+    let outcome = entities::merge_entities(&state.pool, a, b, None, None)
+        .await
+        .expect("merge b into a");
+
+    assert_eq!(outcome.descendants_flattened, 1, "c repointed at a");
+
+    // Without flattening this would be the chain C→B→A.
+    let c_head: Option<Uuid> =
+        sqlx::query_scalar("SELECT merged_into_entity_id FROM entities WHERE id = $1")
+            .bind(c)
+            .fetch_one(&state.pool)
+            .await
+            .expect("read c");
+    assert_eq!(c_head, Some(a), "merge graph must stay one level deep");
+    assert_eq!(
+        entities::resolve_head(&state.pool, c).await.expect("head"),
+        a
+    );
+}
+
+#[tokio::test]
+async fn aliases_never_resolve_to_a_merged_away_entity() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let t = tag();
+    let winner = new_entity(&state.pool, &format!("Winner-{t}")).await;
+    let loser = new_entity(&state.pool, &format!("Loser-{t}")).await;
+    let stale_alias = format!("StaleAlias-{t}");
+
+    entities::merge_entities(&state.pool, winner, loser, None, None)
+        .await
+        .expect("merge");
+
+    // Simulate an alias that ended up on the retired node anyway (e.g. written
+    // by an older build). The resolver must still hand back the survivor.
+    sqlx::query("INSERT INTO entity_aliases (entity_id, alias) VALUES ($1, $2)")
+        .bind(loser)
+        .bind(&stale_alias)
+        .execute(&state.pool)
+        .await
+        .expect("insert stale alias");
+
+    let mut tx = state.pool.begin().await.expect("begin");
+    let resolved = extract::persist::resolve_or_create_entity(&mut tx, &stale_alias)
+        .await
+        .expect("resolve");
+    tx.commit().await.expect("commit");
+
+    assert_eq!(
+        resolved, winner,
+        "an alias owned by a merged-away entity must resolve through to the survivor"
+    );
+}
+
+#[tokio::test]
+async fn bundle_imports_when_a_merged_row_precedes_its_winner() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let t = tag();
+    let winner = new_entity(&state.pool, &format!("Winner-{t}")).await;
+    let loser = new_entity(&state.pool, &format!("Loser-{t}")).await;
+    entities::merge_entities(&state.pool, winner, loser, None, None)
+        .await
+        .expect("merge");
+
+    // Capture both rows exactly as the exporter emits them, then delete them.
+    // Scoped to this test's own two entities rather than TRUNCATE, so the
+    // suite stays safe to run in parallel against a shared database.
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT row_to_json(t)::text FROM (\
+             SELECT id, name, kind, description, merged_into_entity_id, embedding, metadata, \
+                    created_at, updated_at \
+             FROM entities WHERE id = $1 OR id = $2) t",
+    )
+    .bind(winner)
+    .bind(loser)
+    .fetch_all(&state.pool)
+    .await
+    .expect("export rows");
+    assert_eq!(rows.len(), 2);
+
+    let line_for = |id: Uuid| -> String {
+        let row = rows
+            .iter()
+            .find(|r| r.contains(&id.to_string()))
+            .expect("row present");
+        format!(r#"{{"type":"entities","row":{row}}}"#)
+    };
+    // The failing order: the merged-away row before the winner it references.
+    // entities.merged_into_entity_id is DEFERRABLE INITIALLY IMMEDIATE and the
+    // exporter emits rows unordered, so this bundle is legitimately producible.
+    let bundle = format!(
+        "{}\n{}\n{}\n",
+        r#"{"type":"manifest","row":{"format":"gather-bundle-v1","tables":["entities"]}}"#,
+        line_for(loser),
+        line_for(winner),
+    );
+
+    sqlx::query("DELETE FROM entities WHERE id = $1 OR id = $2")
+        .bind(loser)
+        .bind(winner)
+        .execute(&state.pool)
+        .await
+        .expect("delete");
+
+    let app = gather_daemon::routes::build_router(state.clone());
+    let res = app
+        .oneshot(
+            Request::post("/api/v1/import")
+                .header(header::CONTENT_TYPE, "application/x-ndjson")
+                .body(Body::from(bundle))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "a bundle must restore regardless of merge direction and row order"
+    );
+
+    let head: Option<Uuid> =
+        sqlx::query_scalar("SELECT merged_into_entity_id FROM entities WHERE id = $1")
+            .bind(loser)
+            .fetch_one(&state.pool)
+            .await
+            .expect("read restored loser");
+    assert_eq!(head, Some(winner), "merge state survives the round trip");
 }

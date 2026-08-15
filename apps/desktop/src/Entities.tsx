@@ -46,6 +46,23 @@ function EntityFacts({ id }: { id: string }) {
         </li>
       )}
       {detail.description && <li>{detail.description}</li>}
+      {detail.audit.length > 0 && (
+        <li>
+          {/* Prior merge decisions are context for this one, which is not
+              casually reversible — so surface them rather than just fetch them. */}
+          <details className="audit">
+            <summary>merge history ({detail.audit.length})</summary>
+            <ul>
+              {detail.audit.map((a, i) => (
+                <li key={i}>
+                  {new Date(a.created_at).toLocaleString()} — {a.actor}: {a.action}
+                  {a.note ? ` — ${a.note}` : ""}
+                </li>
+              ))}
+            </ul>
+          </details>
+        </li>
+      )}
     </ul>
   );
 }
