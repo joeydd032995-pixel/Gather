@@ -1127,6 +1127,7 @@ variant. There is no telemetry, no update phone-home, no crash reporting.
 | gRPC API | `daemon/src/grpc/` + `daemon/build.rs` | tonic server on `127.0.0.1:7602`; proto compiled at build time by `protox` (pure Rust — no system `protoc` in the image or CI) |
 | CI/CD | `.github/workflows/ci.yml` (single file) | fmt+clippy → unit+integration tests vs pgvector service → daemon release binary (+ loopback-guard smoke test) → Tauri bundles on Linux/Windows/macOS → artifacts attached to `v*` tag releases |
 | Observability | `observability/` | Prometheus scrape config + auto-provisioned 9-panel Grafana dashboard: ingestion throughput by kind, per-file document/image success rate, extraction success rate + backlog, open/resolved contradictions, graph p50/p95 vs 150 ms line, API p95 |
+| Go/no-go measurement | `scripts/graph-benchmark.sh`, `scripts/unit-quality-sample.sh` | Produces the §9 gate numbers. The benchmark seeds a hub-heavy graph (shape, not row count, dominates traversal cost — see §9), reports hub vs long-tail p50/p95/p99 against the 150 ms line, and prints `EXPLAIN (ANALYZE, BUFFERS)` for the slowest case so the "after index tuning" precondition is answerable. The sampler draws a reproducible unit sample for human review and scores it. CI runs a cut-down tier-1 benchmark as a regression guard only. See `docs/BENCHMARK-RUNBOOK.md`. |
 | Scheduled backup + restore drills | `scripts/` | OS-level scheduler (systemd `--user` timer / launchd LaunchAgent / Windows Task Scheduler) invokes `gather-backup.{sh,ps1}` on a timer — the daemon itself is never involved. Tier-1 CI drill (`ci-restore-drill.sh`) proves backup→restore→import on every push; Tier-2 (`vps-restore-drill.sh`) is a user-run runbook against a real VPS + scratch Postgres. See §11 and `docs/BACKUP-RUNBOOK.md`. |
 
 ## 9. Roadmap & go/no-go criteria
@@ -1142,8 +1143,9 @@ variant. There is no telemetry, no update phone-home, no crash reporting.
   daemon `print-api-token` + the app's `get_api_token`), entity resolution (✅ shipped, §6.4 —
   aliases and reviewed merges, so the graph keeps one node per real-world thing).
   **Go** when ≥70% of sampled units are judged usable and graph queries stay <150 ms at personal
-  scale (already 5 ms at seed scale). *The go/no-go numbers themselves are not yet measured at
-  scale — that harness is the next piece of work, and it also produces the Phase 3 trigger below.*
+  scale. The latency half is now measurable and measured — see §9.1. The quality half needs a
+  human pass over `scripts/unit-quality-sample.sh sample`; the harness supplies the sampling and
+  arithmetic, not the judgment, so that number stays **unmeasured until someone reviews a sheet**.
 - **Phase 2 — hardening**: gRPC server (✅ shipped: all four services on `127.0.0.1:7602`,
   shared cores with REST), server-side query embeddings for semantic search (✅ shipped,
   Ollama opt-in), LLM-assisted extraction (✅ shipped, §5.3), scheduled encrypted export
@@ -1154,7 +1156,53 @@ variant. There is no telemetry, no update phone-home, no crash reporting.
 - **Phase 3 — scale (only if measured)**: multi-user namespaces, VPS live replication.
   **Neo4j is explicitly deferred**: adopt only if recursive-CTE traversal p95 exceeds 150 ms at
   >1M relationship rows after index tuning — the `entity_neighborhood()` function is the single
-  seam where a graph-store swap would land.
+  seam where a graph-store swap would land. **The trigger is not met on the evidence in §9.1**;
+  what the measurement actually found are two Postgres-side problems, both fixable without
+  changing graph store.
+
+### 9.1 Measured traversal latency
+
+`scripts/graph-benchmark.sh`, 50k entities / **1,184,926 relationship rows** (above the >1M bar),
+skew ratio max/median degree = 2049× (max 53,281, median 26), alpha 3.0, seed 0.42, 20 roots per
+tier × 3 repeats, 5 s timeout. Postgres 16 + pgvector 0.6. p95 in ms:
+
+| tier | depth | jit=on (as shipped) | jit=off | completed |
+|---|---|---|---|---|
+| hub | 1 | 261.7 **OVER** | **52.0 under** | 60/60 |
+| hub | 2 | timeout | timeout | 0/60 |
+| hub | 3 | timeout | timeout | 0/60 |
+| long-tail | 1 | 242.8 **OVER** | **1.2 under** | 60/60 |
+| long-tail | 2 | 591.1 **OVER** | 399.6 **OVER** | 60/60 |
+| long-tail | 3 | timeout | timeout | 3/60 |
+
+Read as-shipped, every row is over the line — which reads like grounds for the Neo4j clause. It
+is not. Two separate causes, and neither is the graph store:
+
+**1. Depth 1 is JIT compilation, not traversal.** The tell is that long-tail depth 1 (242.8 ms)
+and hub depth 1 (261.7 ms) are near-identical despite a 2049× difference in degree; traversal cost
+cannot be degree-independent. `EXPLAIN` shows the recursive CTE estimating 191,173 rows where 16
+exist, and that inflated cost crosses `jit_above_cost`: Postgres spends ~225 ms compiling a query
+that runs in ~3 ms. With `jit=off` both tiers land **well under** the 150 ms line at >1M rows.
+This is the "after index tuning" precondition doing its job — the available tuning here is a
+planner/JIT setting, not an index.
+
+**2. Depth 3 (and hub depth 2) is genuine path explosion.** Unrelated to JIT: the depth-3 plan
+emits 196,878 rows with `temp read=26349 written=39936`, and JIT is only 225 ms of 2458 ms. This
+is the per-row `visited` array (§6.4 note below) enumerating **paths rather than nodes**. An
+earlier uncapped run exhausted the host disk this way, which is why the harness now bounds
+`temp_file_limit` per query.
+
+**Depth 2 is the case that matters most** — it is the route default (`GET
+/api/v1/entities/{id}/graph?depth=2`) — and it stays over the line even with JIT off (399.6 ms
+p95, long-tail). That is the real open item, and it is a query-shape problem in
+`entity_neighborhood()`, not a Postgres-vs-Neo4j one.
+
+**Caveats, so these numbers are not over-read.** This is a synthetic adversarial graph: alpha 3.0
+over 50k entities produces a single hub adjacent to most of the graph, which a personal knowledge
+base may never approach. 1.18M rows is Phase-3 scale, not "personal scale" — the Phase 1 latency
+gate should be judged from a run sized to your own corpus. And the figures are from one machine;
+re-run with the same seed before and after any change, or the comparison is not like-for-like.
+See `docs/BENCHMARK-RUNBOOK.md`.
 
 ---
 
