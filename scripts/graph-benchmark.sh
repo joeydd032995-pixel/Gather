@@ -216,6 +216,12 @@ log "measuring entity_neighborhood(): ${ROOTS} roots/tier x ${REPEATS} repeats, 
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q <<SQL
 CREATE UNLOGGED TABLE bench_results (
   id bigserial primary key, tier text, depth int, root uuid, repeat int,
+  -- Measured under both JIT settings. The recursive CTE's row estimate is
+  -- wildly high (191k estimated vs 16 actual at depth 1), which pushes the
+  -- plan past jit_above_cost and buys ~220 ms of compilation to serve a ~3 ms
+  -- query. Reporting only the as-shipped number would attribute that to
+  -- traversal cost and could wrongly trigger the Phase 3 Neo4j clause.
+  jit text,
   ms double precision,
   -- Pre-seeded as 'not-completed'; a successful measurement overwrites it.
   -- Anything still marked that way at the end could not finish, which is a
@@ -249,11 +255,12 @@ tail AS (
 )
 SELECT * FROM hubs UNION ALL SELECT * FROM tail;
 
-INSERT INTO bench_results (tier, depth, root, repeat, ms)
-SELECT b.tier, d, b.id, rep, ${TIMEOUT_MS}
+INSERT INTO bench_results (tier, depth, root, repeat, jit, ms)
+SELECT b.tier, d, b.id, rep, j, ${TIMEOUT_MS}
 FROM bench_roots b,
      unnest(string_to_array('${DEPTHS}', ' ')::int[]) d,
-     generate_series(1, ${REPEATS}) rep;
+     generate_series(1, ${REPEATS}) rep,
+     unnest(ARRAY['on','off']) j;
 SQL
 
 # Each measurement is issued as its OWN top-level statement, which is the only
@@ -267,14 +274,15 @@ SQL
 # statement_timestamp() is the start of this statement and clock_timestamp() is
 # evaluated after the WHERE has forced the traversal to run, so ms stays a
 # server-side measurement with no client or network time in it.
-measure_sql="$workdir/measure.sql"
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -qtA -c "
-COPY (
-  SELECT format(
-    'UPDATE bench_results SET ms = extract(epoch FROM clock_timestamp() - statement_timestamp()) * 1000, outcome = ''ok'' WHERE id = %s AND (SELECT count(*) FROM entity_neighborhood(%L::uuid, %s)) >= 0;',
-    id, root, depth)
-  FROM bench_results ORDER BY id
-) TO STDOUT;" > "$measure_sql"
+for j in on off; do
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -qtA -c "
+  COPY (
+    SELECT format(
+      'UPDATE bench_results SET ms = extract(epoch FROM clock_timestamp() - statement_timestamp()) * 1000, outcome = ''ok'' WHERE id = %s AND (SELECT count(*) FROM entity_neighborhood(%L::uuid, %s)) >= 0;',
+      id, root, depth)
+    FROM bench_results WHERE jit = '$j' ORDER BY id
+  ) TO STDOUT;" > "$workdir/measure-$j.sql"
+done
 
 # Warm-up: same statements, results discarded by resetting afterwards. Without
 # it the first depth absorbs all the cold-cache cost and reports a HIGHER p95
@@ -283,26 +291,29 @@ log "warm-up pass"
 psql "$DATABASE_URL" -q \
   -c "SET statement_timeout = ${TIMEOUT_MS};" \
   -c "SET temp_file_limit = '${TEMP_FILE_LIMIT}';" \
-  -f "$measure_sql" >/dev/null 2>&1 || true
+  -f "$workdir/measure-on.sql" >/dev/null 2>&1 || true
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q \
   -c "UPDATE bench_results SET outcome = 'not-completed', ms = ${TIMEOUT_MS};"
 
-log "measured pass"
 # ON_ERROR_STOP stays OFF here on purpose: a cancelled or resource-limited
 # traversal must not abort the remaining measurements. Its row simply keeps the
 # pre-seeded 'not-completed' outcome.
-psql "$DATABASE_URL" -q \
-  -c "SET statement_timeout = ${TIMEOUT_MS};" \
-  -c "SET temp_file_limit = '${TEMP_FILE_LIMIT}';" \
-  -f "$measure_sql" 2>"$workdir/measure.err" >/dev/null || true
-if [ -s "$workdir/measure.err" ]; then
-  log "$(grep -c 'ERROR' "$workdir/measure.err" || true) traversals did not complete (timeout or resource limit)"
-fi
+for j in on off; do
+  log "measured pass (jit=$j)"
+  psql "$DATABASE_URL" -q \
+    -c "SET jit = $j;" \
+    -c "SET statement_timeout = ${TIMEOUT_MS};" \
+    -c "SET temp_file_limit = '${TEMP_FILE_LIMIT}';" \
+    -f "$workdir/measure-$j.sql" 2>"$workdir/measure-$j.err" >/dev/null || true
+  if [ -s "$workdir/measure-$j.err" ]; then
+    log "  $(grep -c 'ERROR' "$workdir/measure-$j.err" || true) traversals did not complete"
+  fi
+done
 
 echo
 echo "=== entity_neighborhood() latency (ms) — threshold ${THRESHOLD_MS} ms ==="
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "
-  SELECT tier, depth,
+  SELECT tier, depth, jit,
          count(*)                                                    AS samples,
          count(*) FILTER (WHERE outcome = 'ok')                       AS completed,
          count(*) FILTER (WHERE outcome <> 'ok')                      AS not_completed,
@@ -311,14 +322,14 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "
          round(percentile_cont(0.99) WITHIN GROUP (ORDER BY ms)::numeric, 1) AS p99,
          CASE WHEN percentile_cont(0.95) WITHIN GROUP (ORDER BY ms) <= ${THRESHOLD_MS}
               THEN 'under' ELSE 'OVER' END AS p95_vs_threshold
-  FROM bench_results GROUP BY tier, depth ORDER BY tier, depth;"
+  FROM bench_results GROUP BY tier, depth, jit ORDER BY tier, depth, jit DESC;"
 
 # ------------------------------------------------------------- diagnose ----
 # The roadmap gates Neo4j on p95 exceeding the line *after index tuning*, so a
 # bare number cannot answer it. This shows whether the BitmapOr or the per-row
 # path enumeration dominates — i.e. whether tuning is even available.
 
-slowest="$(psql_q -c "SELECT root || ' ' || depth FROM bench_results ORDER BY ms DESC LIMIT 1;")"
+slowest="$(psql_q -c "SELECT root || ' ' || depth FROM bench_results WHERE outcome = 'ok' ORDER BY ms DESC LIMIT 1;")"
 slow_root="${slowest% *}"
 slow_depth="${slowest#* }"
 echo
@@ -332,7 +343,7 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "SET statement_timeout = ${TIMEOUT_MS
 worst_p95="$(psql_q -c "
   SELECT round(max(p95)::numeric, 1) FROM (
     SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY ms) AS p95
-    FROM bench_results GROUP BY tier, depth) s;")"
+    FROM bench_results WHERE jit = 'on' GROUP BY tier, depth) s;")"
 echo
 log "worst p95 across all tiers/depths: ${worst_p95} ms (threshold ${THRESHOLD_MS} ms)"
 
@@ -340,7 +351,7 @@ if [ "$ENFORCE" = "1" ]; then
   over="$(psql_q -c "
     SELECT count(*) FROM (
       SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY ms) AS p95
-      FROM bench_results GROUP BY tier, depth) s
+      FROM bench_results WHERE jit = 'on' GROUP BY tier, depth) s
     WHERE s.p95 > ${THRESHOLD_MS};")"
   if [ "$over" -gt 0 ]; then
     log "FAILED: ${over} tier/depth combination(s) exceed the ${THRESHOLD_MS} ms p95 line"
