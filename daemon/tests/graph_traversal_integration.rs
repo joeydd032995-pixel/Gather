@@ -329,3 +329,63 @@ async fn degenerate_inputs_return_empty_rather_than_erroring() {
         assert_eq!(n, 0, "{label} should return no rows");
     }
 }
+
+// --- regressions for the truncation-flag review on PR #11 -------------------
+
+#[tokio::test]
+async fn a_cut_at_the_terminal_frontier_is_not_truncation() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let t = tag();
+    let ids = seed_graph(&state.pool, &t).await;
+
+    // ids[6] is the hub. At depth 1 only the root's own edges are returned --
+    // the nodes discovered beyond it are never read -- so a node budget far
+    // below the root's degree omits nothing and must not claim otherwise.
+    let complete: Vec<bool> =
+        sqlx::query_scalar("SELECT truncated FROM entity_neighborhood($1, 1, 100000, 0)")
+            .bind(ids[6])
+            .fetch_all(&state.pool)
+            .await
+            .expect("query");
+    let squeezed: Vec<bool> =
+        sqlx::query_scalar("SELECT truncated FROM entity_neighborhood($1, 1, 2, 0)")
+            .bind(ids[6])
+            .fetch_all(&state.pool)
+            .await
+            .expect("query");
+
+    assert_eq!(
+        complete.len(),
+        squeezed.len(),
+        "a terminal-frontier budget must not change which edges are returned"
+    );
+    assert!(
+        squeezed.iter().all(|t| !t),
+        "identical output must not be reported as truncated"
+    );
+}
+
+#[tokio::test]
+async fn exactly_filling_the_budget_is_not_truncation() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let t = tag();
+    let ids = seed_graph(&state.pool, &t).await;
+
+    // ids[16]-ids[17] is a closed two-node component: reachable set is exactly
+    // 2, so a budget of 2 fills precisely and has nothing left to reach.
+    let truncated: Vec<bool> =
+        sqlx::query_scalar("SELECT truncated FROM entity_neighborhood($1, 5, 2, 0)")
+            .bind(ids[16])
+            .fetch_all(&state.pool)
+            .await
+            .expect("query");
+    assert!(!truncated.is_empty(), "expected the component's edge");
+    assert!(
+        truncated.iter().all(|t| !t),
+        "a walk that exactly fills the budget with nothing left to reach is complete"
+    );
+}

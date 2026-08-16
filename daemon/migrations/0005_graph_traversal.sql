@@ -70,12 +70,35 @@ BEGIN
         RETURN;
     END IF;
 
-    -- Level-by-level BFS. Each iteration expands the current frontier and
-    -- keeps only nodes not already seen, so every node is expanded once.
-    WHILE level < max_depth AND coalesce(array_length(frontier, 1), 0) > 0 LOOP
+    -- Level-by-level BFS. Each node is expanded at most once.
+    --
+    -- The bound is max_depth - 1, not max_depth: the edge query below uses
+    -- nodes with lvl < max_depth, so a node discovered AT max_depth is never
+    -- read. Walking to max_depth spent a whole extra level -- for depth 2 on a
+    -- hub, expanding a thousand level-1 nodes to find level-2 nodes that were
+    -- then discarded -- and made the budget appear to bite when it had not.
+    WHILE level < max_depth - 1 AND coalesce(array_length(frontier, 1), 0) > 0 LOOP
         room := max_nodes - coalesce(array_length(visited_ids, 1), 0);
+
         IF room <= 0 THEN
-            was_cut := true;
+            -- Budget already full. That is only an omission if the frontier
+            -- actually still has somewhere to go; a walk that exactly fills the
+            -- budget and has nothing left to reach returned everything.
+            IF EXISTS (
+                SELECT 1 FROM (
+                    SELECT r.target_entity_id AS n
+                    FROM relationships r
+                    WHERE r.status = 'active' AND r.source_entity_id = ANY (frontier)
+                    UNION
+                    SELECT r.source_entity_id
+                    FROM relationships r
+                    WHERE r.status = 'active' AND r.target_entity_id = ANY (frontier)
+                    EXCEPT
+                    SELECT unnest(visited_ids)
+                ) c LIMIT 1
+            ) THEN
+                was_cut := true;
+            END IF;
             EXIT;
         END IF;
 
@@ -83,10 +106,10 @@ BEGIN
         -- the array form rescans the whole visited set per candidate row and
         -- degrades badly as the budget fills.
         --
-        -- LIMIT room + 1 is what keeps a hub affordable. Without it the walk
-        -- materializes every candidate before discarding all but `room` of
-        -- them — for a 53k-degree hub that is 53k rows collected to keep 5k.
-        -- The extra row is how we tell "exactly filled" from "overflowed".
+        -- LIMIT room + 1 keeps a hub affordable -- without it the walk collects
+        -- every candidate before discarding all but `room`, which for a
+        -- 53k-degree hub is 53k rows gathered to keep 1k. The extra row is how
+        -- an exact fill is told apart from an overflow.
         SELECT coalesce(array_agg(n), ARRAY[]::uuid[]) INTO next_ids
         FROM (
             SELECT n FROM (
@@ -105,6 +128,8 @@ BEGIN
 
         EXIT WHEN coalesce(array_length(next_ids, 1), 0) = 0;
 
+        -- Every node this loop discovers is below max_depth and so does feed
+        -- the edge query; dropping one here really does omit edges.
         IF coalesce(array_length(next_ids, 1), 0) > room THEN
             next_ids := next_ids[1:room];
             was_cut := true;
