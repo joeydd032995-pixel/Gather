@@ -194,6 +194,13 @@ impl pb::query_service_server::QueryService for QueryApi {
         let req = request.into_inner();
         let entity_id = parse_uuid(&req.entity_id, "entity_id")?;
         let depth = req.depth.clamp(1, 5);
+        // 0 means "server default", so an existing client that never set the
+        // field keeps working and simply gets the bounded behaviour.
+        let max_edges = if req.max_edges <= 0 {
+            crate::routes::query::GRAPH_DEFAULT_MAX_EDGES
+        } else {
+            req.max_edges.min(50_000)
+        };
         let started = Instant::now();
 
         // Merged-away ids resolve to the surviving entity, same as REST.
@@ -210,16 +217,36 @@ impl pb::query_service_server::QueryService for QueryApi {
         .map_err(|e| status_from(e.into()))?
         .ok_or_else(|| Status::not_found(format!("entity {entity_id}")))?;
 
+        // SET LOCAL needs a transaction; see the REST handler for why JIT is
+        // suppressed for this statement specifically.
+        let mut tx = self
+            .state
+            .pool
+            .begin()
+            .await
+            .map_err(|e| status_from(e.into()))?;
+        sqlx::query("SET LOCAL jit = off")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| status_from(e.into()))?;
         let edges = sqlx::query(
             r#"SELECT depth, relationship_id, source_entity_id, target_entity_id,
-                      relation_type, confidence
-               FROM entity_neighborhood($1, $2)"#,
+                      relation_type, confidence, truncated
+               FROM entity_neighborhood($1, $2, $3, $4)"#,
         )
         .bind(entity_id)
         .bind(depth)
-        .fetch_all(&self.state.pool)
+        .bind(crate::routes::query::GRAPH_MAX_NODES)
+        .bind(max_edges)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|e| status_from(e.into()))?;
+        tx.commit().await.map_err(|e| status_from(e.into()))?;
+
+        let truncated = edges
+            .first()
+            .map(|e| e.get::<bool, _>("truncated"))
+            .unwrap_or(false);
 
         let mut node_ids: Vec<Uuid> = edges
             .iter()
@@ -266,6 +293,8 @@ impl pb::query_service_server::QueryService for QueryApi {
                 })
                 .collect(),
             query_ms: elapsed.as_millis() as u64,
+            truncated,
+            max_edges,
         }))
     }
 

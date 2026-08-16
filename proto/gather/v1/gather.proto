@@ -229,6 +229,7 @@ message ListAtomicUnitsResponse {
 message GetEntityGraphRequest {
   string entity_id = 1;                            // entities.id (root)
   int32 depth = 2;                                 // entity_neighborhood(max_depth), 1..5
+  int32 max_edges = 3;                             // 0 = server default; capped server-side
 }
 
 message GetEntityGraphResponse {
@@ -236,6 +237,11 @@ message GetEntityGraphResponse {
   repeated Entity nodes = 2;
   repeated Relationship edges = 3;
   uint64 query_ms = 4;
+  // A hub's 2-hop neighbourhood can be most of the graph, so the walk is
+  // bounded and may return a partial answer. Added fields, so existing clients
+  // stay wire-compatible; they simply read false/0.
+  bool truncated = 5;
+  int32 max_edges = 6;                             // cap actually applied
 }
 
 message SemanticSearchRequest {
