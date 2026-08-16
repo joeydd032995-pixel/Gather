@@ -167,7 +167,7 @@ jobs:
   build-daemon:
     name: build daemon (linux x86_64)
     runs-on: ubuntu-24.04
-    needs: [lint, test, restore-drill]
+    needs: [lint, test, restore-drill, graph-benchmark]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -196,7 +196,7 @@ jobs:
   # ------------------------------------------------------- build desktop ----
   build-desktop:
     name: build desktop (${{ matrix.platform }})
-    needs: [lint, test, restore-drill]
+    needs: [lint, test, restore-drill, graph-benchmark]
     strategy:
       fail-fast: false
       matrix:

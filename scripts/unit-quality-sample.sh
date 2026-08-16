@@ -105,6 +105,22 @@ score)
   sheet="$2"
   [ -f "$sheet" ] || { echo "unit-quality-sample: no such file: $sheet" >&2; exit 1; }
 
+  # The bar a sheet was drawn against travels WITH the sheet. Scoring against
+  # the scorer's ambient default instead would silently mis-grade a sheet drawn
+  # at a different bar -- an 80% sheet reporting PASS at 75% because the scorer
+  # happened to default to 70%. An explicit GATHER_SAMPLE_THRESHOLD still wins,
+  # so the bar can be changed deliberately, but never by accident.
+  sheet_threshold="$(sed -n 's/^# .*threshold=\([0-9.]*\)%.*/\1/p' "$sheet" | head -1)"
+  if [ -n "$sheet_threshold" ]; then
+    if [ -n "${GATHER_SAMPLE_THRESHOLD:-}" ] && [ "$GATHER_SAMPLE_THRESHOLD" != "$sheet_threshold" ]; then
+      echo "unit-quality-sample: overriding the sheet's recorded threshold (${sheet_threshold}%) with GATHER_SAMPLE_THRESHOLD=${GATHER_SAMPLE_THRESHOLD}%" >&2
+    else
+      THRESHOLD="$sheet_threshold"
+    fi
+  else
+    echo "unit-quality-sample: sheet records no threshold; using ${THRESHOLD}%" >&2
+  fi
+
   awk -F'\t' -v threshold="$THRESHOLD" '
     /^#/      { next }                       # header comments
     $1=="usable" { next }                    # column header row
