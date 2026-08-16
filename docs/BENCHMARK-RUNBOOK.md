@@ -77,16 +77,38 @@ A measured run is warm: the harness runs an untimed warm-up pass first, because 
 first depth in the loop absorbs all the cold-cache cost and reports a *higher* p95 than deeper
 traversals — an artifact of measurement order rather than of traversal cost.
 
+### Read the jit=on / jit=off pair before concluding anything
+
+Every measurement runs twice, under `jit=on` (how a stock daemon behaves) and `jit=off`. This is
+not a curiosity — on the first trustworthy full-scale run it was the difference between "every
+tier and depth is over the line" and the truth.
+
+The recursive CTE's row estimate is wildly high (191,173 estimated against 16 actual at depth 1).
+That inflated cost crosses `jit_above_cost`, so Postgres spends ~225 ms JIT-compiling a query that
+executes in ~3 ms. At depth 1 with >1M rows this alone put both tiers over the threshold; with
+`jit=off` both land comfortably under. **If the two columns differ by a large constant, you are
+looking at compilation overhead, not traversal cost.**
+
+A useful sanity check: traversal cost must scale with degree. If the hub and long-tail tiers
+report near-identical times at the same depth, something degree-independent is dominating — JIT
+being the usual candidate.
+
 ### Invoking the Phase 3 clause
 
-The roadmap says adopt Neo4j only if p95 exceeds 150 ms at >1M rows **after index tuning**. So a
-single `OVER` reading is not sufficient grounds. The honest sequence is:
+The roadmap says adopt Neo4j only if p95 exceeds 150 ms at >1M rows **after index tuning**. A
+single `OVER` reading is not sufficient grounds — see §9.1 of the write-up, where the raw readings
+looked like a clear trigger and were not. The honest sequence is:
 
 1. Run at ≥1M rows and confirm which tier/depth combinations are `OVER`.
-2. Read the EXPLAIN for the slowest case and identify the actual bottleneck.
-3. Attempt the indicated tuning in its own change, and re-run.
-4. Only if p95 is still over the line does the Neo4j clause apply — and `entity_neighborhood()` is
-   the single seam it would land on.
+2. **Compare the jit=on and jit=off columns first.** If jit=off is under the line, the bottleneck
+   is compilation and the tuning is a planner setting, not a graph store.
+3. Read the EXPLAIN for the slowest *completed* case and identify what actually dominates. Heavy
+   `temp read/written` with a large row count means path enumeration, which is a query-shape
+   problem in `entity_neighborhood()` — still not a Postgres-vs-Neo4j question.
+4. Attempt the indicated tuning in its own change, re-run **with the same `GATHER_BENCH_SEED`**,
+   and compare like for like.
+5. Only if p95 is still over the line, with tuning applied and the bottleneck understood, does the
+   Neo4j clause apply — and `entity_neighborhood()` is the single seam it would land on.
 
 ---
 
