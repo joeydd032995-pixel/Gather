@@ -7,6 +7,7 @@ import {
   type HealthState,
 } from "./api";
 import Contradictions from "./Contradictions";
+import Entities from "./Entities";
 
 // Native file picker (Tauri dialog plugin). In a plain browser (vite dev
 // outside Tauri) we fall back to a hidden <input type="file">.
@@ -37,7 +38,7 @@ async function pickWithNativeDialog(): Promise<File[]> {
 }
 
 export default function App() {
-  const [tab, setTab] = useState<"upload" | "contradictions">("upload");
+  const [tab, setTab] = useState<"upload" | "contradictions" | "entities">("upload");
   const [health, setHealth] = useState<HealthState>({ reachable: false, ready: false });
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -129,9 +130,17 @@ export default function App() {
         >
           Contradictions
         </button>
+        <button
+          className={tab === "entities" ? "tab active" : "tab"}
+          onClick={() => setTab("entities")}
+        >
+          Entities
+        </button>
       </nav>
 
       {tab === "contradictions" && <Contradictions />}
+
+      {tab === "entities" && <Entities />}
 
       {tab === "upload" && (
       <>

@@ -71,11 +71,12 @@ the implementations follow. Remaining *[pipeline — Phase 1]* markers denote MV
 
 4. **Knowledge graph** — extraction also emits `entities` and typed, temporal `relationships`;
    traversal is a recursive CTE (`entity_neighborhood()` SQL function, shipped in the migration)
-   behind `GET /api/v1/entities/{id}/graph`.
+   behind `GET /api/v1/entities/{id}/graph`. Entity resolution (§6.4) keeps one node per
+   real-world thing: names resolve through `entity_aliases`, and reviewed duplicates are merged.
 
-5. **Contradiction scan** *[pipeline — Phase 1]* — a periodic scanner pairs semantically-close
+5. **Contradiction scan** — a periodic scanner pairs semantically-close
    active units (pgvector) sharing an entity and scores them for conflict (§6). Conflicts land in
-   `contradictions` with full dual-sided provenance.
+   `contradictions` with full dual-sided provenance. Shipped: `daemon/src/scan/`.
 
 6. **Review & propagation** — the dashboard lists open contradictions; resolving one is
    transactional: audit row, status change, losing unit superseded, dependent relationships
@@ -789,7 +790,7 @@ hop. With Ollama unset (the default) the daemon never calls out and full-text ap
 
 | Method & path | Purpose |
 |---|---|
-| `GET /api/v1/export` | Streams NDJSON: first line a manifest `{"type":"manifest","row":{"format":"gather-bundle-v1","exported_at":…,"tables":[…]}}`, then one `{"type":"<table>","row":{…}}` line per row for all 14 tables in FK order — including raw artifact bytes, embeddings and audit trails |
+| `GET /api/v1/export` | Streams NDJSON: first line a manifest `{"type":"manifest","row":{"format":"gather-bundle-v1","exported_at":…,"tables":[…]}}`, then one `{"type":"<table>","row":{…}}` line per row for all 15 tables in FK order — including raw artifact bytes, embeddings and audit trails |
 | `POST /api/v1/import` | Accepts the same NDJSON; single transaction, FK-order inserts, `ON CONFLICT DO NOTHING` (idempotent merge); returns per-table `{in_bundle, inserted}` counts |
 
 Rows are serialized by Postgres (`row_to_json`) and restored with `jsonb_populate_record`, so the
@@ -805,6 +806,17 @@ the unit of optional VPS replication (§7.5).
 | `GET /api/v1/contradictions/{id}` | + `atomic_unit_provenance` ⋈ `artifacts` (both units, all modalities) + `contradiction_audit` | everything the review UI needs in one call |
 | `POST /api/v1/contradictions/{id}/resolve` | `contradictions`, `atomic_units`, `relationships`, `contradiction_audit` | body: `{"resolution":"resolved_a|resolved_b|both_valid|dismissed","note":"…","actor":"…"}`; transactional; only `open` rows can be resolved; losing unit → `superseded`, `valid_to` closed, its relationships deactivated |
 | `POST /api/v1/contradictions/{id}/annotations` | `contradiction_audit` (action `annotate`) | `201 {"id","contradiction_id","actor"}` |
+
+### 4.6 Entity resolution
+
+| Method & path | Backing tables | Notes |
+|---|---|---|
+| `GET /api/v1/entities?q=&kind=&limit=&offset=&include_merged=` | `entities` (+ alias/edge counts) | merged-away entities hidden unless `include_merged=true` |
+| `GET /api/v1/entities/merge-suggestions?threshold=&limit=` | `entities` (+ `entity_merge_audit` for dismissals) | scored candidate duplicates, highest first; `threshold` defaults to 0.6 |
+| `GET /api/v1/entities/{id}` | `entities` + `entity_aliases` + `entity_merge_audit` | aliases and merge history for the detail view |
+| `POST /api/v1/entities/{id}/merge` | `entities`, `entity_aliases`, `atomic_units`, `relationships`, `entity_merge_audit` | body: `{"loser_id":"…","note":"…","actor":"…"}`; `{id}` survives; transactional |
+| `POST /api/v1/entities/{id}/merge-suggestions/dismiss` | `entity_merge_audit` (action `dismiss`) | body: `{"other_id":"…"}`; suppresses the pair in both orderings |
+| `POST /api/v1/entities/{id}/aliases` | `entity_aliases` | body: `{"alias":"…"}`; rejects an alias that already names another live entity — merge those instead |
 
 ---
 
@@ -976,6 +988,62 @@ each side's provenance (platform, filename, quote, timestamp) from
 The **≥90% resolved within 7 days** metric comes from `gather_contradictions_open` (gauge,
 refreshed every 30 s) against `gather_contradictions_resolved_total` on the Grafana dashboard.
 
+### 6.4 Entity resolution *(shipped: `daemon/src/entities/`)*
+
+Contradiction detection blocks candidate pairs partly on **shared subject entity** (§6.1), so a
+fragmented entity table silently suppresses conflicts: if `Postgres` and `PostgreSQL` are two
+nodes, units about them never pair up. `0001_init` anticipated this — `entity_aliases`,
+`entities.merged_into_entity_id`, and the partial unique index
+`entities_name_kind_uq (… WHERE merged_into_entity_id IS NULL)` — and
+`resolve_or_create_entity` has always resolved names against entities **UNION aliases**. Until
+this release nothing wrote either table, so that alias branch never matched.
+
+**Suggestion** (`GET /entities/merge-suggestions`) uses the same two-tier split as unit scoring
+(§6.2): pgvector cosine over `entities.embedding` when populated, and otherwise a deterministic
+text score — max of token-Jaccard, character-trigram Jaccard, and prefix containment. Entity
+names are short, so token overlap alone is insufficient (`Postgres`/`PostgreSQL` share no whole
+token); trigrams and prefix ratio cover that while keeping `Java`/`JavaScript` (0.40) below the
+0.60 threshold. The text pass always runs, so suggestions work on a stock offline install —
+entity embeddings come from Ollama, which is opt-in (§5.3), backfilled by
+`embed_pending_entities`.
+
+**Merge** (`POST /entities/{id}/merge`) is one transaction, and three constraints from `0001_init`
+make the naive "just repoint the foreign keys" version abort:
+
+1. The loser's name (and its own aliases) become aliases of the winner —
+   `ON CONFLICT DO NOTHING`, since `entity_aliases_uq` is `(entity_id, lower(alias))`.
+2. `atomic_units.subject_entity_id` repointed to the winner.
+3. Edges **between** the pair would become self-loops under `relationships_no_self_loop`, and
+   edges the winner already asserts collide under `relationships_edge_uq`. Both classes are
+   deleted before the surviving edges are repointed.
+4. The loser gets `merged_into_entity_id = <winner>` — a soft delete, so provenance survives and
+   the export bundle stays round-trippable. This also frees its name under the partial unique
+   index, and a later sighting of that name now resolves through the alias to the winner.
+5. An `entity_merge_audit` row records actor/note, mirroring `contradiction_audit`.
+
+The merge graph is kept exactly one level deep two ways: an already-merged entity is rejected as
+an operand, and anything previously merged **into** the loser is repointed at the winner in the
+same transaction. Rejection alone is insufficient — a live entity that has itself absorbed others
+is a legal loser, so `C→B` followed by `B→A` would otherwise leave the chain `C→B→A` and strand
+readers on an intermediate whose units and relationships have already moved on.
+`GET /entities/{id}/graph` (REST and gRPC) resolves a merged-away id to its survivor, so stale
+links keep working.
+
+**Lock contract.** `resolve_or_create_entity` re-reads the entity it resolved with `FOR SHARE`
+before returning it, and follows `merged_into_entity_id` if set. This is what serializes ingestion
+against merging: the merge holds `FOR UPDATE` on both operands while it repoints, and soft-deletes
+rather than removes, so a plain read would let an in-flight ingest insert onto the retired node
+*after* the repointing had run — stranding that data where no query would find it. Under the lock,
+ingestion either commits first (and the merge repoints its rows with the rest) or waits and then
+resolves to the survivor. Resolution locks a single row, so it cannot form a cycle with the
+merge's ordered two-row lock.
+
+Merging also clears `contradiction_scanned_at` on both sides' units. §6.1 blocks candidate pairs
+on shared subject entity and the scanner only picks up units whose cursor is NULL (0003), so
+without that reset the merge would repoint the rows but never re-pair them — leaving exactly the
+suppressed conflicts this feature exists to surface. Nothing is auto-merged: every merge is a reviewer decision, taken in the
+desktop app's **Entities** tab, which reuses the contradiction review-and-confirm shape.
+
 ---
 
 ## 7. Security model
@@ -1068,10 +1136,14 @@ variant. There is no telemetry, no update phone-home, no crash reporting.
   ingest cleanly (chat export, agent log, manual upload ✅ implemented), dedup works on
   re-upload, and `/artifacts` reflects ≥80% of exported conversations within 24h.
   **No-go** → fix adapters before building extraction.
-- **Phase 1 — MVP (8 weeks)**: extraction workers (§5), contradiction scanner (§6), review
-  dashboard in the Tauri app, remaining platform adapters (Gemini/Grok/Perplexity/Copilot),
-  keychain token provisioning. **Go** when ≥70% of sampled units are judged usable and graph
-  queries stay <150 ms at personal scale (already 5 ms at seed scale).
+- **Phase 1 — MVP (8 weeks)**: extraction workers (✅ shipped, §5), contradiction scanner
+  (✅ shipped, §6), review dashboard in the Tauri app (✅ shipped), remaining platform adapters
+  (✅ shipped: Gemini/Grok/Perplexity/Copilot, §2), keychain token provisioning (✅ shipped:
+  daemon `print-api-token` + the app's `get_api_token`), entity resolution (✅ shipped, §6.4 —
+  aliases and reviewed merges, so the graph keeps one node per real-world thing).
+  **Go** when ≥70% of sampled units are judged usable and graph queries stay <150 ms at personal
+  scale (already 5 ms at seed scale). *The go/no-go numbers themselves are not yet measured at
+  scale — that harness is the next piece of work, and it also produces the Phase 3 trigger below.*
 - **Phase 2 — hardening**: gRPC server (✅ shipped: all four services on `127.0.0.1:7602`,
   shared cores with REST), server-side query embeddings for semantic search (✅ shipped,
   Ollama opt-in), LLM-assisted extraction (✅ shipped, §5.3), scheduled encrypted export

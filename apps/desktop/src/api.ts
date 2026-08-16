@@ -127,6 +127,82 @@ export async function annotateContradiction(id: string, note: string): Promise<v
   await jsonOrThrow(res);
 }
 
+// --- Entity resolution ----------------------------------------------------
+
+export interface EntityRef {
+  id: string;
+  name: string;
+  kind: string;
+}
+
+export interface MergeSuggestion {
+  a: EntityRef;
+  b: EntityRef;
+  score: number;
+  /** "rule:name-similarity" (offline) or "embedding:cosine" (Ollama opt-in). */
+  method: string;
+}
+
+export interface EntityDetail extends EntityRef {
+  description: string | null;
+  merged_into_entity_id: string | null;
+  created_at: string;
+  aliases: string[];
+  audit: {
+    action: string;
+    actor: string;
+    note: string | null;
+    winner_entity_id: string;
+    loser_entity_id: string;
+    created_at: string;
+  }[];
+}
+
+export async function listMergeSuggestions(): Promise<MergeSuggestion[]> {
+  const res = await fetch(`${DAEMON_URL}/api/v1/entities/merge-suggestions?limit=100`, {
+    headers: authHeaders(),
+  });
+  const body = await jsonOrThrow<{ items: MergeSuggestion[] }>(res);
+  return body.items;
+}
+
+export async function getEntity(id: string): Promise<EntityDetail> {
+  const res = await fetch(`${DAEMON_URL}/api/v1/entities/${id}`, {
+    headers: authHeaders(),
+  });
+  return jsonOrThrow(res);
+}
+
+/** `winnerId` survives; `loserId` is folded into it. */
+export async function mergeEntities(
+  winnerId: string,
+  loserId: string,
+  note?: string,
+): Promise<void> {
+  const res = await fetch(`${DAEMON_URL}/api/v1/entities/${winnerId}/merge`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ loser_id: loserId, note: note || null }),
+  });
+  await jsonOrThrow(res);
+}
+
+export async function dismissMergeSuggestion(
+  id: string,
+  otherId: string,
+  note?: string,
+): Promise<void> {
+  const res = await fetch(
+    `${DAEMON_URL}/api/v1/entities/${id}/merge-suggestions/dismiss`,
+    {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ other_id: otherId, note: note || null }),
+    },
+  );
+  await jsonOrThrow(res);
+}
+
 export async function uploadFiles(files: File[]): Promise<FilesResponse> {
   const form = new FormData();
   for (const file of files) {

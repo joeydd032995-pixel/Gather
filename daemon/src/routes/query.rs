@@ -253,6 +253,10 @@ pub async fn entity_graph(
     let depth = params.depth.unwrap_or(2).clamp(1, 5);
     let started = Instant::now();
 
+    // A link to an entity that has since been merged away should show the
+    // surviving entity's graph, not an empty one.
+    let id = crate::entities::resolve_head(&state.pool, id).await?;
+
     let root =
         sqlx::query("SELECT id, name, kind::text AS kind, description FROM entities WHERE id = $1")
             .bind(id)

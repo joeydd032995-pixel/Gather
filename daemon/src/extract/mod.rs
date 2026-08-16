@@ -111,6 +111,14 @@ pub async fn run_one_pass(
             Ok(_) => {}
             Err(e) => tracing::warn!(error = %e, "segment embedding failed; will retry"),
         }
+        // Entity embeddings feed the cosine pass of merge suggestions (§6.4).
+        // Without this the column stays NULL, entities_embedding_hnsw indexes
+        // nothing, and only the offline text pass ever fires.
+        match crate::entities::embed_pending_entities(pool, client, config.extraction_batch).await {
+            Ok(n) if n > 0 => tracing::debug!(entities = n, "embedded entities"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "entity embedding failed; will retry"),
+        }
     }
     Ok(stats)
 }

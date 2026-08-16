@@ -1,4 +1,5 @@
 pub mod contradictions;
+pub mod entities;
 pub mod export;
 pub mod health;
 pub mod ingest;
@@ -37,6 +38,21 @@ pub fn build_router(state: AppState) -> Router {
         .route("/atomic-units", get(query::list_atomic_units))
         .route("/entities/{id}/graph", get(query::entity_graph))
         .route("/search/semantic", post(query::semantic_search))
+        // entity resolution — aliases, suggested duplicates, merges.
+        // The static /merge-suggestions path is registered before the dynamic
+        // /{id} so it is not swallowed as an entity id.
+        .route("/entities", get(entities::list_entities))
+        .route(
+            "/entities/merge-suggestions",
+            get(entities::list_merge_suggestions),
+        )
+        .route("/entities/{id}", get(entities::get_entity))
+        .route("/entities/{id}/merge", post(entities::merge_entity))
+        .route(
+            "/entities/{id}/merge-suggestions/dismiss",
+            post(entities::dismiss_merge_suggestion),
+        )
+        .route("/entities/{id}/aliases", post(entities::add_alias))
         // export / import
         .route("/export", get(export::export_bundle))
         .route("/import", post(export::import_bundle))
