@@ -19,20 +19,31 @@ about a 150 ms threshold, and the CI scale is far below the 1M-row bar.
 
 ### Read this before trusting any number it prints
 
-The measurement is dominated by **graph shape, not row count**. Two properties of
-`entity_neighborhood()` (`daemon/migrations/0001_init.sql`) cause this:
+The measurement is dominated by **graph shape, not row count**.
 
-1. Its cycle guard is a per-row `visited` array, so the recursive CTE enumerates **paths, not
-   nodes**, collapsing only at the final `DISTINCT ON`. A dense neighbourhood produces
-   combinatorially many intermediate rows.
-2. The recursive join is `source = … OR target = …`, which no single index satisfies — Postgres
-   needs a BitmapOr across `relationships_source_idx` and `relationships_target_idx`.
+`entity_neighborhood()` (`daemon/migrations/0005_graph_traversal.sql`) walks nodes, expanding each
+at most once, and is bounded by a node budget and an edge cap. Its cost therefore tracks the size
+of the answer: a hub's 2-hop neighbourhood is genuinely ~94% of the graph, and no traversal makes
+that small.
+
+(Until 0005 the walk enumerated **paths** rather than nodes — its cycle guard was a per-row
+`visited` array — so a dense neighbourhood produced combinatorially many intermediate rows and a
+hub could exhaust a 2 GB temp file rather than merely being slow. If you are reading numbers from
+before that migration, this is why they contain timeouts.)
+
+One property that has not changed: the join is `source = … OR target = …`, which no single index
+satisfies — Postgres needs a BitmapOr across `relationships_source_idx` and
+`relationships_target_idx`.
 
 A uniformly random graph therefore traverses cheaply no matter how many rows it has, and would
 report a comfortable p95 against the wrong question. The seeder builds a hub-heavy (power-law-ish)
 graph via `power(random(), alpha)`, and the report separates **hub** roots from **long-tail**
 roots. Read them separately: a blended percentile hides the hub cliff, which is the failure mode
 that actually matters.
+
+`GATHER_BENCH_MAX_NODES` and `GATHER_BENCH_MAX_EDGES` must be held fixed across a before/after
+comparison exactly as `GATHER_BENCH_SEED` is: they change how much of the walk is performed, so
+runs at different budgets measure different work and are not comparable.
 
 `GATHER_BENCH_ALPHA` is the knob that sets hub concentration (1.0 = uniform, higher = more
 concentrated). It is the single input the result is most sensitive to — if you change it, say so
@@ -89,6 +100,10 @@ executes in ~3 ms. At depth 1 with >1M rows this alone put both tiers over the t
 `jit=off` both land comfortably under. **If the two columns differ by a large constant, you are
 looking at compilation overhead, not traversal cost.**
 
+Since the 0005 traversal rewrite the two columns are close (74.5 vs 73.4 ms at hub depth 1): the
+old walk's wildly wrong row estimate was what tripped `jit_above_cost`, and the plpgsql body
+estimates sanely. A large gap reappearing is a signal that something has regressed the plan.
+
 A useful sanity check: traversal cost must scale with degree. If the hub and long-tail tiers
 report near-identical times at the same depth, something degree-independent is dominating — JIT
 being the usual candidate.
@@ -103,8 +118,11 @@ looked like a clear trigger and were not. The honest sequence is:
 2. **Compare the jit=on and jit=off columns first.** If jit=off is under the line, the bottleneck
    is compilation and the tuning is a planner setting, not a graph store.
 3. Read the EXPLAIN for the slowest *completed* case and identify what actually dominates. Heavy
-   `temp read/written` with a large row count means path enumeration, which is a query-shape
-   problem in `entity_neighborhood()` — still not a Postgres-vs-Neo4j question.
+   `temp read/written` with a large row count means the walk is gathering far more than it
+   returns — a query-shape or budgeting problem in `entity_neighborhood()`, still not a
+   Postgres-vs-Neo4j question. Try lowering `GATHER_BENCH_MAX_NODES` first: hub cost scales with it
+   (1034 ms at 5000, 387 ms at 1000, 265 ms at 300 — measured at 1.18M rows) while ordinary roots
+   stay flat, because their cost is the edge gather rather than the budget.
 4. Attempt the indicated tuning in its own change, re-run **with the same `GATHER_BENCH_SEED`**,
    and compare like for like.
 5. Only if p95 is still over the line, with tuning applied and the bottleneck understood, does the

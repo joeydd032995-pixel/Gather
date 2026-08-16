@@ -45,12 +45,13 @@ async fn seed_graph(pool: &sqlx::PgPool, t: &str) -> Vec<Uuid> {
         // suggestion suite shares this database, and near-identical fixture
         // names would rank as duplicates and crowd its expected pair out of
         // the top-scoring results.
-        let id: Uuid =
-            sqlx::query_scalar("INSERT INTO entities (name, kind) VALUES ($1,'other') RETURNING id")
-                .bind(Uuid::new_v4().simple().to_string())
-                .fetch_one(pool)
-                .await
-                .expect("insert entity");
+        let id: Uuid = sqlx::query_scalar(
+            "INSERT INTO entities (name, kind) VALUES ($1,'other') RETURNING id",
+        )
+        .bind(Uuid::new_v4().simple().to_string())
+        .fetch_one(pool)
+        .await
+        .expect("insert entity");
         ids.push(id);
     }
 
@@ -174,9 +175,9 @@ async fn matches_the_original_recursive_cte_exactly() {
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "DROP FUNCTION {scratch}(uuid, integer)"
     )))
-        .execute(&state.pool)
-        .await
-        .expect("drop reference function");
+    .execute(&state.pool)
+    .await
+    .expect("drop reference function");
 
     assert!(
         checked > 0,
@@ -202,7 +203,10 @@ async fn inactive_edges_are_never_traversed() {
     .fetch_one(&state.pool)
     .await
     .expect("query");
-    assert_eq!(reached, 0, "a superseded edge must be invisible to traversal");
+    assert_eq!(
+        reached, 0,
+        "a superseded edge must be invisible to traversal"
+    );
 }
 
 #[tokio::test]
@@ -315,14 +319,13 @@ async fn degenerate_inputs_return_empty_rather_than_erroring() {
         ("isolated node", ids[19], 3),
         ("unknown root", Uuid::new_v4(), 3),
     ] {
-        let n: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM entity_neighborhood($1, $2, 5000, 0)",
-        )
-        .bind(root)
-        .bind(depth)
-        .fetch_one(&state.pool)
-        .await
-        .unwrap_or_else(|e| panic!("{label} should not error: {e}"));
+        let n: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM entity_neighborhood($1, $2, 5000, 0)")
+                .bind(root)
+                .bind(depth)
+                .fetch_one(&state.pool)
+                .await
+                .unwrap_or_else(|e| panic!("{label} should not error: {e}"));
         assert_eq!(n, 0, "{label} should return no rows");
     }
 }
