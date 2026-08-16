@@ -1,12 +1,43 @@
 use std::sync::Arc;
 
+use gather_daemon::auth_token::{OsKeychain, TokenStore};
 use gather_daemon::config::Config;
 use gather_daemon::extract::ollama::OllamaClient;
 use gather_daemon::{db, routes, AppState};
 use metrics_exporter_prometheus::PrometheusBuilder;
 
+/// `gather-daemon print-api-token`: read the OS-keychain bearer token
+/// without needing DATABASE_URL or any other daemon config. This is the
+/// same keychain entry `auth_token::resolve` and the Tauri app's
+/// `get_api_token` command already read (§7.2) — scheduled-backup scripts
+/// call this instead of reimplementing native keychain reads per OS.
+fn print_api_token() -> anyhow::Result<()> {
+    match OsKeychain.get() {
+        Ok(Some(token)) => {
+            println!("{token}");
+            Ok(())
+        }
+        Ok(None) => {
+            eprintln!(
+                "no token found in the OS keychain (the daemon creates one on first run \
+                 under GATHER_AUTH_MODE=keychain; in env mode there is no keychain token — \
+                 use GATHER_API_TOKEN directly)"
+            );
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("keychain read failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("print-api-token") {
+        return print_api_token();
+    }
+
     let mut config = Config::from_env()?;
     gather_daemon::init_tracing(config.log_json);
     gather_daemon::auth_token::resolve(&mut config);

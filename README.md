@@ -33,6 +33,7 @@ in the write-up for Phase-0 validation, the desktop app, dashboards, and the opt
 | `proto/gather/v1/` | gRPC contract mirroring the REST API — served by the daemon on `127.0.0.1:7602` (tonic; `daemon/src/grpc/`) |
 | `docker/`, `docker-compose.yml` | Local stack (daemon + Postgres/pgvector, optional Prometheus/Grafana profile) |
 | `infra/terraform/` | **Optional, opt-in** Hetzner backup VM (firewall, LUKS volume, hardening) |
+| `scripts/` | OS-level scheduled-backup scripts + per-OS installers, and the two-tier restore-drill tooling (`docs/BACKUP-RUNBOOK.md`) — the daemon itself never schedules or triggers any of this |
 | `observability/` | Prometheus scrape config + provisioned Grafana dashboard |
 | `.github/workflows/ci.yml` | Single CI workflow: lint, tests vs pgvector, daemon binary, Tauri bundles (Linux/Windows/macOS), releases |
 | `docs/TECHNICAL-WRITEUP.md` | The full specification |

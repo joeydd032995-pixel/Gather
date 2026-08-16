@@ -66,11 +66,56 @@ jobs:
         working-directory: daemon
         run: cargo test --all-targets
 
+  # ------------------------------------------------------ restore drill ----
+  # Tier-1 restore drill (docs/BACKUP-RUNBOOK.md): proves backup -> restore
+  # -> import round-trips with no data loss, using synthetic data and a
+  # throwaway local restic repo (no real credentials). Runs in its own job
+  # with its own Postgres service container — scripts/ci-restore-drill.sh
+  # does an unconditional TRUNCATE CASCADE, which would corrupt the `test`
+  # job's shared, concurrently-used database if run there instead.
+  restore-drill:
+    name: restore drill (tier 1 — synthetic backup/restore round trip)
+    runs-on: ubuntu-24.04
+    needs: [lint]
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: gather
+          POSTGRES_USER: gather
+          POSTGRES_PASSWORD: gather-ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gather -d gather"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://gather:gather-ci@localhost:5432/gather
+      GATHER_RESTORE_DRILL_ALLOW_DESTRUCTIVE: "1"
+      GATHER_DAEMON_BIN: daemon/target/debug/gather-daemon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon
+      - name: install restic + tesseract (OCR extraction path) + postgresql-client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y restic tesseract-ocr tesseract-ocr-eng postgresql-client
+      - name: build daemon (debug)
+        working-directory: daemon
+        run: cargo build --locked
+      - name: run restore drill
+        run: scripts/ci-restore-drill.sh
+
   # -------------------------------------------------------- build daemon ----
   build-daemon:
     name: build daemon (linux x86_64)
     runs-on: ubuntu-24.04
-    needs: [lint, test]
+    needs: [lint, test, restore-drill]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -99,7 +144,7 @@ jobs:
   # ------------------------------------------------------- build desktop ----
   build-desktop:
     name: build desktop (${{ matrix.platform }})
-    needs: [lint, test]
+    needs: [lint, test, restore-drill]
     strategy:
       fail-fast: false
       matrix:
