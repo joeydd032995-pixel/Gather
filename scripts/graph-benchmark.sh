@@ -42,6 +42,7 @@
 #   GATHER_BENCH_REPEATS        timed runs per root      (default 3)
 #   GATHER_BENCH_DEPTHS         depths to measure (default "1 2 3")
 #   GATHER_BENCH_TIMEOUT_MS     per-query statement_timeout (default 15000)
+#   GATHER_BENCH_TEMP_LIMIT     per-query temp spill cap    (default 2GB)
 #   GATHER_BENCH_THRESHOLD_MS   pass/fail line    (default 150)
 #   GATHER_BENCH_ENFORCE        1 = exit non-zero if p95 exceeds the line
 #                               (default 0: report, do not gate)
@@ -72,6 +73,7 @@ ROOTS="${GATHER_BENCH_ROOTS:-40}"
 REPEATS="${GATHER_BENCH_REPEATS:-3}"
 DEPTHS="${GATHER_BENCH_DEPTHS:-1 2 3}"
 TIMEOUT_MS="${GATHER_BENCH_TIMEOUT_MS:-15000}"
+TEMP_FILE_LIMIT="${GATHER_BENCH_TEMP_LIMIT:-2GB}"
 THRESHOLD_MS="${GATHER_BENCH_THRESHOLD_MS:-150}"
 ENFORCE="${GATHER_BENCH_ENFORCE:-0}"
 
@@ -192,7 +194,10 @@ log "measuring entity_neighborhood(): ${ROOTS} roots/tier x ${REPEATS} repeats, 
 
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q <<SQL
 CREATE UNLOGGED TABLE IF NOT EXISTS bench_results (
-  tier text, depth int, root uuid, ms double precision, timed_out boolean
+  tier text, depth int, root uuid, ms double precision,
+  -- 'ok', 'timeout', or a SQLSTATE. A traversal that cannot complete is a
+  -- result, not an absence of one, so it is recorded rather than dropped.
+  outcome text
 );
 TRUNCATE bench_results;
 
@@ -224,8 +229,14 @@ DECLARE
   t0 timestamptz;
   elapsed double precision;
   n bigint;
+  state text;
 BEGIN
   SET LOCAL statement_timeout = ${TIMEOUT_MS};
+  -- Bounds the temp spill of a single traversal. Without it, path enumeration
+  -- from a very high-degree hub can exhaust the host disk and take down the
+  -- whole run (observed at 1.19M edges, depth 3, degree ~53k). With it, the
+  -- runaway query alone fails, and is recorded as its own outcome.
+  SET LOCAL temp_file_limit = '${TEMP_FILE_LIMIT}';
 
   -- Warm-up, discarded. Without it the first depth in the loop absorbs all the
   -- cold-cache cost, which showed up as depth 1 reporting a HIGHER p95 than
@@ -235,7 +246,7 @@ BEGIN
     FOR r IN SELECT id FROM bench_roots LOOP
       BEGIN
         PERFORM count(*) FROM entity_neighborhood(r.id, d);
-      EXCEPTION WHEN query_canceled THEN NULL;
+      EXCEPTION WHEN OTHERS THEN NULL;
       END;
     END LOOP;
   END LOOP;
@@ -249,17 +260,24 @@ BEGIN
           t0 := clock_timestamp();
           SELECT count(*) INTO n FROM entity_neighborhood(r.id, d);
           elapsed := extract(epoch FROM clock_timestamp() - t0) * 1000;
-          INSERT INTO bench_results VALUES (r.tier, d, r.id, elapsed, false);
-        EXCEPTION WHEN query_canceled THEN
-          -- Recorded rather than dropped: silently discarding the slowest
-          -- queries would bias every percentile downward.
-          INSERT INTO bench_results VALUES (r.tier, d, r.id, ${TIMEOUT_MS}, true);
+          INSERT INTO bench_results VALUES (r.tier, d, r.id, elapsed, 'ok');
+        EXCEPTION
+          WHEN query_canceled THEN
+            -- Recorded at the timeout value rather than dropped: silently
+            -- discarding the slowest queries would bias every percentile down.
+            INSERT INTO bench_results VALUES (r.tier, d, r.id, ${TIMEOUT_MS}, 'timeout');
+          WHEN OTHERS THEN
+            -- Most likely temp_file_limit (53400) or disk_full (53100) from
+            -- path explosion. Catching broadly keeps one pathological root
+            -- from aborting the entire measurement.
+            GET STACKED DIAGNOSTICS state = RETURNED_SQLSTATE;
+            INSERT INTO bench_results VALUES (r.tier, d, r.id, ${TIMEOUT_MS}, state);
         END;
       END LOOP;
     END LOOP;
   END LOOP;
 END
-\$\$;
+\$\$;;
 SQL
 
 echo
@@ -267,7 +285,8 @@ echo "=== entity_neighborhood() latency (ms) — threshold ${THRESHOLD_MS} ms ==
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "
   SELECT tier, depth,
          count(*)                                                    AS samples,
-         count(*) FILTER (WHERE timed_out)                           AS timeouts,
+         count(*) FILTER (WHERE outcome = 'ok')                       AS completed,
+         count(*) FILTER (WHERE outcome <> 'ok')                      AS failed,
          round(percentile_cont(0.5)  WITHIN GROUP (ORDER BY ms)::numeric, 1) AS p50,
          round(percentile_cont(0.95) WITHIN GROUP (ORDER BY ms)::numeric, 1) AS p95,
          round(percentile_cont(0.99) WITHIN GROUP (ORDER BY ms)::numeric, 1) AS p99,
