@@ -111,6 +111,58 @@ jobs:
       - name: run restore drill
         run: scripts/ci-restore-drill.sh
 
+  # ------------------------------------------------------ graph benchmark ----
+  # Tier 1: proves the harness still runs and catches gross traversal
+  # regressions. It deliberately does NOT produce the go/no-go number — shared
+  # CI runners are far too noisy for a defensible p95, and the scale here is a
+  # fraction of the roadmap's >1M-row bar. The real figures come from a
+  # full-scale run per docs/BENCHMARK-RUNBOOK.md, the same way
+  # vps-restore-drill.sh is the real restore test.
+  graph-benchmark:
+    name: graph benchmark (tier 1 — traversal smoke)
+    runs-on: ubuntu-24.04
+    needs: [lint]
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: gather
+          POSTGRES_USER: gather
+          POSTGRES_PASSWORD: gather-ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gather -d gather"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://gather:gather-ci@localhost:5432/gather
+      GATHER_GRAPH_BENCH_ALLOW_DESTRUCTIVE: "1"
+      GATHER_BENCH_ENTITIES: "5000"
+      GATHER_BENCH_RELATIONSHIPS: "50000"
+      GATHER_BENCH_ROOTS: "8"
+      GATHER_BENCH_REPEATS: "2"
+      GATHER_BENCH_DEPTHS: "1 2"
+      GATHER_BENCH_TIMEOUT_MS: "10000"
+      # Reporting only: a CI-runner p95 is not evidence about the 150 ms gate.
+      GATHER_BENCH_ENFORCE: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon
+      - name: install postgresql-client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+      - name: apply migrations
+        working-directory: daemon
+        run: for f in migrations/*.sql; do psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$f"; done
+      - name: run graph benchmark
+        run: scripts/graph-benchmark.sh
+
   # -------------------------------------------------------- build daemon ----
   build-daemon:
     name: build daemon (linux x86_64)
