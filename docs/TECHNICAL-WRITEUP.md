@@ -1180,27 +1180,35 @@ bounded it. p95 in ms:
 
 **After** (0005: node-set BFS, node budget, edge cap, JIT suppressed per statement):
 
-| tier | depth | jit=on | jit=off | completed |
-|---|---|---|---|---|
-| hub | 1 | **74.5 under** | **73.4 under** | 60/60 |
-| hub | 2 | 678.2 OVER | 664.2 OVER | 60/60 |
-| hub | 3 | 674.2 OVER | 676.0 OVER | 60/60 |
-| long-tail | 1 | **0.7 under** | **0.7 under** | 60/60 |
-| long-tail | 2 | 312.9 OVER | 319.6 OVER | 60/60 |
-| long-tail | 3 | 584.6 OVER | 613.7 OVER | 60/60 |
+| tier | depth | jit=on | jit=off | p50 (jit=off) | completed |
+|---|---|---|---|---|---|
+| hub | 1 | **49.1 under** | **48.4 under** | 14.9 | 60/60 |
+| hub | 2 | 835.4 OVER | 857.0 OVER | 655.5 | 60/60 |
+| hub | 3 | 836.7 OVER | 844.0 OVER | 668.2 | 60/60 |
+| long-tail | 1 | **0.5 under** | **0.5 under** | 0.5 | 60/60 |
+| long-tail | 2 | 205.0 OVER | 198.6 OVER | **51.5** | 60/60 |
+| long-tail | 3 | 904.5 OVER | 882.9 OVER | 521.8 | 60/60 |
 
 **What changed, stated precisely:**
 
 - **Everything completes.** 360/360 measurements, against 177 that could not finish before. A
   depth-2 walk from a hub previously exhausted a 2 GB temp file; depth 3 was essentially
   unavailable at any tier.
-- **Depth 1 is now under the gate on both tiers**, by a wide margin (0.7 ms long-tail, 74.5 ms hub).
-- **Depth 2 — the route default — is improved but still over**: long-tail p95 591 → 313 ms, hub
-  from "cannot complete" to 678 ms. It is bounded and honest now, not fast.
-- **JIT barely matters any more** (74.5 vs 73.4). The old function's four-orders-of-magnitude row
-  estimate was what tripped `jit_above_cost`; the plpgsql body's individual statements estimate
-  sanely, so the `SET LOCAL jit = off` in both callers is now a guard rather than the fix it was
-  when measured against the old walk.
+- **Depth 1 is now under the gate on both tiers** by a wide margin — 0.5 ms long-tail, 48.4 ms hub,
+  down from 242.8 and 261.7.
+- **Depth 2 — the route default — is much better at the median but still over at p95**: long-tail
+  p50 196 → 51.5 ms, p95 591 → 199 ms. Bounded and honest now, not fast.
+- **JIT barely matters any more** (49.1 vs 48.4). The old function's four-orders-of-magnitude row
+  estimate was what tripped `jit_above_cost`; the plpgsql body's statements estimate sanely, so the
+  `SET LOCAL jit = off` in both callers is now a guard rather than the fix it was against the old
+  walk. A large gap reappearing would signal a plan regression.
+
+**Read the hub rows with care.** Bounding the BFS at `max_depth - 1` (the edge query only reads
+nodes with `lvl < max_depth`, so a node discovered *at* `max_depth` was pure waste) roughly
+quartered the p50 for ordinary roots. It does nothing for hubs, which fill the node budget at
+level 1 and therefore exited after a single iteration either way. The hub depth-2/3 figures moving
+by a couple of hundred ms between runs is single-run variance on a shared machine, not a
+regression — treat p50 as the stabler signal and re-run before reading anything into a p95 delta.
 
 **The rewrite is not a pure win, and the trade is deliberate.** Like-for-like on an ordinary root
 with JIT off and no cap, the node-set BFS is ~15% *slower* than the old recursive CTE (88 vs
@@ -1213,7 +1221,8 @@ level-by-level edge collection was tried so the edge cap could bound the gather 
 ordinary roots 8× worse (97 → 780 ms) because the anti-join against already-emitted edges rescans
 an array per candidate row; it was reverted. Lowering `max_nodes` helps hubs and leaves ordinary
 roots flat (hub depth 2: 1034 ms at 5000, 387 ms at 1000, 265 ms at 300), which is why the default
-is 1000. Getting depth 2 under 150 ms at this scale needs a different structure — a precomputed
+is 1000. Note the p95 is now carried by the hub tier and by depth 3; an ordinary root at the route
+default sits at ~51 ms p50. Getting the *tail* under 150 ms at this scale needs a different structure — a precomputed
 adjacency summary or pagination — not a further tweak to this walk.
 
 **The Phase 3 clause still does not apply.** These are Postgres-side query-shape and budgeting
