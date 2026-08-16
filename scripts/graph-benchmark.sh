@@ -46,6 +46,12 @@
 #   GATHER_BENCH_DEPTHS         depths to measure (default "1 2 3")
 #   GATHER_BENCH_TIMEOUT_MS     per-query statement_timeout (default 15000)
 #   GATHER_BENCH_TEMP_LIMIT     per-query temp spill cap    (default 2GB)
+#   GATHER_BENCH_MAX_NODES      traversal node budget       (default 1000)
+#   GATHER_BENCH_MAX_EDGES      traversal edge cap          (default 2000)
+#                               Both must be held fixed across a before/after
+#                               comparison, exactly like GATHER_BENCH_SEED:
+#                               they change how much of the walk is done, so a
+#                               run at different budgets is not comparable.
 #   GATHER_BENCH_THRESHOLD_MS   pass/fail line    (default 150)
 #   GATHER_BENCH_ENFORCE        1 = exit non-zero if p95 exceeds the line
 #                               (default 0: report, do not gate)
@@ -78,6 +84,8 @@ REPEATS="${GATHER_BENCH_REPEATS:-3}"
 DEPTHS="${GATHER_BENCH_DEPTHS:-1 2 3}"
 TIMEOUT_MS="${GATHER_BENCH_TIMEOUT_MS:-15000}"
 TEMP_FILE_LIMIT="${GATHER_BENCH_TEMP_LIMIT:-2GB}"
+MAX_NODES="${GATHER_BENCH_MAX_NODES:-1000}"
+MAX_EDGES="${GATHER_BENCH_MAX_EDGES:-2000}"
 THRESHOLD_MS="${GATHER_BENCH_THRESHOLD_MS:-150}"
 ENFORCE="${GATHER_BENCH_ENFORCE:-0}"
 
@@ -211,6 +219,7 @@ fi
 # Timed server-side: clock_timestamp() deltas around the call, so the figure
 # excludes client, network and psql overhead. This is the seam Phase 3 names.
 
+log "budgets: max_nodes=${MAX_NODES} max_edges=${MAX_EDGES}"
 log "measuring entity_neighborhood(): ${ROOTS} roots/tier x ${REPEATS} repeats, depths [${DEPTHS}], timeout ${TIMEOUT_MS}ms"
 
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q <<SQL
@@ -278,7 +287,7 @@ for j in on off; do
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -qtA -c "
   COPY (
     SELECT format(
-      'UPDATE bench_results SET ms = extract(epoch FROM clock_timestamp() - statement_timestamp()) * 1000, outcome = ''ok'' WHERE id = %s AND (SELECT count(*) FROM entity_neighborhood(%L::uuid, %s)) >= 0;',
+      'UPDATE bench_results SET ms = extract(epoch FROM clock_timestamp() - statement_timestamp()) * 1000, outcome = ''ok'' WHERE id = %s AND (SELECT count(*) FROM entity_neighborhood(%L::uuid, %s, ${MAX_NODES}, ${MAX_EDGES})) >= 0;',
       id, root, depth)
     FROM bench_results WHERE jit = '$j' ORDER BY id
   ) TO STDOUT;" > "$workdir/measure-$j.sql"
@@ -335,7 +344,7 @@ slow_depth="${slowest#* }"
 echo
 echo "=== EXPLAIN (ANALYZE, BUFFERS) for the slowest observed case (depth ${slow_depth}) ==="
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "SET statement_timeout = ${TIMEOUT_MS};" \
-  -c "EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM entity_neighborhood('${slow_root}'::uuid, ${slow_depth});" \
+  -c "EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM entity_neighborhood('${slow_root}'::uuid, ${slow_depth}, ${MAX_NODES}, ${MAX_EDGES});" \
   || log "EXPLAIN did not complete within the timeout (itself a finding)"
 
 # ----------------------------------------------------------------- gate ----

@@ -767,7 +767,7 @@ Per-file failures don't fail the batch:
 | `GET /api/v1/artifacts?kind=&source_platform=&limit=&offset=` | `artifacts` | newest first |
 | `GET /api/v1/artifacts/{id}` | `artifacts` + `conversations` + `documents(+segment count)` + `images` | one call answers "what is this artifact" |
 | `GET /api/v1/atomic-units?kind=&status=&subject_entity_id=&limit=&offset=` | `atomic_units` (+ provenance count) | |
-| `GET /api/v1/entities/{id}/graph?depth=1..5` | `entities`, `relationships` via `entity_neighborhood()` | returns `{root, nodes[], edges[], query_ms}`; latency recorded to `gather_graph_query_duration_seconds` |
+| `GET /api/v1/entities/{id}/graph?depth=1..5&max_edges=` | `entities`, `relationships` via `entity_neighborhood()` | returns `{root, nodes[], edges[], truncated, max_edges, query_ms}`; latency recorded to `gather_graph_query_duration_seconds`. The walk is bounded by a node budget and `max_edges` (default 2000) — a hub's 2-hop neighbourhood is ~94% of the graph (§9.1), so `truncated` distinguishes a partial answer from a complete one. Traversal runs with `SET LOCAL jit = off`; see §9.1. |
 | `POST /api/v1/search/semantic` | `atomic_units` / `messages` / `document_segments` | body below |
 
 ```jsonc
@@ -1164,44 +1164,75 @@ variant. There is no telemetry, no update phone-home, no crash reporting.
 
 `scripts/graph-benchmark.sh`, 50k entities / **1,184,926 relationship rows** (above the >1M bar),
 skew ratio max/median degree = 2049× (max 53,281, median 26), alpha 3.0, seed 0.42, 20 roots per
-tier × 3 repeats, 5 s timeout. Postgres 16 + pgvector 0.6. p95 in ms:
+tier × 3 repeats, 5 s timeout, budgets `max_nodes=1000 max_edges=2000`. Postgres 16 + pgvector 0.6.
+
+**Before the 0005 traversal rewrite** — the walk enumerated paths rather than nodes, and nothing
+bounded it. p95 in ms:
 
 | tier | depth | jit=on (as shipped) | jit=off | completed |
 |---|---|---|---|---|
-| hub | 1 | 261.7 **OVER** | **52.0 under** | 60/60 |
-| hub | 2 | timeout | timeout | 0/60 |
-| hub | 3 | timeout | timeout | 0/60 |
-| long-tail | 1 | 242.8 **OVER** | **1.2 under** | 60/60 |
-| long-tail | 2 | 591.1 **OVER** | 399.6 **OVER** | 60/60 |
-| long-tail | 3 | timeout | timeout | 3/60 |
+| hub | 1 | 261.7 OVER | 52.0 under | 60/60 |
+| hub | 2 | timeout | timeout | **0/60** |
+| hub | 3 | timeout | timeout | **0/60** |
+| long-tail | 1 | 242.8 OVER | 1.2 under | 60/60 |
+| long-tail | 2 | 591.1 OVER | 399.6 OVER | 60/60 |
+| long-tail | 3 | timeout | timeout | **3/60** |
 
-Read as-shipped, every row is over the line — which reads like grounds for the Neo4j clause. It
-is not. Two separate causes, and neither is the graph store:
+**After** (0005: node-set BFS, node budget, edge cap, JIT suppressed per statement):
 
-**1. Depth 1 is JIT compilation, not traversal.** The tell is that long-tail depth 1 (242.8 ms)
-and hub depth 1 (261.7 ms) are near-identical despite a 2049× difference in degree; traversal cost
-cannot be degree-independent. `EXPLAIN` shows the recursive CTE estimating 191,173 rows where 16
-exist, and that inflated cost crosses `jit_above_cost`: Postgres spends ~225 ms compiling a query
-that runs in ~3 ms. With `jit=off` both tiers land **well under** the 150 ms line at >1M rows.
-This is the "after index tuning" precondition doing its job — the available tuning here is a
-planner/JIT setting, not an index.
+| tier | depth | jit=on | jit=off | p50 (jit=off) | completed |
+|---|---|---|---|---|---|
+| hub | 1 | **49.1 under** | **48.4 under** | 14.9 | 60/60 |
+| hub | 2 | 835.4 OVER | 857.0 OVER | 655.5 | 60/60 |
+| hub | 3 | 836.7 OVER | 844.0 OVER | 668.2 | 60/60 |
+| long-tail | 1 | **0.5 under** | **0.5 under** | 0.5 | 60/60 |
+| long-tail | 2 | 205.0 OVER | 198.6 OVER | **51.5** | 60/60 |
+| long-tail | 3 | 904.5 OVER | 882.9 OVER | 521.8 | 60/60 |
 
-**2. Depth 3 (and hub depth 2) is genuine path explosion.** Unrelated to JIT: the depth-3 plan
-emits 196,878 rows with `temp read=26349 written=39936`, and JIT is only 225 ms of 2458 ms. This
-is the per-row `visited` array (§6.4 note below) enumerating **paths rather than nodes**. An
-earlier uncapped run exhausted the host disk this way, which is why the harness now bounds
-`temp_file_limit` per query.
+**What changed, stated precisely:**
 
-**Depth 2 is the case that matters most** — it is the route default (`GET
-/api/v1/entities/{id}/graph?depth=2`) — and it stays over the line even with JIT off (399.6 ms
-p95, long-tail). That is the real open item, and it is a query-shape problem in
-`entity_neighborhood()`, not a Postgres-vs-Neo4j one.
+- **Everything completes.** 360/360 measurements, against 177 that could not finish before. A
+  depth-2 walk from a hub previously exhausted a 2 GB temp file; depth 3 was essentially
+  unavailable at any tier.
+- **Depth 1 is now under the gate on both tiers** by a wide margin — 0.5 ms long-tail, 48.4 ms hub,
+  down from 242.8 and 261.7.
+- **Depth 2 — the route default — is much better at the median but still over at p95**: long-tail
+  p50 196 → 51.5 ms, p95 591 → 199 ms. Bounded and honest now, not fast.
+- **JIT barely matters any more** (49.1 vs 48.4). The old function's four-orders-of-magnitude row
+  estimate was what tripped `jit_above_cost`; the plpgsql body's statements estimate sanely, so the
+  `SET LOCAL jit = off` in both callers is now a guard rather than the fix it was against the old
+  walk. A large gap reappearing would signal a plan regression.
 
-**Caveats, so these numbers are not over-read.** This is a synthetic adversarial graph: alpha 3.0
-over 50k entities produces a single hub adjacent to most of the graph, which a personal knowledge
-base may never approach. 1.18M rows is Phase-3 scale, not "personal scale" — the Phase 1 latency
-gate should be judged from a run sized to your own corpus. And the figures are from one machine;
-re-run with the same seed before and after any change, or the comparison is not like-for-like.
+**Read the hub rows with care.** Bounding the BFS at `max_depth - 1` (the edge query only reads
+nodes with `lvl < max_depth`, so a node discovered *at* `max_depth` was pure waste) roughly
+quartered the p50 for ordinary roots. It does nothing for hubs, which fill the node budget at
+level 1 and therefore exited after a single iteration either way. The hub depth-2/3 figures moving
+by a couple of hundred ms between runs is single-run variance on a shared machine, not a
+regression — treat p50 as the stabler signal and re-run before reading anything into a p95 delta.
+
+**The rewrite is not a pure win, and the trade is deliberate.** Like-for-like on an ordinary root
+with JIT off and no cap, the node-set BFS is ~15% *slower* than the old recursive CTE (88 vs
+76 ms): a plpgsql loop gives up SQL inlining. Its value is entirely in the tail — turning
+"cannot complete" into a bounded, labelled answer — not in the common case.
+
+**Why depth 2 is still over, and what would move it.** The residual is not path enumeration any
+more; it is that any depth ≥1 query on a 53k-degree root must consider that root's 53k edges. A
+level-by-level edge collection was tried so the edge cap could bound the gather too, and it made
+ordinary roots 8× worse (97 → 780 ms) because the anti-join against already-emitted edges rescans
+an array per candidate row; it was reverted. Lowering `max_nodes` helps hubs and leaves ordinary
+roots flat (hub depth 2: 1034 ms at 5000, 387 ms at 1000, 265 ms at 300), which is why the default
+is 1000. Note the p95 is now carried by the hub tier and by depth 3; an ordinary root at the route
+default sits at ~51 ms p50. Getting the *tail* under 150 ms at this scale needs a different structure — a precomputed
+adjacency summary or pagination — not a further tweak to this walk.
+
+**The Phase 3 clause still does not apply.** These are Postgres-side query-shape and budgeting
+issues, all addressed without changing graph store, and `entity_neighborhood()` remains the single
+seam if that ever changes.
+
+**Caveats, unchanged.** Synthetic adversarial graph: alpha 3.0 over 50k entities yields one hub
+adjacent to ~94% of the graph, which a personal knowledge base may never approach. 1.18M rows is
+Phase-3 scale, not "personal scale" — judge the Phase 1 latency gate from a run sized to your own
+corpus. One machine. Re-run with the same seed **and the same budgets** before comparing.
 See `docs/BENCHMARK-RUNBOOK.md`.
 
 ---

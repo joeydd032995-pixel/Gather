@@ -243,7 +243,17 @@ pub fn unit_row_to_json(row: &sqlx::postgres::PgRow) -> Value {
 #[derive(Deserialize)]
 pub struct GraphParams {
     pub depth: Option<i32>,
+    /// Cap on returned edges. A hub's 2-hop neighbourhood can be most of the
+    /// graph (measured: 94% at 1.18M rows, §9.1), so an uncapped response is
+    /// neither useful nor safe to serialize.
+    pub max_edges: Option<i32>,
 }
+
+/// Nodes the traversal may expand before returning a partial answer. Bounds
+/// the walk itself, not just the output — the cost is in the walk, before any
+/// row would be discarded by an output cap.
+pub(crate) const GRAPH_MAX_NODES: i32 = 1_000;
+pub(crate) const GRAPH_DEFAULT_MAX_EDGES: i32 = 2_000;
 
 pub async fn entity_graph(
     State(state): State<AppState>,
@@ -251,6 +261,10 @@ pub async fn entity_graph(
     Query(params): Query<GraphParams>,
 ) -> Result<Json<Value>, ApiError> {
     let depth = params.depth.unwrap_or(2).clamp(1, 5);
+    let max_edges = params
+        .max_edges
+        .unwrap_or(GRAPH_DEFAULT_MAX_EDGES)
+        .clamp(1, 50_000);
     let started = Instant::now();
 
     // A link to an entity that has since been merged away should show the
@@ -264,15 +278,31 @@ pub async fn entity_graph(
             .await?
             .ok_or_else(|| ApiError::NotFound(format!("entity {id}")))?;
 
+    // Run in a transaction purely so SET LOCAL applies: the traversal's row
+    // estimate is wrong by orders of magnitude, which pushes the plan past
+    // jit_above_cost and buys ~225 ms of compilation for a query that executes
+    // in single-digit ms (§9.1). SET LOCAL keeps that scoped to this statement
+    // rather than disabling JIT for the daemon.
+    let mut tx = state.pool.begin().await?;
+    sqlx::query("SET LOCAL jit = off").execute(&mut *tx).await?;
     let edges = sqlx::query(
         r#"SELECT depth, relationship_id, source_entity_id, target_entity_id,
-                  relation_type, confidence
-           FROM entity_neighborhood($1, $2)"#,
+                  relation_type, confidence, truncated
+           FROM entity_neighborhood($1, $2, $3, $4)"#,
     )
     .bind(id)
     .bind(depth)
-    .fetch_all(&state.pool)
+    .bind(GRAPH_MAX_NODES)
+    .bind(max_edges)
+    .fetch_all(&mut *tx)
     .await?;
+    tx.commit().await?;
+
+    // Constant across the result set; absent only when there are no edges.
+    let truncated = edges
+        .first()
+        .map(|e| e.get::<bool, _>("truncated"))
+        .unwrap_or(false);
 
     // Hydrate the node set referenced by the edges.
     let mut node_ids: Vec<Uuid> = edges
@@ -305,6 +335,10 @@ pub async fn entity_graph(
             "kind": root.get::<String, _>("kind"),
         },
         "depth": depth,
+        // Callers must be able to tell a partial neighbourhood from a complete
+        // one; `edges` alone cannot express that.
+        "truncated": truncated,
+        "max_edges": max_edges,
         "nodes": nodes.iter().map(|n| json!({
             "id": n.get::<Uuid, _>("id"),
             "name": n.get::<String, _>("name"),

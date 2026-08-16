@@ -277,6 +277,7 @@ async fn entity_graph_traverses_seeded_relationships() {
     let mut query = QueryServiceClient::new(connect(&url).await);
     let graph = query
         .get_entity_graph(pb::GetEntityGraphRequest {
+            max_edges: 0, // server default
             entity_id: ids[0].to_string(),
             depth: 2,
         })
@@ -293,6 +294,7 @@ async fn entity_graph_traverses_seeded_relationships() {
     // depth=1 stops at the first hop.
     let shallow = query
         .get_entity_graph(pb::GetEntityGraphRequest {
+            max_edges: 0, // server default
             entity_id: ids[0].to_string(),
             depth: 1,
         })
