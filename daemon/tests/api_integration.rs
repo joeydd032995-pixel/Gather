@@ -31,6 +31,7 @@ async fn test_state() -> Option<AppState> {
             .build_recorder()
             .handle(),
         ollama: None,
+        rate_limiter: None,
     })
 }
 
@@ -295,4 +296,44 @@ async fn new_platform_adapters_ingest_through_the_api() {
         assert_eq!(artifact["source_platform"], json!(platform));
         assert!(artifact["source_format_version"].as_str().unwrap().len() > 3);
     }
+}
+
+#[tokio::test]
+async fn rate_limit_returns_429_and_spares_health() {
+    let Some(mut state) = test_state().await else {
+        return;
+    };
+    // Burst of 1 request/sec so the second API call in the same instant trips.
+    state.rate_limiter = gather_daemon::build_rate_limiter(1);
+    let app = routes::build_router(state);
+
+    let first = app
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/artifacts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let second = app
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/artifacts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    // Health endpoints are outside /api/v1 and never rate limited.
+    let health = app
+        .clone()
+        .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
 }

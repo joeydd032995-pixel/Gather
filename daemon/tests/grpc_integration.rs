@@ -44,6 +44,7 @@ async fn test_state(api_token: Option<&str>) -> Option<AppState> {
             .build_recorder()
             .handle(),
         ollama: None,
+        rate_limiter: None,
     })
 }
 

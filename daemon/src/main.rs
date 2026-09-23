@@ -97,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
         config: Arc::new(config.clone()),
         metrics: metrics_handle,
         ollama: ollama_client,
+        rate_limiter: gather_daemon::build_rate_limiter(config.rate_limit_rps),
     };
 
     tokio::spawn(gather_daemon::gauge_refresher(pool.clone()));

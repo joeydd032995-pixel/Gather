@@ -73,7 +73,10 @@ pub fn build_router(state: AppState) -> Router {
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_bearer,
-        ));
+        ))
+        // Rate limiting wraps auth so a flood is rejected before the token
+        // check. Loopback-only, but this bounds a runaway local client.
+        .layer(middleware::from_fn_with_state(state.clone(), rate_limit));
 
     let max_body = state.config.max_upload_mb * 1024 * 1024;
 
@@ -103,6 +106,21 @@ pub fn build_router(state: AppState) -> Router {
         .layer(cors)
         .layer(DefaultBodyLimit::max(max_body))
         .with_state(state)
+}
+
+/// Global request-rate guard for /api/v1. Returns 429 when the shared bucket
+/// is empty; a no-op when GATHER_RATE_LIMIT_RPS=0 (limiter absent).
+async fn rate_limit(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, crate::error::ApiError> {
+    if let Some(limiter) = &state.rate_limiter {
+        if limiter.check().is_err() {
+            return Err(crate::error::ApiError::TooManyRequests);
+        }
+    }
+    Ok(next.run(request).await)
 }
 
 /// Per-route latency histogram feeding the Grafana dashboard.

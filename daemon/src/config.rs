@@ -20,6 +20,10 @@ pub struct Config {
     pub auth_mode: String,
     /// Upload cap per request body, in megabytes.
     pub max_upload_mb: usize,
+    /// Requests/sec allowed across /api/v1 and the gRPC services combined
+    /// (a shared global bucket). 0 disables rate limiting. Bounds a runaway
+    /// local client; the listener is loopback-only regardless.
+    pub rate_limit_rps: u32,
     /// Emit JSON logs instead of human-readable ones.
     pub log_json: bool,
     /// Explicit opt-out of the loopback-only policy (bind address and
@@ -95,6 +99,11 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(256);
 
+        let rate_limit_rps = std::env::var("GATHER_RATE_LIMIT_RPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(50);
+
         let log_json = std::env::var("GATHER_LOG_JSON")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
@@ -125,6 +134,7 @@ impl Config {
             api_token,
             auth_mode,
             max_upload_mb,
+            rate_limit_rps,
             log_json,
             allow_non_loopback,
             extraction_enabled: env_bool("GATHER_EXTRACTION_ENABLED", true),
@@ -183,6 +193,7 @@ impl Config {
             api_token: None,
             auth_mode: "env".to_string(),
             max_upload_mb: 16,
+            rate_limit_rps: 0,
             log_json: false,
             allow_non_loopback: false,
             extraction_enabled: true,

@@ -40,6 +40,7 @@ pub(crate) fn status_from(error: ApiError) -> tonic::Status {
         }
         ApiError::NotFound(m) => tonic::Status::not_found(m.clone()),
         ApiError::Unauthorized => tonic::Status::unauthenticated("missing or invalid token"),
+        ApiError::TooManyRequests => tonic::Status::resource_exhausted("rate limit exceeded"),
         ApiError::Db(e) => {
             tracing::error!(error = %e, "grpc database error");
             tonic::Status::internal("database error")
@@ -68,7 +69,8 @@ pub async fn serve(state: AppState) -> anyhow::Result<()> {
 /// Serve on an already-bound listener; tests bind 127.0.0.1:0 and read
 /// `local_addr()` before handing the listener over.
 pub async fn serve_on(state: AppState, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
-    let interceptor = auth::BearerInterceptor::new(state.config.api_token.clone());
+    let interceptor =
+        auth::BearerInterceptor::new(state.config.api_token.clone(), state.rate_limiter.clone());
 
     Server::builder()
         .add_service(IngestServiceServer::with_interceptor(
