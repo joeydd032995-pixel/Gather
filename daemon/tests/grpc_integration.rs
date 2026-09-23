@@ -23,6 +23,7 @@ use gather_daemon::grpc::{self, pb};
 use gather_daemon::{db, routes, AppState};
 
 use pb::contradiction_service_client::ContradictionServiceClient;
+use pb::entity_service_client::EntityServiceClient;
 use pb::export_service_client::ExportServiceClient;
 use pb::ingest_service_client::IngestServiceClient;
 use pb::query_service_client::QueryServiceClient;
@@ -710,9 +711,113 @@ async fn auth_interceptor_enforces_bearer_token() {
         .list_artifacts(pb::ListArtifactsRequest::default())
         .await
         .expect("authorized query");
-    let mut contra = ContradictionServiceClient::with_interceptor(channel, with_token);
+    let mut contra = ContradictionServiceClient::with_interceptor(channel.clone(), with_token);
     contra
         .list_contradictions(pb::ListContradictionsRequest::default())
         .await
         .expect("authorized contradiction list");
+    let mut ents = EntityServiceClient::with_interceptor(channel, with_token);
+    ents.list_entities(pb::ListEntitiesRequest::default())
+        .await
+        .expect("authorized entity list");
+}
+
+#[tokio::test]
+async fn entity_service_lists_merges_and_adds_aliases() {
+    let Some(state) = test_state(None).await else {
+        return;
+    };
+
+    // Two live entities with a shared, unique-per-run name prefix so this test
+    // stays isolated from parallel suites (the entities partial unique index is
+    // on (lower(name), kind) for un-merged rows).
+    let salt = Uuid::new_v4().simple().to_string();
+    let winner_name = format!("grpc-ent-winner-{salt}");
+    let loser_name = format!("grpc-ent-loser-{salt}");
+    let winner_id: Uuid =
+        sqlx::query_scalar("INSERT INTO entities (name, kind) VALUES ($1, 'other') RETURNING id")
+            .bind(&winner_name)
+            .fetch_one(&state.pool)
+            .await
+            .expect("insert winner");
+    let loser_id: Uuid =
+        sqlx::query_scalar("INSERT INTO entities (name, kind) VALUES ($1, 'other') RETURNING id")
+            .bind(&loser_name)
+            .fetch_one(&state.pool)
+            .await
+            .expect("insert loser");
+
+    let url = spawn_grpc(state.clone()).await;
+    let channel = connect(&url).await;
+    let mut client = EntityServiceClient::new(channel);
+
+    // list_entities filtered by the shared prefix sees both.
+    let listed = client
+        .list_entities(pb::ListEntitiesRequest {
+            q: salt.clone(),
+            limit: 50,
+            ..Default::default()
+        })
+        .await
+        .expect("list entities")
+        .into_inner();
+    assert!(listed.items.iter().any(|e| e.id == winner_id.to_string()));
+    assert!(listed.items.iter().any(|e| e.id == loser_id.to_string()));
+
+    // add_alias to the winner: first insert succeeds, a repeat is a no-op.
+    let alias = format!("grpc-alias-{salt}");
+    let added = client
+        .add_alias(pb::AddAliasRequest {
+            entity_id: winner_id.to_string(),
+            alias: alias.clone(),
+        })
+        .await
+        .expect("add alias")
+        .into_inner();
+    assert!(added.added);
+    let again = client
+        .add_alias(pb::AddAliasRequest {
+            entity_id: winner_id.to_string(),
+            alias: alias.clone(),
+        })
+        .await
+        .expect("re-add alias")
+        .into_inner();
+    assert!(!again.added);
+
+    // merge the loser into the winner via gRPC (shares the REST core).
+    let outcome = client
+        .merge_entities(pb::MergeEntitiesRequest {
+            winner_id: winner_id.to_string(),
+            loser_id: loser_id.to_string(),
+            note: "grpc merge".into(),
+            actor: "test".into(),
+        })
+        .await
+        .expect("merge entities")
+        .into_inner();
+    assert_eq!(outcome.winner_id, winner_id.to_string());
+    assert_eq!(outcome.loser_id, loser_id.to_string());
+
+    // get_entity on the winner reflects the alias and a merge-audit trail;
+    // get_entity on the loser shows it was merged away.
+    let winner = client
+        .get_entity(pb::GetEntityRequest {
+            id: winner_id.to_string(),
+        })
+        .await
+        .expect("get winner")
+        .into_inner();
+    assert_eq!(winner.name, winner_name);
+    assert!(winner.aliases.contains(&alias));
+    assert!(winner.audit.iter().any(|a| a.action == "merge"));
+
+    let loser = client
+        .get_entity(pb::GetEntityRequest {
+            id: loser_id.to_string(),
+        })
+        .await
+        .expect("get loser")
+        .into_inner();
+    assert_eq!(loser.merged_into_entity_id, winner_id.to_string());
 }

@@ -202,64 +202,9 @@ pub async fn add_alias(
     Path(id): Path<Uuid>,
     Json(req): Json<AliasRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let alias = req.alias.trim();
-    if alias.is_empty() {
-        return Err(ApiError::BadRequest("alias must not be empty".to_string()));
-    }
-
-    // A client holding a stale id could otherwise hang the alias on a
-    // merged-away entity, which resolve_or_create_entity would then hand back
-    // — reviving the node the merge retired.
-    let target: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT merged_into_entity_id FROM entities WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&state.pool)
-            .await?;
-    match target {
-        None => return Err(ApiError::NotFound(format!("entity {id}"))),
-        Some(Some(head)) => {
-            return Err(ApiError::BadRequest(format!(
-                "entity {id} has been merged into {head}; alias that entity instead"
-            )))
-        }
-        Some(None) => {}
-    }
-
-    // An alias that already resolves to a different live entity — whether as
-    // that entity's name or as one of its aliases — would make
-    // resolve_or_create_entity's `UNION … LIMIT 1` nondeterministic. Such a
-    // pair should be merged instead.
-    let clash: Option<Uuid> = sqlx::query_scalar(
-        "SELECT e.id FROM entities e \
-           WHERE lower(e.name) = lower($1) AND e.id <> $2 AND e.merged_into_entity_id IS NULL \
-         UNION \
-         SELECT a.entity_id FROM entity_aliases a \
-           JOIN entities e2 ON e2.id = a.entity_id \
-           WHERE lower(a.alias) = lower($1) AND a.entity_id <> $2 \
-             AND e2.merged_into_entity_id IS NULL \
-         LIMIT 1",
-    )
-    .bind(alias)
-    .bind(id)
-    .fetch_optional(&state.pool)
-    .await?;
-    if let Some(other) = clash {
-        return Err(ApiError::BadRequest(format!(
-            "'{alias}' already resolves to entity {other}; merge them instead"
-        )));
-    }
-
-    let inserted = sqlx::query(
-        "INSERT INTO entity_aliases (entity_id, alias) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-    )
-    .bind(id)
-    .bind(alias)
-    .execute(&state.pool)
-    .await?
-    .rows_affected();
-
+    let added = entities::add_alias(&state.pool, id, &req.alias).await?;
     Ok((
         StatusCode::CREATED,
-        Json(json!({ "entity_id": id, "alias": alias, "added": inserted > 0 })),
+        Json(json!({ "entity_id": id, "alias": req.alias.trim(), "added": added })),
     ))
 }

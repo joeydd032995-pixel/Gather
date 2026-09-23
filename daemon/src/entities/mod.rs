@@ -188,6 +188,67 @@ fn find(entities: &[(EntityRef, bool)], id: Uuid) -> Option<EntityRef> {
         .map(|(e, _)| e.clone())
 }
 
+/// Add an alias to a live entity, returning whether a new row was inserted.
+///
+/// Shared by the REST and gRPC surfaces. Guards against the two ways an alias
+/// could corrupt `resolve_or_create_entity`'s lookup: hanging it on a
+/// merged-away entity (which would revive the retired node), or shadowing a
+/// name/alias that already resolves to a different live entity (which would
+/// make the resolver's `UNION … LIMIT 1` nondeterministic — such a pair should
+/// be merged instead).
+pub async fn add_alias(pool: &PgPool, id: Uuid, alias: &str) -> Result<bool, ApiError> {
+    let alias = alias.trim();
+    if alias.is_empty() {
+        return Err(ApiError::BadRequest("alias must not be empty".to_string()));
+    }
+
+    let target: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT merged_into_entity_id FROM entities WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+    match target {
+        None => return Err(ApiError::NotFound(format!("entity {id}"))),
+        Some(Some(head)) => {
+            return Err(ApiError::BadRequest(format!(
+                "entity {id} has been merged into {head}; alias that entity instead"
+            )))
+        }
+        Some(None) => {}
+    }
+
+    let clash: Option<Uuid> = sqlx::query_scalar(
+        "SELECT e.id FROM entities e \
+           WHERE lower(e.name) = lower($1) AND e.id <> $2 AND e.merged_into_entity_id IS NULL \
+         UNION \
+         SELECT a.entity_id FROM entity_aliases a \
+           JOIN entities e2 ON e2.id = a.entity_id \
+           WHERE lower(a.alias) = lower($1) AND a.entity_id <> $2 \
+             AND e2.merged_into_entity_id IS NULL \
+         LIMIT 1",
+    )
+    .bind(alias)
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    if let Some(other) = clash {
+        return Err(ApiError::BadRequest(format!(
+            "'{alias}' already resolves to entity {other}; merge them instead"
+        )));
+    }
+
+    let inserted = sqlx::query(
+        "INSERT INTO entity_aliases (entity_id, alias) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+    )
+    .bind(id)
+    .bind(alias)
+    .execute(pool)
+    .await?
+    .rows_affected();
+
+    Ok(inserted > 0)
+}
+
 /// Backfill `entities.embedding` for live entities missing one.
 ///
 /// `entities_embedding_hnsw` has existed since 0001 but indexed an all-NULL
