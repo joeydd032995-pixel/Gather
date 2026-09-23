@@ -34,6 +34,33 @@ jobs:
         working-directory: daemon
         run: cargo clippy --all-targets -- -D warnings
 
+  # --------------------------------------------------------------- audit ----
+  # Dependency-vulnerability scanning. The daemon parses untrusted PDF/OCR/JSON
+  # input, so a known-CVE crate is a hard gate; the desktop is a thin loopback
+  # client, so its advisories report without blocking (Dependabot opens the
+  # upgrade PRs — see .github/dependabot.yml).
+  audit:
+    name: audit (cargo-audit + npm audit)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: cargo audit
+        working-directory: daemon
+        run: cargo audit
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: npm audit (advisory)
+        working-directory: apps/desktop
+        continue-on-error: true
+        run: npm audit --audit-level=high
+
   # ---------------------------------------------------------------- test ----
   test:
     name: test (unit + integration vs pgvector)
