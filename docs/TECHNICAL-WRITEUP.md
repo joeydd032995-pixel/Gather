@@ -161,10 +161,10 @@ by the daemon at startup via embedded sqlx migrations). Design highlights:
 - **Multimodal**: one `artifacts` table with a `kind` enum spanning chat, agent logs, three
   document kinds and two image kinds; modality detail lives in `conversations`/`messages`,
   `documents`/`document_segments`, `images`.
-- **Provenance**: `atomic_unit_provenance` always carries `artifact_id` plus at most one
-  fine-grained anchor (`message_id` | `document_segment_id` | `image_id`) with optional char
-  offsets and a verbatim quote — so "why do you believe X?" is one indexed join away from any
-  modality.
+- **Provenance**: `atomic_unit_provenance` always carries `artifact_id` plus exactly one
+  fine-grained anchor (`message_id` | `document_segment_id` | `image_id`, enforced by a CHECK
+  since migration 0006) with optional char offsets and a verbatim quote — so "why do you
+  believe X?" is one indexed join away from any modality.
 - **Vectors**: `vector(768)` (nomic-embed-text via local Ollama) on `atomic_units`,
   `document_segments`, `entities`, each with an HNSW cosine index; generated `tsvector` columns +
   GIN indexes give full-text search with zero extra infrastructure.
