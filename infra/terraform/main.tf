@@ -21,6 +21,16 @@ resource "hcloud_ssh_key" "admin" {
 resource "hcloud_firewall" "backup" {
   name = "gather-backup-fw"
 
+  # Refuse to open SSH to the entire internet unless explicitly opted in. A
+  # variable-level validation can't cross-reference allow_open_ssh on the
+  # supported Terraform (>= 1.6), so enforce it here as a plan-time precondition.
+  lifecycle {
+    precondition {
+      condition     = var.allow_open_ssh || !contains(["0.0.0.0/0", "::/0"], var.admin_cidr)
+      error_message = "admin_cidr opens SSH to the whole internet; set your real IP (x.x.x.x/32) or, if truly intended, set allow_open_ssh = true."
+    }
+  }
+
   # SSH from the admin CIDR only — restic runs over this same SSH transport.
   rule {
     direction  = "in"
