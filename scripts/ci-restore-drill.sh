@@ -46,16 +46,59 @@ TOKEN="ci-restore-drill-$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 workdir="$(mktemp -d)"
 daemon_pid=""
 
-cleanup() {
+log() { printf '[ci-restore-drill] %s\n' "$1"; }
+
+# Start the daemon; $1 = "workers-on" (extraction+scan, for seeding) or
+# "workers-off" (for the export/wipe/restore phase). The capture phase must run
+# with workers off: a background pass mutating or locking rows mid-snapshot
+# both breaks the byte-for-byte round-trip check (a rescan re-stamps
+# contradiction_scanned_at) and can deadlock the TRUNCATE (AccessExclusiveLock
+# vs a worker's in-flight row lock).
+start_daemon() {
+  local ext=true scan=true
+  if [ "$1" = "workers-off" ]; then
+    ext=false
+    scan=false
+  fi
+  GATHER_API_TOKEN="$TOKEN" \
+    GATHER_BIND_ADDR="127.0.0.1:7601" \
+    GATHER_GRPC_ENABLED=false \
+    GATHER_EXTRACTION_ENABLED="$ext" \
+    GATHER_EXTRACTION_INTERVAL_SECS=1 \
+    GATHER_SCAN_ENABLED="$scan" \
+    GATHER_SCAN_INTERVAL_SECS=1 \
+    DATABASE_URL="$DATABASE_URL" \
+    "$GATHER_DAEMON_BIN" &
+  daemon_pid=$!
+
+  local ready=""
+  for _ in $(seq 1 60); do
+    if curl -fsS "$GATHER_BASE_URL/readyz" >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
+    sleep 1
+  done
+  if [ -z "$ready" ]; then
+    log "FAILED: daemon never became ready"
+    exit 1
+  fi
+}
+
+# Stop the daemon and fully reap it, so the port is free before any restart.
+stop_daemon() {
   if [ -n "$daemon_pid" ] && kill -0 "$daemon_pid" 2>/dev/null; then
     kill "$daemon_pid" 2>/dev/null || true
     wait "$daemon_pid" 2>/dev/null || true
   fi
+  daemon_pid=""
+}
+
+cleanup() {
+  stop_daemon
   rm -rf "$workdir"
 }
 trap cleanup EXIT
-
-log() { printf '[ci-restore-drill] %s\n' "$1"; }
 
 curl_json() {
   # curl_json <method> <path> [json-body]
@@ -72,30 +115,8 @@ curl_json() {
 }
 
 # ---------------------------------------------------------------- start ----
-log "starting daemon ($GATHER_DAEMON_BIN)"
-GATHER_API_TOKEN="$TOKEN" \
-  GATHER_BIND_ADDR="127.0.0.1:7601" \
-  GATHER_GRPC_ENABLED=false \
-  GATHER_EXTRACTION_ENABLED=true \
-  GATHER_EXTRACTION_INTERVAL_SECS=1 \
-  GATHER_SCAN_ENABLED=true \
-  GATHER_SCAN_INTERVAL_SECS=1 \
-  DATABASE_URL="$DATABASE_URL" \
-  "$GATHER_DAEMON_BIN" &
-daemon_pid=$!
-
-ready=""
-for _ in $(seq 1 60); do
-  if curl -fsS "$GATHER_BASE_URL/readyz" >/dev/null 2>&1; then
-    ready=1
-    break
-  fi
-  sleep 1
-done
-if [ -z "$ready" ]; then
-  log "FAILED: daemon never became ready"
-  exit 1
-fi
+log "starting daemon with workers on ($GATHER_DAEMON_BIN)"
+start_daemon workers-on
 log "daemon ready"
 
 # ----------------------------------------------------------------- seed ----
@@ -170,6 +191,14 @@ else
   log "FAILED: expected at least two entities from the seeded fixtures"
   exit 1
 fi
+
+# Seeding is done. Restart with the background workers off so the snapshot,
+# wipe, restore, and re-export below run against a quiescent database — no
+# extraction/scan pass can mutate rows mid-round-trip or deadlock the TRUNCATE.
+log "restarting daemon with workers off for the capture/restore phase"
+stop_daemon
+start_daemon workers-off
+log "daemon ready (workers off)"
 
 # --------------------------------------------------------------- export ----
 before_bundle="$workdir/gather-bundle-before.ndjson"
