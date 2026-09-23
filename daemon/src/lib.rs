@@ -84,6 +84,10 @@ pub fn describe_metrics() {
         "Contradiction scan pass duration"
     );
     metrics::describe_gauge!(
+        "gather_api_auth_enabled",
+        "1 when /api/v1 requires a bearer token, 0 when the API is open (loopback only)"
+    );
+    metrics::describe_gauge!(
         "gather_contradictions_open",
         "Contradictions currently awaiting review"
     );

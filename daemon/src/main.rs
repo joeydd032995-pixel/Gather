@@ -40,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut config = Config::from_env()?;
     gather_daemon::init_tracing(config.log_json);
-    gather_daemon::auth_token::resolve(&mut config);
+    gather_daemon::auth_token::resolve(&mut config).map_err(|e| anyhow::anyhow!(e))?;
 
     let metrics_handle = PrometheusBuilder::new()
         .set_buckets_for_metric(
@@ -59,6 +59,20 @@ async fn main() -> anyhow::Result<()> {
         auth = config.api_token.is_some(),
         "starting gather-daemon (offline-by-default: no outbound connections)"
     );
+
+    // Surface the auth posture loudly and as a scrapeable gauge. The API stays
+    // open on loopback when no token is configured (docker-compose dev default),
+    // but that fact must be impossible to miss and observable in Grafana.
+    if config.api_token.is_some() {
+        metrics::gauge!("gather_api_auth_enabled").set(1.0);
+    } else {
+        metrics::gauge!("gather_api_auth_enabled").set(0.0);
+        tracing::warn!(
+            "/api/v1 IS SERVING UNAUTHENTICATED — any process that can reach the loopback \
+             port has full API access. This is safe only because the listener is loopback-only. \
+             Set GATHER_API_TOKEN (or GATHER_AUTH_MODE=keychain) to enforce bearer auth."
+        );
+    }
 
     let pool = db::connect(&config.database_url).await?;
     db::migrate(&pool).await?;

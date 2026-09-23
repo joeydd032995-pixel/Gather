@@ -60,29 +60,28 @@ pub fn get_or_create_token(store: &dyn TokenStore) -> Result<String, String> {
 }
 
 /// Resolve the effective API token per GATHER_AUTH_MODE, mutating the config
-/// in place. Keychain unavailability (headless hosts, containers) degrades
-/// to the mode's fallback with a prominent warning — auth hardening must
-/// never brick the daemon.
-pub fn resolve(config: &mut Config) {
+/// in place. In `keychain` mode, keychain unavailability is fatal: the caller
+/// explicitly asked for enforced auth, so silently degrading to an open API
+/// would defeat the request. Operators who genuinely want an open loopback API
+/// should use env mode with a blank GATHER_API_TOKEN instead (which stays open
+/// behind a loud startup warning).
+pub fn resolve(config: &mut Config) -> Result<(), String> {
     if config.auth_mode != "keychain" {
-        return; // env mode: config.api_token already holds GATHER_API_TOKEN
+        return Ok(()); // env mode: config.api_token already holds GATHER_API_TOKEN
     }
-    match get_or_create_token(&OsKeychain) {
-        Ok(token) => {
-            tracing::info!(
-                fingerprint = &token[..8],
-                "api token loaded from OS keychain"
-            );
-            config.api_token = Some(token);
-        }
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "GATHER_AUTH_MODE=keychain but the OS keychain is unavailable; \
-                 continuing with loopback-open API (set GATHER_API_TOKEN to enforce auth)"
-            );
-        }
-    }
+    let token = get_or_create_token(&OsKeychain).map_err(|e| {
+        format!(
+            "GATHER_AUTH_MODE=keychain but the OS keychain is unavailable ({e}); \
+             refusing to start with an unenforced token. Use GATHER_AUTH_MODE=env \
+             (with GATHER_API_TOKEN set, or blank for an intentionally open loopback API)."
+        )
+    })?;
+    tracing::info!(
+        fingerprint = &token[..8],
+        "api token loaded from OS keychain"
+    );
+    config.api_token = Some(token);
+    Ok(())
 }
 
 #[cfg(test)]
