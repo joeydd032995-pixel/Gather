@@ -71,9 +71,11 @@ start_daemon() {
     "$GATHER_DAEMON_BIN" &
   daemon_pid=$!
 
+  # Bound each probe (connect + transfer) so a stalled readyz can't hang the
+  # loop past its intended ~60s ceiling.
   local ready=""
   for _ in $(seq 1 60); do
-    if curl -fsS "$GATHER_BASE_URL/readyz" >/dev/null 2>&1; then
+    if curl -fsS --connect-timeout 2 --max-time 3 "$GATHER_BASE_URL/readyz" >/dev/null 2>&1; then
       ready=1
       break
     fi

@@ -303,8 +303,13 @@ async fn rate_limit_returns_429_and_spares_health() {
     let Some(mut state) = test_state().await else {
         return;
     };
-    // Burst of 1 request/sec so the second API call in the same instant trips.
-    state.rate_limiter = gather_daemon::build_rate_limiter(1);
+    // One allowance that does not replenish within the test: a per-hour quota
+    // with burst 1. Using build_rate_limiter(1) would replenish after 1s, so a
+    // slow first request (DB latency under CI load) could let the second pass.
+    let quota = governor::Quota::with_period(std::time::Duration::from_secs(3600))
+        .unwrap()
+        .allow_burst(std::num::NonZeroU32::new(1).unwrap());
+    state.rate_limiter = Some(std::sync::Arc::new(governor::RateLimiter::direct(quota)));
     let app = routes::build_router(state);
 
     let first = app

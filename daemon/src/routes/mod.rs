@@ -70,13 +70,17 @@ pub fn build_router(state: AppState) -> Router {
             "/contradictions/{id}/annotations",
             post(contradictions::annotate_contradiction),
         )
+        // Layer order: the last .layer() added is outermost (runs first), so
+        // auth runs before the rate limiter. That way unauthenticated requests
+        // are rejected without charging the shared bucket, and a flood of them
+        // can't starve authenticated clients into 429s. When no token is
+        // configured the auth layer passes everything through, so the limiter
+        // still bounds a runaway local client.
+        .layer(middleware::from_fn_with_state(state.clone(), rate_limit))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_bearer,
-        ))
-        // Rate limiting wraps auth so a flood is rejected before the token
-        // check. Loopback-only, but this bounds a runaway local client.
-        .layer(middleware::from_fn_with_state(state.clone(), rate_limit));
+        ));
 
     let max_body = state.config.max_upload_mb * 1024 * 1024;
 

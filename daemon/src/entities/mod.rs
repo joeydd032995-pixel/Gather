@@ -202,10 +202,25 @@ pub async fn add_alias(pool: &PgPool, id: Uuid, alias: &str) -> Result<bool, Api
         return Err(ApiError::BadRequest("alias must not be empty".to_string()));
     }
 
+    // Run the merged-away check, the clash check, and the insert in one
+    // transaction so concurrent callers cannot interleave between them:
+    //  - a transaction-scoped advisory lock keyed by the lowercased alias
+    //    serializes two adds of the same alias (they would both pass the clash
+    //    check and both insert, making the resolver's UNION…LIMIT 1
+    //    nondeterministic);
+    //  - FOR UPDATE on the target row blocks against an in-flight merge (which
+    //    locks winner and loser rows FOR UPDATE), so an alias can't land on an
+    //    entity that is being retired.
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext(lower($1)))")
+        .bind(alias)
+        .execute(&mut *tx)
+        .await?;
+
     let target: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT merged_into_entity_id FROM entities WHERE id = $1")
+        sqlx::query_scalar("SELECT merged_into_entity_id FROM entities WHERE id = $1 FOR UPDATE")
             .bind(id)
-            .fetch_optional(pool)
+            .fetch_optional(&mut *tx)
             .await?;
     match target {
         None => return Err(ApiError::NotFound(format!("entity {id}"))),
@@ -229,7 +244,7 @@ pub async fn add_alias(pool: &PgPool, id: Uuid, alias: &str) -> Result<bool, Api
     )
     .bind(alias)
     .bind(id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?;
     if let Some(other) = clash {
         return Err(ApiError::BadRequest(format!(
@@ -242,10 +257,11 @@ pub async fn add_alias(pool: &PgPool, id: Uuid, alias: &str) -> Result<bool, Api
     )
     .bind(id)
     .bind(alias)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?
     .rows_affected();
 
+    tx.commit().await?;
     Ok(inserted > 0)
 }
 

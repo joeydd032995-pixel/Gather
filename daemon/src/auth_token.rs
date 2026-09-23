@@ -72,8 +72,9 @@ pub fn resolve(config: &mut Config) -> Result<(), String> {
     let token = get_or_create_token(&OsKeychain).map_err(|e| {
         format!(
             "GATHER_AUTH_MODE=keychain but the OS keychain is unavailable ({e}); \
-             refusing to start with an unenforced token. Use GATHER_AUTH_MODE=env \
-             (with GATHER_API_TOKEN set, or blank for an intentionally open loopback API)."
+             refusing to start with an unenforced token. Use GATHER_AUTH_MODE=env with \
+             GATHER_API_TOKEN set — a blank token is safe only when every enabled listener \
+             binds to loopback."
         )
     })?;
     tracing::info!(

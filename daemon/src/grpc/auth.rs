@@ -26,11 +26,10 @@ impl BearerInterceptor {
 
 impl Interceptor for BearerInterceptor {
     fn call(&mut self, request: Request<()>) -> Result<Request<()>, Status> {
-        if let Some(limiter) = &self.rate_limiter {
-            if limiter.check().is_err() {
-                return Err(Status::resource_exhausted("rate limit exceeded"));
-            }
-        }
+        // Authenticate before the rate limiter so unauthenticated requests are
+        // rejected without charging the shared bucket (mirrors the REST layer
+        // order). When no token is configured, auth passes and the limiter
+        // still bounds a runaway local client.
         if let Some(expected) = &self.expected {
             let presented = request
                 .metadata()
@@ -40,6 +39,11 @@ impl Interceptor for BearerInterceptor {
             match presented {
                 Some(token) if constant_time_eq(token.as_bytes(), expected.as_bytes()) => {}
                 _ => return Err(Status::unauthenticated("missing or invalid bearer token")),
+            }
+        }
+        if let Some(limiter) = &self.rate_limiter {
+            if limiter.check().is_err() {
+                return Err(Status::resource_exhausted("rate limit exceeded"));
             }
         }
         Ok(request)

@@ -73,6 +73,12 @@ pub enum ConfigError {
          (Gather is offline/local-only by default)"
     )]
     NonLoopbackBind(SocketAddr),
+    #[error("{var} has an invalid value {value:?}: {reason}")]
+    BadEnvValue {
+        var: &'static str,
+        value: String,
+        reason: &'static str,
+    },
 }
 
 impl Config {
@@ -93,11 +99,26 @@ impl Config {
         let database_url =
             std::env::var("DATABASE_URL").map_err(|_| ConfigError::MissingDatabaseUrl)?;
 
-        let db_max_connections = std::env::var("GATHER_DB_MAX_CONNECTIONS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .map(|v: u32| v.max(1))
-            .unwrap_or(8);
+        // A set-but-invalid value is a misconfiguration, not a reason to
+        // silently fall back to the default; only an unset var uses the default.
+        let db_max_connections = match std::env::var("GATHER_DB_MAX_CONNECTIONS") {
+            Err(_) => 8,
+            Ok(raw) => {
+                let n: u32 = raw.parse().map_err(|_| ConfigError::BadEnvValue {
+                    var: "GATHER_DB_MAX_CONNECTIONS",
+                    value: raw.clone(),
+                    reason: "expected a positive integer",
+                })?;
+                if n == 0 {
+                    return Err(ConfigError::BadEnvValue {
+                        var: "GATHER_DB_MAX_CONNECTIONS",
+                        value: raw,
+                        reason: "must be at least 1",
+                    });
+                }
+                n
+            }
+        };
 
         let api_token = std::env::var("GATHER_API_TOKEN")
             .ok()
@@ -108,10 +129,16 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(256);
 
-        let rate_limit_rps = std::env::var("GATHER_RATE_LIMIT_RPS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(50);
+        // 0 is a valid value (rate limiting disabled); only a malformed value
+        // is an error rather than a silent fall-back to the default.
+        let rate_limit_rps = match std::env::var("GATHER_RATE_LIMIT_RPS") {
+            Err(_) => 50,
+            Ok(raw) => raw.parse().map_err(|_| ConfigError::BadEnvValue {
+                var: "GATHER_RATE_LIMIT_RPS",
+                value: raw,
+                reason: "expected a non-negative integer",
+            })?,
+        };
 
         let log_json = std::env::var("GATHER_LOG_JSON")
             .map(|v| v == "true" || v == "1")
