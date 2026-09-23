@@ -169,8 +169,11 @@ by the daemon at startup via embedded sqlx migrations). Design highlights:
   `document_segments`, `entities`, each with an HNSW cosine index; generated `tsvector` columns +
   GIN indexes give full-text search with zero extra infrastructure.
 - **Graph**: `relationships` is indexed both directions (`(source_entity_id, relation_type,
-  status)` and target-side) and traversed by the cycle-safe `entity_neighborhood()` recursive
-  CTE function. Measured on the running stack: depth-2 traversal ≈ 5 ms (budget: <150 ms).
+  status)` and target-side) and traversed by the cycle-safe, node-budgeted `entity_neighborhood()`
+  function (rewritten as a bounded BFS in migration 0005). For measured traversal latency across
+  hub and long-tail roots at depths 1–3, see the benchmark table in §9.1 — do not assume a single
+  headline number; depth-2 p95 ranges from tens of ms to sub-second depending on root degree and
+  graph scale.
 - **Import-friendliness**: self-referential FKs are `DEFERRABLE` so the portable bundle (§4.4)
   restores in one transaction regardless of row order.
 
