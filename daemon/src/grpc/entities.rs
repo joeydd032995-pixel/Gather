@@ -154,6 +154,14 @@ impl pb::entity_service_server::EntityService for EntityApi {
         request: Request<pb::ListMergeSuggestionsRequest>,
     ) -> Result<Response<pb::ListMergeSuggestionsResponse>, Status> {
         let req = request.into_inner();
+        // A non-finite threshold (NaN) survives clamp and makes every
+        // `score < threshold` comparison false, so merge_suggestions would
+        // clone every pair before applying the limit — reject it up front.
+        if !req.threshold.is_finite() {
+            return Err(Status::invalid_argument(
+                "threshold must be a finite number",
+            ));
+        }
         let threshold = if req.threshold <= 0.0 {
             entities::DEFAULT_THRESHOLD
         } else {

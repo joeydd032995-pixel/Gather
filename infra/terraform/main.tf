@@ -26,8 +26,11 @@ resource "hcloud_firewall" "backup" {
   # supported Terraform (>= 1.6), so enforce it here as a plan-time precondition.
   lifecycle {
     precondition {
-      condition     = var.allow_open_ssh || !contains(["0.0.0.0/0", "::/0"], var.admin_cidr)
-      error_message = "admin_cidr opens SSH to the whole internet; set your real IP (x.x.x.x/32) or, if truly intended, set allow_open_ssh = true."
+      # A /0 prefix is the whole address space regardless of the host bits
+      # (0.0.0.0/0, 203.0.113.7/0, ::/0, …), so gate on the prefix length,
+      # not a match against two canonical strings.
+      condition     = var.allow_open_ssh || tonumber(split("/", var.admin_cidr)[1]) != 0
+      error_message = "admin_cidr opens SSH to the whole internet (a /0 prefix); set your real IP (x.x.x.x/32) or, if truly intended, set allow_open_ssh = true."
     }
   }
 

@@ -337,3 +337,33 @@ async fn rate_limit_returns_429_and_spares_health() {
         .unwrap();
     assert_eq!(health.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn merge_suggestions_rejects_non_finite_threshold() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let app = routes::build_router(state);
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/entities/merge-suggestions?threshold=NaN")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // A finite threshold still works.
+    let ok = app
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/entities/merge-suggestions?threshold=0.7")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+}

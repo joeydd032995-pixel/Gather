@@ -67,11 +67,28 @@ async fn main() -> anyhow::Result<()> {
         metrics::gauge!("gather_api_auth_enabled").set(1.0);
     } else {
         metrics::gauge!("gather_api_auth_enabled").set(0.0);
-        tracing::warn!(
-            "/api/v1 IS SERVING UNAUTHENTICATED — any process that can reach the loopback \
-             port has full API access. This is safe only because the listener is loopback-only. \
-             Set GATHER_API_TOKEN (or GATHER_AUTH_MODE=keychain) to enforce bearer auth."
-        );
+        // Whether the open API is genuinely loopback-scoped depends on the
+        // actual bind addresses, which GATHER_ALLOW_NON_LOOPBACK can widen
+        // (the container image sets it, so a published 0.0.0.0 port is
+        // possible). Only claim "loopback-only" when it's actually true.
+        let grpc_non_loopback = config.grpc_enabled && !config.grpc_bind_addr.ip().is_loopback();
+        if !config.bind_addr.ip().is_loopback() || grpc_non_loopback {
+            tracing::warn!(
+                http_bind = %config.bind_addr,
+                grpc_bind = %config.grpc_bind_addr,
+                grpc_enabled = config.grpc_enabled,
+                "/api/v1 IS SERVING UNAUTHENTICATED ON A NON-LOOPBACK ADDRESS — anything that can \
+                 reach the bind address (limited only by how the port is published) has full API \
+                 access. Set GATHER_API_TOKEN (or GATHER_AUTH_MODE=keychain) to enforce bearer \
+                 auth, or bind a loopback address."
+            );
+        } else {
+            tracing::warn!(
+                "/api/v1 IS SERVING UNAUTHENTICATED — any process that can reach the loopback \
+                 port has full API access. This is safe only because the listener is loopback-only. \
+                 Set GATHER_API_TOKEN (or GATHER_AUTH_MODE=keychain) to enforce bearer auth."
+            );
+        }
     }
 
     let pool = db::connect_with_max(&config.database_url, config.db_max_connections).await?;

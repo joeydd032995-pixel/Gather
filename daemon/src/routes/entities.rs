@@ -91,10 +91,17 @@ pub async fn list_merge_suggestions(
     State(state): State<AppState>,
     Query(params): Query<SuggestionParams>,
 ) -> Result<Json<Value>, ApiError> {
-    let threshold = params
-        .threshold
-        .unwrap_or(entities::DEFAULT_THRESHOLD)
-        .clamp(0.0, 1.0);
+    // Reject NaN before it survives clamp and defeats every score comparison
+    // in merge_suggestions (which would then clone every pair before the limit).
+    let threshold = match params.threshold {
+        Some(t) if !t.is_finite() => {
+            return Err(ApiError::BadRequest(
+                "threshold must be a finite number".to_string(),
+            ))
+        }
+        Some(t) => t.clamp(0.0, 1.0),
+        None => entities::DEFAULT_THRESHOLD,
+    };
     let limit = params.limit.unwrap_or(50).clamp(1, 500);
     let items = entities::merge_suggestions(&state.pool, threshold, limit).await?;
     Ok(Json(json!({ "items": items, "threshold": threshold })))
