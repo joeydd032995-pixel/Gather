@@ -74,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let pool = db::connect(&config.database_url).await?;
+    let pool = db::connect_with_max(&config.database_url, config.db_max_connections).await?;
     db::migrate(&pool).await?;
     tracing::info!("database connected, migrations applied");
 

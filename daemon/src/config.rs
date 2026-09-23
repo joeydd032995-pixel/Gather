@@ -12,6 +12,9 @@ pub struct Config {
     /// requires GATHER_ALLOW_NON_LOOPBACK=true as an explicit override.
     pub bind_addr: SocketAddr,
     pub database_url: String,
+    /// Max Postgres connections in the shared pool. Sized for concurrent
+    /// REST/gRPC handlers plus the extraction and scan workers.
+    pub db_max_connections: u32,
     /// Optional bearer token. When set, every /api/v1 request must carry
     /// `Authorization: Bearer <token>`. Health and metrics stay open (loopback only).
     pub api_token: Option<String>,
@@ -90,6 +93,12 @@ impl Config {
         let database_url =
             std::env::var("DATABASE_URL").map_err(|_| ConfigError::MissingDatabaseUrl)?;
 
+        let db_max_connections = std::env::var("GATHER_DB_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .map(|v: u32| v.max(1))
+            .unwrap_or(8);
+
         let api_token = std::env::var("GATHER_API_TOKEN")
             .ok()
             .filter(|t| !t.is_empty());
@@ -131,6 +140,7 @@ impl Config {
         Ok(Self {
             bind_addr,
             database_url,
+            db_max_connections,
             api_token,
             auth_mode,
             max_upload_mb,
@@ -190,6 +200,7 @@ impl Config {
         Self {
             bind_addr: "127.0.0.1:0".parse().expect("static addr"),
             database_url,
+            db_max_connections: 8,
             api_token: None,
             auth_mode: "env".to_string(),
             max_upload_mb: 16,

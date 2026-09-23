@@ -167,7 +167,9 @@ by the daemon at startup via embedded sqlx migrations). Design highlights:
   believe X?" is one indexed join away from any modality.
 - **Vectors**: `vector(768)` (nomic-embed-text via local Ollama) on `atomic_units`,
   `document_segments`, `entities`, each with an HNSW cosine index; generated `tsvector` columns +
-  GIN indexes give full-text search with zero extra infrastructure.
+  GIN indexes give full-text search with zero extra infrastructure. Note: embeddings are populated
+  only when Ollama is enabled (§5.3), so on an offline-only install these three HNSW indexes sit on
+  all-NULL columns — inert overhead, harmless but not free, until embeddings are backfilled.
 - **Graph**: `relationships` is indexed both directions (`(source_entity_id, relation_type,
   status)` and target-side) and traversed by the cycle-safe, node-budgeted `entity_neighborhood()`
   function (rewritten as a bounded BFS in migration 0005). For measured traversal latency across
