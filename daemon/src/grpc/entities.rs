@@ -253,6 +253,7 @@ impl pb::entity_service_server::EntityService for EntityApi {
             relationships_restored: outcome.relationships_restored,
             aliases_restored: outcome.aliases_restored,
             descendants_restored: outcome.descendants_restored,
+            contradictions_withdrawn: outcome.contradictions_withdrawn,
         }))
     }
 

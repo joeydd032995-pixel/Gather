@@ -288,7 +288,7 @@ export async function editUnit(id: string, statement: string, note?: string): Pr
   await jsonOrThrow(res);
 }
 
-export type TuningKey = "admit.hold_below" | "merge.auto_single";
+export type TuningKey = "admit.hold_below" | "merge.auto_single" | "merge.agree";
 
 export interface TunedThreshold {
   key: TuningKey;

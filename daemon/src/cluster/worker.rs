@@ -25,7 +25,9 @@ use super::{
 };
 use crate::config::Config;
 use crate::decide::live::LiveThresholds;
-use crate::decide::{best_score, merge_decision, Band, MergeSignals};
+use crate::decide::{
+    auto_basis, best_score, merge_decision, Band, MergeBasis, MergeGate, MergeSignals,
+};
 use crate::entities::similarity::name_similarity;
 use crate::entities::{merge_entities_in, merge_suggestions};
 use crate::scan::score::{all_tokens, jaccard};
@@ -104,6 +106,9 @@ async fn entity_resolution_pass(
     };
 
     let mut auto_edges: Vec<Edge> = Vec::new();
+    // Why each Auto edge cleared the gate, parallel to auto_edges: kept with
+    // the merge so undoing it tunes the threshold that caused it.
+    let mut edge_basis: Vec<MergeBasis> = Vec::new();
     for s in &suggestions {
         // Supply BOTH signals when they exist. merge_suggestions emits only the
         // embedding row for a pair it scored both ways, so recompute the text
@@ -130,10 +135,15 @@ async fn entity_resolution_pass(
                     s.b.id, &s.b.name, &s.b.kind, &mut ids, &mut names, &mut kinds,
                 );
                 let (a, b) = if ia < ib { (ia, ib) } else { (ib, ia) };
-                // Weighted by the strongest signal: the coordinate the
-                // single-signal gate and the tuner work on.
+                // Weighted by the strongest signal (cohesion); the basis
+                // records which gate admitted it and on what coordinate.
                 let sim = best_score(&signals).unwrap_or(s.score);
+                let basis = auto_basis(&signals, &thresholds).unwrap_or(MergeBasis {
+                    gate: MergeGate::Single,
+                    score: sim,
+                });
                 auto_edges.push(Edge { a, b, sim });
+                edge_basis.push(basis);
             }
             Band::Hold => {
                 let parked = sqlx::query(
@@ -223,13 +233,14 @@ async fn entity_resolution_pass(
             .await?;
             if member_id != winner_id {
                 merged_away.push(member_id);
-                // The strongest Auto edge that pulled this member in: kept
-                // with the merge so undoing it can teach the tuner.
-                let score = auto_edges
+                // The strongest Auto edge that pulled this member in: its
+                // basis is kept with the merge so an undo can teach the tuner.
+                let basis = auto_edges
                     .iter()
-                    .filter(|e| e.a == local || e.b == local)
-                    .map(|e| e.sim)
-                    .fold(f32::NAN, f32::max);
+                    .zip(&edge_basis)
+                    .filter(|(e, _)| e.a == local || e.b == local)
+                    .max_by(|(x, _), (y, _)| x.sim.total_cmp(&y.sim))
+                    .map(|(_, b)| *b);
                 let mut tx = pool.begin().await?;
                 merge_entities_in(
                     &mut tx,
@@ -237,7 +248,7 @@ async fn entity_resolution_pass(
                     member_id,
                     Some("auto-clustered duplicate".to_string()),
                     Some("auto".to_string()),
-                    score.is_finite().then_some(score),
+                    basis,
                 )
                 .await?;
                 tx.commit().await?;

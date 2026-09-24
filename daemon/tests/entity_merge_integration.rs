@@ -537,10 +537,13 @@ async fn bundle_imports_when_a_merged_row_precedes_its_winner() {
     .expect("export rows");
     assert_eq!(rows.len(), 2);
 
+    // Match on the row's own id: the loser's row also carries the winner's id
+    // in merged_into_entity_id, so a substring match can pick the wrong row.
     let line_for = |id: Uuid| -> String {
+        let own_id = format!(r#""id":"{id}""#);
         let row = rows
             .iter()
-            .find(|r| r.contains(&id.to_string()))
+            .find(|r| r.contains(&own_id))
             .expect("row present");
         format!(r#"{{"type":"entities","row":{row}}}"#)
     };
@@ -792,7 +795,10 @@ async fn unmerge_restores_everything_the_merge_changed() {
         loser,
         None,
         Some("auto".into()),
-        Some(0.93),
+        Some(gather_daemon::decide::MergeBasis {
+            gate: gather_daemon::decide::MergeGate::Single,
+            score: 0.93,
+        }),
     )
     .await
     .unwrap();
@@ -801,10 +807,50 @@ async fn unmerge_restores_everything_the_merge_changed() {
     assert_eq!(edge_ends(pool, self_loop).await, None, "self-loop dropped");
     assert_eq!(edge_ends(pool, duplicate).await, None, "duplicate dropped");
 
+    // While merged, the scanner found a conflict between the loser's unit and
+    // one of the winner's (possible only because they shared a subject).
+    let winner_unit: Uuid = sqlx::query_scalar(
+        "INSERT INTO atomic_units \
+             (kind, statement, statement_hash, subject_entity_id, extraction_method) \
+         VALUES ('fact', $1, encode(digest($1,'sha256'),'hex'), $2, 'manual') RETURNING id",
+    )
+    .bind(format!("unmerge winner fact {t}"))
+    .bind(winner)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let (ua, ub) = if unit < winner_unit {
+        (unit, winner_unit)
+    } else {
+        (winner_unit, unit)
+    };
+    let conflict: Uuid = sqlx::query_scalar(
+        "INSERT INTO contradictions (unit_a_id, unit_b_id, score, detection_method) \
+         VALUES ($1, $2, 0.9, 'rule:numeric') RETURNING id",
+    )
+    .bind(ua)
+    .bind(ub)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+
     // Undo it.
-    let outcome = entities::unmerge_entity(pool, loser, Some("not the same".into()), None)
-        .await
-        .unwrap();
+    let outcome = entities::unmerge_entity(
+        pool,
+        loser,
+        Some("not the same".into()),
+        Some("tester".into()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.contradictions_withdrawn, 1);
+    let conflict_left: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM contradictions WHERE id = $1")
+            .bind(conflict)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(conflict_left, 0, "merge-only conflict withdrawn");
     assert_eq!(outcome.winner_id, winner);
     assert_eq!(outcome.units_restored, 1);
     assert_eq!(outcome.descendants_restored, 1);
@@ -848,8 +894,9 @@ async fn unmerge_restores_everything_the_merge_changed() {
     .await
     .unwrap();
     assert_eq!(dismissed, 1);
-    let label: (String, Option<f32>) = sqlx::query_as(
-        "SELECT action, score FROM unit_feedback WHERE target_kind = 'merge' AND target_id = $1",
+    let label: (String, Option<f32>, String, Option<String>) = sqlx::query_as(
+        "SELECT action, score, actor, corrected->>'gate' FROM unit_feedback \
+         WHERE target_kind = 'merge' AND target_id = $1",
     )
     .bind(gather_daemon::cluster::pair_key(winner, loser))
     .fetch_one(pool)
@@ -857,6 +904,8 @@ async fn unmerge_restores_everything_the_merge_changed() {
     .unwrap();
     assert_eq!(label.0, "reject");
     assert!((label.1.unwrap() - 0.93).abs() < 1e-6);
+    assert_eq!(label.2, "tester", "label attributed to the unmerging actor");
+    assert_eq!(label.3.as_deref(), Some("single"), "label names the gate");
 
     // A second undo has nothing to undo.
     let again = entities::unmerge_entity(pool, loser, None, None).await;
@@ -898,6 +947,23 @@ async fn unmerge_refuses_when_it_cannot_be_exact() {
     // Undoing in reverse order works and restores the chain.
     entities::unmerge_entity(pool, b, None, None).await.unwrap();
     entities::unmerge_entity(pool, a, None, None).await.unwrap();
+
+    // Merges into one survivor unwind newest-first: S absorbed P, then Q.
+    let s = new_entity(pool, &format!("S-{t}")).await;
+    let p = new_entity(pool, &format!("P-{t}")).await;
+    let q = new_entity(pool, &format!("Q-{t}")).await;
+    entities::merge_entities(pool, s, p, None, None)
+        .await
+        .unwrap();
+    entities::merge_entities(pool, s, q, None, None)
+        .await
+        .unwrap();
+    assert!(matches!(
+        entities::unmerge_entity(pool, p, None, None).await,
+        Err(gather_daemon::error::ApiError::BadRequest(_))
+    ));
+    entities::unmerge_entity(pool, q, None, None).await.unwrap();
+    entities::unmerge_entity(pool, p, None, None).await.unwrap();
 
     // A merge made before journaling can't be reversed automatically.
     let old_w = new_entity(pool, &format!("OldW-{t}")).await;

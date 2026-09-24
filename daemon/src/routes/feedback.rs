@@ -17,6 +17,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::cluster::survivor_key;
+use crate::decide::{MergeBasis, MergeGate};
 use crate::entities::{dismiss_suggestion_in, merge_entities_in};
 use crate::error::ApiError;
 use crate::extract::persist::normalize_statement;
@@ -517,7 +518,12 @@ pub async fn accept_review_core(
                         .unwrap_or_else(|| "accepted from review tray".to_string()),
                 ),
                 Some("local-user".to_string()),
-                score,
+                // A held pair failed both gates; accepting it vouches for its
+                // strongest signal, the single-signal coordinate.
+                score.map(|score| MergeBasis {
+                    gate: MergeGate::Single,
+                    score,
+                }),
             )
             .await?;
             record_merge_verdict(&mut tx, id, &item, "confirm", score, note.as_deref()).await?;

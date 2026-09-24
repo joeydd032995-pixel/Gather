@@ -16,6 +16,9 @@ use crate::tune::Bounds;
 pub const KEY_ADMIT_HOLD_BELOW: &str = "admit.hold_below";
 /// `decision_tuning` key for the single-signal auto-merge threshold.
 pub const KEY_MERGE_AUTO_SINGLE: &str = "merge.auto_single";
+/// `decision_tuning` key for the two-signal agreement bar (applied to both
+/// the cosine and the text signal).
+pub const KEY_MERGE_AGREE: &str = "merge.agree";
 
 /// Hard limits for the tuned admission threshold.
 pub const ADMIT_HOLD_BOUNDS: Bounds = Bounds { min: 0.3, max: 0.9 };
@@ -24,6 +27,12 @@ pub const ADMIT_HOLD_BOUNDS: Bounds = Bounds { min: 0.3, max: 0.9 };
 pub const MERGE_AUTO_SINGLE_BOUNDS: Bounds = Bounds {
     min: 0.85,
     max: 0.99,
+};
+/// Hard limits for the tuned agreement bar. The floor is the shipped default:
+/// only undone merges teach it, so it can tighten but never loosen.
+pub const MERGE_AGREE_BOUNDS: Bounds = Bounds {
+    min: 0.80,
+    max: 0.95,
 };
 
 /// Thresholds in force for one worker pass.
@@ -49,7 +58,7 @@ impl LiveThresholds {
         let mut live = Self::from_config(config);
         let rows: Vec<(String, f64)> =
             sqlx::query_as("SELECT key, value FROM decision_tuning WHERE key = ANY($1)")
-                .bind([KEY_ADMIT_HOLD_BELOW, KEY_MERGE_AUTO_SINGLE])
+                .bind([KEY_ADMIT_HOLD_BELOW, KEY_MERGE_AUTO_SINGLE, KEY_MERGE_AGREE])
                 .fetch_all(pool)
                 .await?;
         for (key, value) in rows {
@@ -62,6 +71,10 @@ impl LiveThresholds {
                 }
                 KEY_MERGE_AUTO_SINGLE if within(value, MERGE_AUTO_SINGLE_BOUNDS) => {
                     live.merge.auto_single = value;
+                }
+                KEY_MERGE_AGREE if within(value, MERGE_AGREE_BOUNDS) => {
+                    live.merge.agree_cosine = value;
+                    live.merge.agree_text = value;
                 }
                 _ => tracing::warn!(key, value, "ignoring invalid tuned threshold"),
             }

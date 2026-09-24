@@ -21,9 +21,10 @@ use super::{
 };
 use crate::config::Config;
 use crate::decide::live::{
-    LiveThresholds, ADMIT_HOLD_BOUNDS, KEY_ADMIT_HOLD_BELOW, KEY_MERGE_AUTO_SINGLE,
-    MERGE_AUTO_SINGLE_BOUNDS,
+    LiveThresholds, ADMIT_HOLD_BOUNDS, KEY_ADMIT_HOLD_BELOW, KEY_MERGE_AGREE,
+    KEY_MERGE_AUTO_SINGLE, MERGE_AGREE_BOUNDS, MERGE_AUTO_SINGLE_BOUNDS,
 };
+use crate::decide::MergeGate;
 
 /// Largest threshold change per pass.
 const MAX_STEP: f32 = 0.05;
@@ -98,7 +99,7 @@ pub async fn run_one_pass(pool: &PgPool, config: &Config) -> anyhow::Result<Tune
                 .min(ADMIT_HOLD_BOUNDS.max),
             max: ADMIT_HOLD_BOUNDS.max,
         };
-        let unit_labels = load_labels(pool, "unit", KEY_ADMIT_HOLD_BELOW).await?;
+        let unit_labels = load_labels(pool, "unit", KEY_ADMIT_HOLD_BELOW, None).await?;
         if let Some(change) = tune_key(
             pool,
             KEY_ADMIT_HOLD_BELOW,
@@ -116,7 +117,13 @@ pub async fn run_one_pass(pool: &PgPool, config: &Config) -> anyhow::Result<Tune
             stats.changes.push(change);
         }
 
-        let merge_labels = load_labels(pool, "merge", KEY_MERGE_AUTO_SINGLE).await?;
+        let merge_labels = load_labels(
+            pool,
+            "merge",
+            KEY_MERGE_AUTO_SINGLE,
+            Some(MergeGate::Single),
+        )
+        .await?;
         if let Some(change) = tune_key(
             pool,
             KEY_MERGE_AUTO_SINGLE,
@@ -130,6 +137,26 @@ pub async fn run_one_pass(pool: &PgPool, config: &Config) -> anyhow::Result<Tune
             live.merge.auto_single = change.to;
             stats.changes.push(change);
         }
+
+        // Undone agreement-gated merges raise the agreement bar, scored on
+        // the weaker signal (the coordinate that gate compares).
+        let agree_labels =
+            load_labels(pool, "merge", KEY_MERGE_AGREE, Some(MergeGate::Agreement)).await?;
+        let agree = live.merge.agree_cosine.min(live.merge.agree_text);
+        if let Some(change) = tune_key(
+            pool,
+            KEY_MERGE_AGREE,
+            agree,
+            MERGE_AGREE_BOUNDS,
+            &agree_labels,
+            &params,
+        )
+        .await?
+        {
+            live.merge.agree_cosine = change.to;
+            live.merge.agree_text = change.to;
+            stats.changes.push(change);
+        }
     }
 
     stats.rescored = rescore_review_queue(pool, &live).await?;
@@ -137,6 +164,9 @@ pub async fn run_one_pass(pool: &PgPool, config: &Config) -> anyhow::Result<Tune
         .set(f64::from(live.admit_hold_below));
     metrics::gauge!("gather_decision_threshold", "key" => KEY_MERGE_AUTO_SINGLE)
         .set(f64::from(live.merge.auto_single));
+    metrics::gauge!("gather_decision_threshold", "key" => KEY_MERGE_AGREE).set(f64::from(
+        live.merge.agree_cosine.min(live.merge.agree_text),
+    ));
     Ok(stats)
 }
 
@@ -146,10 +176,15 @@ pub async fn run_one_pass(pool: &PgPool, config: &Config) -> anyhow::Result<Tune
 /// Only verdicts given after the last `POST /tuning/reset` of `key` count, so
 /// a reset is durable: the same historical labels can't re-create the value
 /// on the next pass. New feedback after the reset tunes it again.
+///
+/// Merge labels are split by the gate that produced the merge: an undone
+/// agreement-gated merge says nothing about the single-signal bar, and vice
+/// versa. Tray verdicts carry no gate and count as single-signal evidence.
 async fn load_labels(
     pool: &PgPool,
     target_kind: &str,
     key: &str,
+    gate: Option<MergeGate>,
 ) -> Result<Vec<Label>, sqlx::Error> {
     let rows: Vec<(String, Option<f32>)> = sqlx::query_as(
         "WITH cutoff AS ( \
@@ -162,10 +197,13 @@ async fn load_labels(
          CROSS JOIN cutoff \
          WHERE f.target_kind = $1 AND f.action IN ('confirm', 'reject') \
            AND (cutoff.at IS NULL OR f.created_at > cutoff.at) \
+           AND ($3::text IS NULL \
+                OR coalesce(f.corrected->>'gate', 'single') = $3) \
          ORDER BY f.target_id, f.created_at DESC, f.id DESC",
     )
     .bind(target_kind)
     .bind(key)
+    .bind(gate.map(MergeGate::as_str))
     .fetch_all(pool)
     .await?;
     Ok(rows

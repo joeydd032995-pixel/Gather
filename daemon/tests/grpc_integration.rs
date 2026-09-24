@@ -989,7 +989,7 @@ async fn pipeline_services_mirror_rest() {
         .await
         .expect("get tuning")
         .into_inner();
-    assert_eq!(current.thresholds.len(), 2);
+    assert_eq!(current.thresholds.len(), 3);
     let err = tuning
         .reset_tuning(pb::ResetTuningRequest {
             key: "no.such.key".to_string(),

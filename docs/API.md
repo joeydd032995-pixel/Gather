@@ -146,12 +146,14 @@ Response: `{ "scope": "...", "hits": [ { "id": "...", "score": 0.83, ... } ] }`.
 | POST | `/entities/{id}/merge` | Merge another entity into this one: `{ "loser_id": "…", "note": "…", "actor": "…" }` |
 | POST | `/entities/{id}/merge-suggestions/dismiss` | Suppress a suggestion: `{ "other_id": "…", "note": "…" }` |
 | POST | `/entities/{id}/aliases` | Add an alias: `{ "alias": "PG" }` |
-| POST | `/entities/{id}/unmerge` | Split a merged-away entity back out: its units, edges, aliases and descendants are restored from the merge's journal, and the pair is never suggested or auto-merged again. Optional body `{ "note": "…", "actor": "…" }`. `404` if there is no merge to undo; `400` if it can't be undone exactly (the survivor has since been merged elsewhere, or the merge predates journaling) |
+| POST | `/entities/{id}/unmerge` | Split a merged-away entity back out: its units, edges, aliases and descendants are restored from the merge's journal, and the pair is never suggested or auto-merged again. Optional body `{ "note": "…", "actor": "…" }`. `404` if there is no merge to undo; `400` if it can't be undone exactly (the survivor has since been merged elsewhere, a later merge into the same survivor is still live, or the merge predates journaling) |
 
 Merges are reversible: the losing entity is kept with `merged_into_entity_id` set, every merge
 journals what it changed, and `unmerge` replays that journal in reverse. Every merge, unmerge
 and dismissal is recorded in `entity_merge_audit`. Undoing an automatic or tray-accepted merge
-also records a negative tuning label, so the auto-merge threshold learns from wrong merges.
+also records a negative tuning label against the gate that admitted it, so that threshold learns
+from wrong merges. Contradictions the merge surfaced between the two entities' units are
+withdrawn, since they only existed because the pair was treated as one.
 Entity kinds: `person`, `organization`, `project`, `tool`, `concept`, `location`, `event`,
 `other`.
 
@@ -201,7 +203,8 @@ individually.
 | GET | `/tuning` | Thresholds in force with their defaults and hard bounds, the tuner settings, and the 50 most recent changes with the evidence behind each |
 | POST | `/tuning/reset` | Drop learned values so the env defaults apply again. Optional body `{ "key": "admit.hold_below" }` resets one key. Audited and durable: only verdicts given after the reset can tune that key again |
 
-Keys: `admit.hold_below` (unit admission) and `merge.auto_single` (single-signal auto-merge).
+Keys: `admit.hold_below` (unit admission), `merge.auto_single` (single-signal auto-merge) and
+`merge.agree` (auto-merge when name and embedding similarity both agree).
 
 ---
 

@@ -465,6 +465,7 @@ message UnmergeOutcome {
   uint64 relationships_restored = 4;
   uint64 aliases_restored = 5;
   uint64 descendants_restored = 6;
+  uint64 contradictions_withdrawn = 7;             // open conflicts that only existed while merged
 }
 
 // ---------------------------------------------------------------------------

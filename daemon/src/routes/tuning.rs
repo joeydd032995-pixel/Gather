@@ -12,8 +12,8 @@ use sqlx::{PgPool, Row};
 
 use crate::config::Config;
 use crate::decide::live::{
-    LiveThresholds, ADMIT_HOLD_BOUNDS, KEY_ADMIT_HOLD_BELOW, KEY_MERGE_AUTO_SINGLE,
-    MERGE_AUTO_SINGLE_BOUNDS,
+    LiveThresholds, ADMIT_HOLD_BOUNDS, KEY_ADMIT_HOLD_BELOW, KEY_MERGE_AGREE,
+    KEY_MERGE_AUTO_SINGLE, MERGE_AGREE_BOUNDS, MERGE_AUTO_SINGLE_BOUNDS,
 };
 use crate::error::ApiError;
 use crate::tune::Bounds;
@@ -121,6 +121,13 @@ pub async fn get_tuning_core(pool: &PgPool, config: &Config) -> Result<TuningSta
                 MERGE_AUTO_SINGLE_BOUNDS,
                 is_tuned(KEY_MERGE_AUTO_SINGLE),
             ),
+            threshold(
+                KEY_MERGE_AGREE,
+                live.merge.agree_cosine.min(live.merge.agree_text),
+                defaults.merge.agree_cosine.min(defaults.merge.agree_text),
+                MERGE_AGREE_BOUNDS,
+                is_tuned(KEY_MERGE_AGREE),
+            ),
         ],
         history,
     })
@@ -142,7 +149,7 @@ pub struct ResetRequest {
 /// is the cutoff the tuner uses to ignore pre-reset feedback.
 pub async fn reset_tuning_core(pool: &PgPool, key: Option<&str>) -> Result<Vec<String>, ApiError> {
     if let Some(k) = key {
-        if k != KEY_ADMIT_HOLD_BELOW && k != KEY_MERGE_AUTO_SINGLE {
+        if ![KEY_ADMIT_HOLD_BELOW, KEY_MERGE_AUTO_SINGLE, KEY_MERGE_AGREE].contains(&k) {
             return Err(ApiError::BadRequest(format!("unknown tuning key '{k}'")));
         }
     }

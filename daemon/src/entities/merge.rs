@@ -11,6 +11,7 @@
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
+use crate::decide::MergeBasis;
 use crate::error::ApiError;
 
 /// Outcome of a merge, for the API response and for tests to assert against.
@@ -59,8 +60,9 @@ pub async fn merge_entities(
 
 /// [`merge_entities`] inside a caller's transaction, so a merge can commit
 /// atomically with other writes (e.g. the review tray's tuning label). The
-/// caller commits. `score` is the similarity that justified the merge (None
-/// for a manual merge); it is kept so undoing the merge can teach the tuner.
+/// caller commits. `basis` is why the pipeline merged (the gate and its score;
+/// None for a manual merge); it is kept so undoing the merge can teach the
+/// tuner the right threshold.
 ///
 /// Every change is journaled in the audit row's `undo` column, which is what
 /// makes [`unmerge_entity_in`] exact.
@@ -70,7 +72,7 @@ pub async fn merge_entities_in(
     loser_id: Uuid,
     note: Option<String>,
     actor: Option<String>,
-    score: Option<f32>,
+    basis: Option<MergeBasis>,
 ) -> Result<MergeOutcome, ApiError> {
     if winner_id == loser_id {
         return Err(ApiError::BadRequest(
@@ -289,6 +291,7 @@ pub async fn merge_entities_in(
         aliases_added_to_winner,
         loser_aliases,
         descendants,
+        gate: basis.map(|b| b.gate.as_str().to_string()),
     };
     sqlx::query(
         "INSERT INTO entity_merge_audit \
@@ -300,7 +303,7 @@ pub async fn merge_entities_in(
     .bind(&actor)
     .bind(&note)
     .bind(serde_json::to_value(&journal).map_err(anyhow::Error::from)?)
-    .bind(score)
+    .bind(basis.map(|b| b.score))
     .execute(&mut **tx)
     .await?;
 
@@ -335,6 +338,10 @@ struct MergeJournal {
     loser_aliases: Vec<String>,
     /// Entities previously merged into the loser, flattened onto the winner.
     descendants: Vec<Uuid>,
+    /// The gate that admitted an automatic or tray merge ("single" or
+    /// "agreement"), so an undo tunes the threshold that caused it.
+    #[serde(default)]
+    gate: Option<String>,
 }
 
 /// What an unmerge restored.
@@ -346,6 +353,9 @@ pub struct UnmergeOutcome {
     pub relationships_restored: u64,
     pub aliases_restored: u64,
     pub descendants_restored: u64,
+    /// Open contradictions withdrawn because they only existed while the two
+    /// entities shared a subject.
+    pub contradictions_withdrawn: u64,
 }
 
 /// Undo the merge that folded `loser_id` away. See [`unmerge_entity_in`].
@@ -378,7 +388,7 @@ pub async fn unmerge_entity_in(
 ) -> Result<UnmergeOutcome, ApiError> {
     let actor = actor.unwrap_or_else(|| "local-user".to_string());
     let merge = sqlx::query(
-        "SELECT id, winner_entity_id, undo, score FROM entity_merge_audit \
+        "SELECT id, winner_entity_id, undo, score, created_at FROM entity_merge_audit \
          WHERE loser_entity_id = $1 AND action = 'merge' AND undone_at IS NULL \
          ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
     )
@@ -389,6 +399,7 @@ pub async fn unmerge_entity_in(
     let merge_id: Uuid = merge.get("id");
     let winner_id: Uuid = merge.get("winner_entity_id");
     let score: Option<f32> = merge.get("score");
+    let merged_at: chrono::DateTime<chrono::Utc> = merge.get("created_at");
     let journal: MergeJournal = match merge.get::<Option<serde_json::Value>, _>("undo") {
         Some(v) => serde_json::from_value(v).map_err(anyhow::Error::from)?,
         None => {
@@ -429,6 +440,24 @@ pub async fn unmerge_entity_in(
     if loser.get::<Option<Uuid>, _>("merged_into_entity_id") != Some(winner_id) {
         return Err(ApiError::BadRequest(format!(
             "entity {loser_id} is no longer merged into {winner_id}"
+        )));
+    }
+    // Merges into the same survivor interleave (a later merge can repoint or
+    // delete what an earlier one moved), so they unwind newest-first. Undoing
+    // an older one first could silently lose edges the later journal owns.
+    let newer: Option<Uuid> = sqlx::query_scalar(
+        "SELECT loser_entity_id FROM entity_merge_audit \
+         WHERE action = 'merge' AND undone_at IS NULL AND winner_entity_id = $1 \
+           AND created_at > $2 \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(winner_id)
+    .bind(merged_at)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(later) = newer {
+        return Err(ApiError::BadRequest(format!(
+            "entity {later} was merged into {winner_id} more recently; undo that merge first"
         )));
     }
     let loser_name: String = loser.get("name");
@@ -490,6 +519,25 @@ pub async fn unmerge_entity_in(
     .bind(&journal.units)
     .bind(loser_id)
     .bind(winner_id)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+
+    // 3b. Open contradictions the scanner found between the two sides while
+    //     they shared a subject are withdrawn: subject-blocking produced them,
+    //     and the units no longer share one. Rescanning (cursors were just
+    //     cleared) re-finds any that still hold on other evidence. Only
+    //     untouched ('open') ones detected after the merge are withdrawn.
+    let contradictions_withdrawn = sqlx::query(
+        "DELETE FROM contradictions c WHERE c.status = 'open' AND c.detected_at >= $3 AND ( \
+           (c.unit_a_id = ANY($1) AND c.unit_b_id IN \
+              (SELECT id FROM atomic_units WHERE subject_entity_id = $2)) \
+        OR (c.unit_b_id = ANY($1) AND c.unit_a_id IN \
+              (SELECT id FROM atomic_units WHERE subject_entity_id = $2)))",
+    )
+    .bind(&journal.units)
+    .bind(winner_id)
+    .bind(merged_at)
     .execute(&mut **tx)
     .await?
     .rows_affected();
@@ -568,11 +616,18 @@ pub async fn unmerge_entity_in(
     // 7. A wrong merge the pipeline made is the tuner's negative label.
     if let Some(score) = score {
         sqlx::query(
-            "INSERT INTO unit_feedback (target_kind, target_id, action, corrected, note, score) \
-             VALUES ('merge', $1, 'reject', $2, $3, $4)",
+            "INSERT INTO unit_feedback \
+               (target_kind, target_id, action, actor, corrected, note, score) \
+             VALUES ('merge', $1, 'reject', $2, $3, $4, $5)",
         )
         .bind(crate::cluster::pair_key(winner_id, loser_id))
-        .bind(serde_json::json!({ "a": winner_id, "b": loser_id, "undone_merge": merge_id }))
+        .bind(&actor)
+        .bind(serde_json::json!({
+            "a": winner_id,
+            "b": loser_id,
+            "undone_merge": merge_id,
+            "gate": journal.gate,
+        }))
         .bind(&note)
         .bind(score)
         .execute(&mut **tx)
@@ -586,6 +641,7 @@ pub async fn unmerge_entity_in(
         relationships_restored: sources + targets + reinserted,
         aliases_restored,
         descendants_restored,
+        contradictions_withdrawn,
     })
 }
 
