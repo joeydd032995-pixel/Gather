@@ -1,0 +1,118 @@
+# Build the PostgreSQL + pgvector runtime that ships inside the Windows
+# installer (Linux/macOS: bundle-postgres.sh, which this mirrors).
+#
+# Compiled from pinned official sources: the PostgreSQL tarball is checked
+# against the checksum pinned here and pgvector is cloned at a fixed tag.
+# Nothing is downloaded at runtime.
+#
+# Needs an MSVC developer shell (cl, nmake), Strawberry Perl, meson + ninja,
+# win_flex/win_bison, and OpenSSL from vcpkg (see .github/workflows/ci.yml).
+#
+# Usage: scripts/bundle-postgres.ps1 [-Out <dir>] [-OpenSsl <vcpkg prefix>]
+param(
+  [string]$Out = "$PSScriptRoot/../apps/desktop/src-tauri/resources/postgres",
+  [string]$OpenSsl = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows"
+)
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+
+$PgVersion = '16.15'
+$PgSha256 = 'c1575341fa7bd40f5274ea465b34390f4dc64cdd0770af327005caaeb9f6b7ed'
+$PgvectorTag = 'v0.8.6'
+
+function Invoke-Checked([string]$What, [scriptblock]$Block) {
+  & $Block
+  if ($LASTEXITCODE -ne 0) { throw "$What failed (exit $LASTEXITCODE)" }
+}
+
+New-Item -ItemType Directory -Force -Path $Out | Out-Null
+$Out = (Resolve-Path $Out).Path
+$Work = Join-Path ([IO.Path]::GetTempPath()) ("gather-pg-" + [Guid]::NewGuid())
+New-Item -ItemType Directory -Path $Work | Out-Null
+
+try {
+  Write-Host "==> PostgreSQL $PgVersion source"
+  $tarball = Join-Path $Work 'pg.tar.bz2'
+  Invoke-WebRequest -Uri "https://ftp.postgresql.org/pub/source/v$PgVersion/postgresql-$PgVersion.tar.bz2" -OutFile $tarball
+  $actual = (Get-FileHash -Algorithm SHA256 $tarball).Hash.ToLower()
+  if ($actual -ne $PgSha256) { throw "checksum mismatch for postgresql-${PgVersion}: got $actual" }
+  Invoke-Checked 'extract' { tar -xjf $tarball -C $Work }
+  $src = Join-Path $Work "postgresql-$PgVersion"
+  $build = Join-Path $Work 'build'
+
+  Write-Host '==> meson setup + build'
+  # OpenSSL is only here because migration 0001 creates the pgcrypto
+  # extension (which requires it); the server itself serves loopback only.
+  $env:PKG_CONFIG_PATH = "$OpenSsl/lib/pkgconfig"
+  Invoke-Checked 'meson setup' {
+    meson setup $build $src --prefix=$Out --buildtype=release `
+      -Dssl=openssl -Dicu=disabled -Dreadline=disabled -Dnls=disabled `
+      -Dzlib=disabled -Dlz4=disabled -Dzstd=disabled -Dtap_tests=disabled `
+      -Dplperl=disabled -Dplpython=disabled -Dpltcl=disabled `
+      "-Dextra_include_dirs=$OpenSsl/include" "-Dextra_lib_dirs=$OpenSsl/lib" `
+      -DBISON=win_bison -DFLEX=win_flex
+  }
+  Invoke-Checked 'meson build' { meson compile -C $build }
+  Invoke-Checked 'meson install' { meson install -C $build --quiet }
+
+  Write-Host "==> pgvector $PgvectorTag"
+  $pgvector = Join-Path $Work 'pgvector'
+  Invoke-Checked 'clone pgvector' {
+    git -c advice.detachedHead=false clone -q --depth 1 --branch $PgvectorTag https://github.com/pgvector/pgvector $pgvector
+  }
+  Push-Location $pgvector
+  try {
+    $env:PGROOT = $Out
+    Invoke-Checked 'pgvector build' { nmake /nologo /F Makefile.win }
+    Invoke-Checked 'pgvector install' { nmake /nologo /F Makefile.win install }
+  } finally { Pop-Location }
+
+  Write-Host '==> vendor runtime DLLs'
+  # Found next to the executables: OpenSSL for pgcrypto, and the MSVC runtime
+  # (app-local deployment) for machines without the VC++ redistributable.
+  Copy-Item "$OpenSsl/bin/libssl-3-x64.dll", "$OpenSsl/bin/libcrypto-3-x64.dll" "$Out/bin/"
+  foreach ($dll in 'vcruntime140.dll', 'vcruntime140_1.dll') {
+    $path = Join-Path $env:SystemRoot "System32/$dll"
+    if (Test-Path $path) { Copy-Item $path "$Out/bin/" }
+  }
+
+  Write-Host '==> trim to what the runtime needs'
+  $keep = 'postgres', 'initdb', 'pg_ctl', 'pg_dump', 'pg_restore', 'psql', 'pg_isready'
+  Get-ChildItem "$Out/bin" -Filter '*.exe' |
+    Where-Object { $keep -notcontains $_.BaseName } |
+    Remove-Item
+  Get-ChildItem "$Out/bin" -Filter '*.pdb' | Remove-Item
+  # Embedded-SQL client libraries: unused.
+  Get-ChildItem "$Out/bin" -Include 'libecpg*.dll', 'libpgtypes.dll' -Recurse | Remove-Item
+  foreach ($dir in 'include', 'share/doc', 'lib/pgxs') {
+    if (Test-Path "$Out/$dir") { Remove-Item -Recurse -Force "$Out/$dir" }
+  }
+  Get-ChildItem "$Out/lib" -Recurse -Include '*.lib', '*.pdb', '*.a' | Remove-Item
+
+  @(
+    "postgresql $PgVersion (sha256 $PgSha256)",
+    "pgvector $PgvectorTag",
+    'built for windows x86_64'
+  ) | Set-Content "$Out/BUNDLE.txt"
+
+  Write-Host '==> smoke test: initdb, start, CREATE EXTENSION vector + pgcrypto'
+  $data = Join-Path $Work 'data'
+  Invoke-Checked 'initdb' { & "$Out/bin/initdb.exe" -D $data -U gather --auth=trust | Out-Null }
+  Invoke-Checked 'pg_ctl start' {
+    & "$Out/bin/pg_ctl.exe" -D $data -o '-p 7699 -c listen_addresses=127.0.0.1' -l "$Work/pg.log" -w start | Out-Null
+  }
+  try {
+    Invoke-Checked 'psql' {
+      & "$Out/bin/psql.exe" -h 127.0.0.1 -p 7699 -U gather -d postgres -v ON_ERROR_STOP=1 -qAt `
+        -c 'CREATE EXTENSION vector; CREATE EXTENSION pgcrypto;' `
+        -c "SELECT '[1,2,3]'::vector <-> '[1,2,4]'::vector, length(gen_random_uuid()::text)"
+    }
+  } finally {
+    & "$Out/bin/pg_ctl.exe" -D $data -m fast -w stop | Out-Null
+  }
+
+  "{0:N0} MB" -f ((Get-ChildItem $Out -Recurse | Measure-Object Length -Sum).Sum / 1MB)
+  Write-Host "bundled PostgreSQL runtime ready in $Out"
+} finally {
+  Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
+}

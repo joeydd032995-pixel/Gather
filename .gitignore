@@ -17,3 +17,7 @@ apps/desktop/src-tauri/gen/
 
 # OS noise
 .DS_Store
+
+# Desktop packaging inputs, staged by CI (scripts/bundle-postgres.*)
+apps/desktop/src-tauri/resources/postgres/
+apps/desktop/src-tauri/binaries/

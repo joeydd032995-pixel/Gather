@@ -22,6 +22,7 @@ backup are strictly opt-in.
 - [Why Gather](#why-gather)
 - [Features](#features)
 - [How it works](#how-it-works)
+- [Install](#install)
 - [Quickstart](#quickstart)
 - [Using Gather](#using-gather)
 - [Configuration](#configuration)
@@ -118,7 +119,18 @@ All state lives in **PostgreSQL 16 + pgvector**. Background workers (extraction,
 scanning, clustering) run inside the daemon on configurable intervals and claim work with
 `FOR UPDATE SKIP LOCKED`, so they are safe to run concurrently.
 
+## Install
+
+Download the installer for Windows, macOS or Linux from the
+[releases page](https://github.com/joeydd032995-pixel/Gather/releases) and open it. It
+includes everything: the app, the daemon, and a private PostgreSQL + pgvector database, set up
+automatically on first launch and running on your machine only. The installers aren't
+code-signed yet, so the first launch needs one extra click;
+[docs/INSTALL.md](docs/INSTALL.md) walks through it for each system.
+
 ## Quickstart
+
+The quickstart is for running from source (developers and servers).
 
 **Prerequisites:** Docker + Docker Compose v2. For the desktop app: Rust (stable) and
 Node 22.12+ (or 20.19+).
@@ -281,6 +293,8 @@ file rather than editing an existing one. Constraints on large tables should be 
 | Document | What's in it |
 |---|---|
 | [docs/TECHNICAL-WRITEUP.md](docs/TECHNICAL-WRITEUP.md) | The full specification: architecture, DDL, extraction, contradiction algorithm, security model, phased plan |
+| [docs/INSTALL.md](docs/INSTALL.md) | Installing the desktop app, first-launch warnings, where data lives, updates |
+| [docs/RELEASING.md](docs/RELEASING.md) | Cutting a release, what the installer bundles, turning on code signing |
 | [docs/API.md](docs/API.md) | REST and gRPC endpoint reference with examples |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every environment variable |
 | [docs/AUTONOMOUS-PIPELINE.md](docs/AUTONOMOUS-PIPELINE.md) | How Gather organizes itself: confidence bands, feedback loop, clustering |
@@ -301,6 +315,9 @@ file rather than editing an existing one. Constraints on large tables should be 
 - **Your data, your corrections.** Every automatic action is reversible and audited; the full
   store — including your correction history — exports to a portable bundle.
 - **Backups are opt-in** and encrypted before they leave the machine.
+- **Updates are opt-in.** The desktop app checks for a new version only when you press
+  **Check now** or turn on the start-up check in Settings. Builds that can update themselves
+  verify each download against a key built into the app.
 
 See §7 of the [technical write-up](docs/TECHNICAL-WRITEUP.md) for the full threat model.
 
@@ -312,9 +329,11 @@ See §7 of the [technical write-up](docs/TECHNICAL-WRITEUP.md) for the full thre
   tray ordering + feedback-driven threshold auto-tuning), and the photo pipeline
   (perceptual-hash duplicate groups, EXIF albums, optional local vision captions), with a
   desktop review tray, group/photo browsers and a tuning view, gRPC parity for all of it, and
-  exact entity unmerge (wrong auto-merges become tuning signal).
-- **Next:** one-download distribution. Gather stays a single-user, fully offline app; the goal
-  is that anyone can install their own private copy (bundled daemon and database, no Docker).
+  exact entity unmerge (wrong auto-merges become tuning signal), and one-download installers
+  for Windows, macOS and Linux (bundled daemon and PostgreSQL + pgvector, no Docker, opt-in
+  update check).
+- **Next:** code signing for the installers (the CI hooks are in place; see
+  [docs/RELEASING.md](docs/RELEASING.md)). Gather stays a single-user, fully offline app.
 
 ## License
 
