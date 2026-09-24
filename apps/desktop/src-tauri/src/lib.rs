@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Manager, RunEvent, State};
 
 use runtime::{Paths, Runtime, Status};
-use updates::{PendingUpdate, UpdateCheck, UpdateSettings};
+use updates::{InstallError, PendingUpdate, UpdateCheck, UpdateSettings};
 
 /// Read a file the user explicitly selected via the native dialog so the
 /// webview can upload it to the local daemon. Scope: only invoked with paths
@@ -25,11 +25,19 @@ fn read_upload_file(path: PathBuf) -> Result<Vec<u8>, String> {
     std::fs::read(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))
 }
 
-/// Read the daemon's API token from the OS keychain (same entry the daemon
-/// writes in GATHER_AUTH_MODE=keychain). None when absent — dev daemons run
-/// open on loopback, so the UI simply sends no Authorization header.
+/// The daemon's API token. In GATHER_AUTH_MODE=env (chosen by the user,
+/// e.g. on a desktop without a keyring) the daemon inherits this app's
+/// GATHER_API_TOKEN, so return that; otherwise read the OS keychain entry the
+/// daemon writes in keychain mode. None when absent: dev daemons run open on
+/// loopback, so the UI simply sends no Authorization header.
 #[tauri::command]
 fn get_api_token() -> Result<Option<String>, String> {
+    let env_mode = std::env::var("GATHER_AUTH_MODE").is_ok_and(|m| m.eq_ignore_ascii_case("env"));
+    if env_mode {
+        return Ok(std::env::var("GATHER_API_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty()));
+    }
     let entry = keyring::Entry::new("gather-daemon", "api-token")
         .map_err(|e| format!("keychain entry: {e}"))?;
     match entry.get_password() {
@@ -70,8 +78,16 @@ async fn install_update(
     runtime: State<'_, Arc<Runtime>>,
 ) -> Result<(), String> {
     let runtime = Arc::clone(&runtime);
-    updates::install(&pending, move || runtime.stop()).await?;
-    app.restart()
+    let stack = Arc::clone(&runtime);
+    match updates::install(&pending, move || stack.stop()).await {
+        Ok(()) => app.restart(),
+        Err(InstallError::NotStarted(e)) => Err(e),
+        Err(InstallError::Failed(e)) => {
+            // The stack was stopped for the installer: bring it back.
+            runtime.resume();
+            Err(format!("{e}. Gather is still on the current version."))
+        }
+    }
 }
 
 fn runtime_paths(app: &AppHandle) -> Result<Paths, String> {

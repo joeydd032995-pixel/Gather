@@ -130,6 +130,9 @@ explain the upgrade step.
   in the app-data folder above.
 - **"starting the database failed" / port in use:** something else is using port 7603. Quit
   it, or start Gather with `GATHER_PG_PORT=<free port>`.
+- **"The database folder … is incomplete or damaged":** Gather never repairs or deletes an
+  existing database on its own. Restore the folder from a backup, or quit, rename `pgdata`
+  to keep it, and relaunch to start with an empty database.
 - **You already run your own Gather daemon** (e.g. `docker compose up`): the app notices a
   daemon on `127.0.0.1:7601` and uses it instead of starting its own.
 - **Reset everything:** quit Gather and delete the app-data folder. This deletes your data;

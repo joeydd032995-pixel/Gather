@@ -14,7 +14,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -31,6 +31,8 @@ const DB_USER: &str = "gather";
 const DB_NAME: &str = "gather";
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(90);
 const DAEMON_STOP_GRACE: Duration = Duration::from_secs(10);
+/// Where the spawned daemon's PID is recorded, in the app data dir.
+const DAEMON_PID_FILE: &str = "daemon.pid";
 /// A log bigger than this is started afresh on the next launch.
 const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
 
@@ -52,6 +54,7 @@ pub enum Status {
 }
 
 /// Where the supervisor finds its binaries and keeps its data.
+#[derive(Clone)]
 pub struct Paths {
     /// Bundled PostgreSQL install (bin/, lib/, share/).
     pub postgres: PathBuf,
@@ -61,10 +64,20 @@ pub struct Paths {
     pub data: PathBuf,
 }
 
+/// The daemon this app is responsible for stopping.
+enum Daemon {
+    /// Started by this session.
+    Spawned(Child),
+    /// Started by an earlier session that crashed, and still running.
+    Adopted(u32),
+}
+
 #[derive(Default)]
 pub struct Runtime {
     status: Mutex<Option<Status>>,
-    daemon: Mutex<Option<Child>>,
+    /// Kept so the stack can be brought back up (see `resume`).
+    paths: Mutex<Option<Paths>>,
+    daemon: Mutex<Option<Daemon>>,
     /// Set once this process started (or adopted) the Postgres cluster.
     pg_data: Mutex<Option<PathBuf>>,
     postgres_bin: Mutex<Option<PathBuf>>,
@@ -100,6 +113,10 @@ impl Runtime {
 
     /// Bring the stack up. Blocking: call from a background thread.
     pub fn start(&self, paths: &Paths) {
+        *self.paths.lock().expect("lock") = Some(paths.clone());
+        self.set(Status::Starting {
+            step: "Starting".to_string(),
+        });
         let logs = paths.data.join("logs");
         match self.try_start(paths, &logs) {
             Ok(status) => self.set(status),
@@ -111,21 +128,30 @@ impl Runtime {
     }
 
     fn try_start(&self, paths: &Paths, logs: &Path) -> Result<Status, String> {
+        let bin = paths.postgres.join("bin");
+        let bundled = exe(&bin, "pg_ctl").exists() && paths.daemon.exists();
+        let pg_data = paths.data.join("pgdata");
         if daemon_healthy() {
+            // Ours, left running by a session that crashed: take it back so
+            // quitting (or an update) stops it. Anything else, e.g. a daemon
+            // the user runs with Docker, is theirs to manage.
+            if bundled && self.adopt(paths, &bin, &pg_data) {
+                return Ok(Status::Ready);
+            }
             return Ok(Status::Unmanaged);
         }
-        let bin = paths.postgres.join("bin");
-        if !exe(&bin, "pg_ctl").exists() || !paths.daemon.exists() {
+        if !bundled {
             return Ok(Status::Unmanaged);
         }
         fs::create_dir_all(logs).map_err(|e| format!("creating {}: {e}", logs.display()))?;
 
         let port = pg_port()?;
-        let pg_data = paths.data.join("pgdata");
         let password = database_password(&paths.data)?;
         let lib = paths.postgres.join("lib");
 
-        if !pg_data.join("PG_VERSION").exists() {
+        // An existing data directory is never modified here, even if it looks
+        // incomplete: check_major_version refuses it instead.
+        if !pg_data.exists() {
             self.step("Setting up your private database (first run)")?;
             init_cluster(&bin, &lib, &pg_data, &paths.data, &password, port)?;
         }
@@ -148,7 +174,9 @@ impl Runtime {
                 stop_child(&mut child);
                 return Err("Gather is shutting down".to_string());
             }
-            *slot = Some(child);
+            // Recorded so a later session can adopt it after a crash.
+            let _ = fs::write(paths.data.join(DAEMON_PID_FILE), child.id().to_string());
+            *slot = Some(Daemon::Spawned(child));
         }
 
         let deadline = Instant::now() + DAEMON_START_TIMEOUT;
@@ -156,7 +184,7 @@ impl Runtime {
             if daemon_healthy() {
                 return Ok(Status::Ready);
             }
-            if let Some(child) = self.daemon.lock().expect("lock").as_mut() {
+            if let Some(Daemon::Spawned(child)) = self.daemon.lock().expect("lock").as_mut() {
                 if let Ok(Some(exit)) = child.try_wait() {
                     return Err(format!(
                         "Gather's background service stopped during start-up ({exit}). \
@@ -175,8 +203,13 @@ impl Runtime {
     /// connections), then Postgres. Safe to call more than once.
     pub fn stop(&self) {
         self.stopping.store(true, Ordering::SeqCst);
-        if let Some(mut child) = self.daemon.lock().expect("lock").take() {
-            stop_child(&mut child);
+        match self.daemon.lock().expect("lock").take() {
+            Some(Daemon::Spawned(mut child)) => stop_child(&mut child),
+            Some(Daemon::Adopted(pid)) => stop_pid(pid),
+            None => {}
+        }
+        if let Some(paths) = self.paths.lock().expect("lock").as_ref() {
+            let _ = fs::remove_file(paths.data.join(DAEMON_PID_FILE));
         }
         let bin = self.postgres_bin.lock().expect("lock").take();
         let data = self.pg_data.lock().expect("lock").take();
@@ -191,6 +224,37 @@ impl Runtime {
                 .stderr(Stdio::null())
                 .status();
         }
+    }
+
+    /// Bring the stack back up after `stop`, e.g. when an update failed to
+    /// install after the stack was stopped for it.
+    pub fn resume(self: &Arc<Self>) {
+        let Some(paths) = self.paths.lock().expect("lock").clone() else {
+            return;
+        };
+        self.stopping.store(false, Ordering::SeqCst);
+        self.set(Status::Starting {
+            step: "Restarting".to_string(),
+        });
+        let runtime = Arc::clone(self);
+        std::thread::spawn(move || runtime.start(&paths));
+    }
+
+    /// Take over a daemon (and its database) that an earlier session of this
+    /// app started, identified by the PID it recorded and the process name.
+    fn adopt(&self, paths: &Paths, bin: &Path, pg_data: &Path) -> bool {
+        let pid = fs::read_to_string(paths.data.join(DAEMON_PID_FILE))
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok());
+        let Some(pid) = pid.filter(|&pid| is_daemon_process(pid)) else {
+            return false;
+        };
+        *self.daemon.lock().expect("lock") = Some(Daemon::Adopted(pid));
+        if pg_data.join("PG_VERSION").exists() {
+            *self.postgres_bin.lock().expect("lock") = Some(bin.to_path_buf());
+            *self.pg_data.lock().expect("lock") = Some(pg_data.to_path_buf());
+        }
+        true
     }
 }
 
@@ -289,15 +353,18 @@ fn init_cluster(
     password: &str,
     port: u16,
 ) -> Result<(), String> {
-    // A half-finished earlier attempt leaves a directory initdb refuses.
-    if pg_data.exists() {
-        fs::remove_dir_all(pg_data).map_err(|e| format!("clearing {}: {e}", pg_data.display()))?;
+    // Built aside and moved into place only when complete, so the real data
+    // directory is never a half-initialized cluster. A leftover staging dir
+    // is an earlier attempt that never held any data.
+    let staging = data.join("pgdata.init");
+    if staging.exists() {
+        fs::remove_dir_all(&staging).map_err(|e| format!("clearing {}: {e}", staging.display()))?;
     }
     let pwfile = data.join("db-password.init");
     write_private(&pwfile, password)?;
     let mut cmd = pg_command(bin, lib, "initdb");
     cmd.arg("-D")
-        .arg(pg_data)
+        .arg(&staging)
         .args(["-U", DB_USER, "--auth=scram-sha-256", "-E", "UTF8"])
         .arg("--no-instructions")
         .arg(format!("--pwfile={}", pwfile.display()));
@@ -313,14 +380,20 @@ fn init_cluster(
     );
     OpenOptions::new()
         .append(true)
-        .open(pg_data.join("postgresql.conf"))
+        .open(staging.join("postgresql.conf"))
         .and_then(|mut f| f.write_all(conf.as_bytes()))
-        .map_err(|e| format!("configuring the database: {e}"))
+        .map_err(|e| format!("configuring the database: {e}"))?;
+    fs::rename(&staging, pg_data).map_err(|e| format!("finishing database setup: {e}"))
 }
 
 fn check_major_version(pg_data: &Path) -> Result<(), String> {
-    let version = fs::read_to_string(pg_data.join("PG_VERSION"))
-        .map_err(|e| format!("reading the database version: {e}"))?;
+    let Ok(version) = fs::read_to_string(pg_data.join("PG_VERSION")) else {
+        return Err(format!(
+            "The database folder {} is incomplete or damaged. Gather has left it untouched: \
+             restore it from a backup, or move it aside to start with an empty database.",
+            pg_data.display()
+        ));
+    };
     if version.trim() == PG_MAJOR {
         return Ok(());
     }
@@ -440,6 +513,60 @@ fn stop_child(child: &mut Child) {
     }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// Whether `pid` is a running gather-daemon (guards against a recorded PID
+/// that has since been reused by an unrelated process).
+fn is_daemon_process(pid: u32) -> bool {
+    #[cfg(unix)]
+    let out = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output();
+    #[cfg(windows)]
+    let out = {
+        let mut cmd = Command::new("tasklist");
+        cmd.args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"]);
+        hide_window(&mut cmd);
+        cmd.output()
+    };
+    out.map(|o| {
+        String::from_utf8_lossy(&o.stdout)
+            .trim()
+            .trim_matches('"')
+            .split('"')
+            .next()
+            .unwrap_or("")
+            .trim_end_matches(".exe")
+            .ends_with("gather-daemon")
+    })
+    .unwrap_or(false)
+}
+
+/// Stop an adopted daemon: ask first, then insist.
+fn stop_pid(pid: u32) {
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
+        let deadline = Instant::now() + DAEMON_STOP_GRACE;
+        while Instant::now() < deadline {
+            if !is_daemon_process(pid) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let _ = Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status();
+    }
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("taskkill");
+        cmd.args(["/PID", &pid.to_string(), "/F"]);
+        hide_window(&mut cmd);
+        let _ = cmd.status();
+    }
 }
 
 /// `GET /healthz` over plain loopback TCP (no HTTP client dependency).

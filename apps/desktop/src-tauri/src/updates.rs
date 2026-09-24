@@ -103,22 +103,34 @@ pub async fn check<R: Runtime>(
     Ok(result)
 }
 
+/// Why `install` failed, which decides whether the local stack needs to be
+/// brought back up.
+pub enum InstallError {
+    /// Nothing was changed: the stack is still running.
+    NotStarted(String),
+    /// The stack was stopped for the installer, which then failed.
+    Failed(String),
+}
+
 /// Download, verify against the compiled-in key, and install the update
 /// found by the last check. `before_install` stops the local stack first so
 /// the installer can replace its files.
-pub async fn install(pending: &PendingUpdate, before_install: impl FnOnce()) -> Result<(), String> {
+pub async fn install(
+    pending: &PendingUpdate,
+    before_install: impl FnOnce(),
+) -> Result<(), InstallError> {
     let update = pending
         .0
         .lock()
         .expect("pending update lock")
         .take()
-        .ok_or("no update to install; check again")?;
+        .ok_or_else(|| InstallError::NotStarted("no update to install; check again".into()))?;
     let bytes = update
         .download(|_, _| {}, || {})
         .await
-        .map_err(|e| format!("download failed: {e}"))?;
+        .map_err(|e| InstallError::NotStarted(format!("download failed: {e}")))?;
     before_install();
     update
         .install(bytes)
-        .map_err(|e| format!("install failed: {e}"))
+        .map_err(|e| InstallError::Failed(format!("install failed: {e}")))
 }

@@ -1,12 +1,15 @@
 # Build the PostgreSQL + pgvector runtime that ships inside the Windows
 # installer (Linux/macOS: bundle-postgres.sh, which this mirrors).
 #
-# Compiled from pinned official sources: the PostgreSQL tarball is checked
-# against the checksum pinned here and pgvector is cloned at a fixed tag.
+# Compiled from pinned official sources: PostgreSQL from its release tag,
+# verified against the commit pinned here, and pgvector at a fixed tag.
+# (The release tarball can't be used: PostgreSQL 16 tarballs carry
+# pre-generated parser files, and meson requires a clean source tree.)
 # Nothing is downloaded at runtime.
 #
 # Needs an MSVC developer shell (cl, nmake), Strawberry Perl, meson + ninja,
-# win_flex/win_bison, and OpenSSL from vcpkg (see .github/workflows/ci.yml).
+# win_flex/win_bison (a git checkout generates its parsers), and OpenSSL from
+# vcpkg (see .github/workflows/ci.yml).
 #
 # Usage: scripts/bundle-postgres.ps1 [-Out <dir>] [-OpenSsl <vcpkg prefix>]
 param(
@@ -17,7 +20,8 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $PgVersion = '16.15'
-$PgSha256 = 'c1575341fa7bd40f5274ea465b34390f4dc64cdd0770af327005caaeb9f6b7ed'
+$PgTag = 'REL_16_15'
+$PgCommit = '7d3e000c5961a544302072058a1184e9a588837b'
 $PgvectorTag = 'v0.8.6'
 
 function Invoke-Checked([string]$What, [scriptblock]$Block) {
@@ -31,13 +35,13 @@ $Work = Join-Path ([IO.Path]::GetTempPath()) ("gather-pg-" + [Guid]::NewGuid())
 New-Item -ItemType Directory -Path $Work | Out-Null
 
 try {
-  Write-Host "==> PostgreSQL $PgVersion source"
-  $tarball = Join-Path $Work 'pg.tar.bz2'
-  Invoke-WebRequest -Uri "https://ftp.postgresql.org/pub/source/v$PgVersion/postgresql-$PgVersion.tar.bz2" -OutFile $tarball
-  $actual = (Get-FileHash -Algorithm SHA256 $tarball).Hash.ToLower()
-  if ($actual -ne $PgSha256) { throw "checksum mismatch for postgresql-${PgVersion}: got $actual" }
-  Invoke-Checked 'extract' { tar -xjf $tarball -C $Work }
-  $src = Join-Path $Work "postgresql-$PgVersion"
+  Write-Host "==> PostgreSQL $PgVersion source ($PgTag)"
+  $src = Join-Path $Work 'postgresql'
+  Invoke-Checked 'clone postgresql' {
+    git -c advice.detachedHead=false clone -q --depth 1 --branch $PgTag https://github.com/postgres/postgres $src
+  }
+  $actual = (git -C $src rev-parse HEAD).Trim()
+  if ($actual -ne $PgCommit) { throw "$PgTag resolved to $actual, expected $PgCommit" }
   $build = Join-Path $Work 'build'
 
   Write-Host '==> meson setup + build'
@@ -90,7 +94,7 @@ try {
   Get-ChildItem "$Out/lib" -Recurse -Include '*.lib', '*.pdb', '*.a' | Remove-Item
 
   @(
-    "postgresql $PgVersion (sha256 $PgSha256)",
+    "postgresql $PgVersion ($PgTag, commit $PgCommit)",
     "pgvector $PgvectorTag",
     'built for windows x86_64'
   ) | Set-Content "$Out/BUNDLE.txt"

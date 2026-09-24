@@ -225,7 +225,8 @@ jobs:
   # PostgreSQL + pgvector runtime compiled here from pinned sources
   # (scripts/bundle-postgres.*). Installers are unsigned unless the signing
   # secrets exist; see docs/RELEASING.md. Every signing step below is a no-op
-  # without its secret.
+  # without its secret, and signing secrets are only handed to builds of
+  # release tags (v*): branch and PR builds never see them.
   build-desktop:
     name: build desktop (${{ matrix.platform }})
     needs: [lint, test, restore-drill, graph-benchmark]
@@ -241,9 +242,9 @@ jobs:
             os: macos-latest
     runs-on: ${{ matrix.os }}
     env:
-      HAS_UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' && vars.TAURI_UPDATER_PUBKEY != '' }}
-      HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
-      HAS_WINDOWS_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+      HAS_UPDATER_KEY: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.TAURI_SIGNING_PRIVATE_KEY != '' && vars.TAURI_UPDATER_PUBKEY != '' }}
+      HAS_APPLE_CERT: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.APPLE_CERTIFICATE != '' }}
+      HAS_WINDOWS_CERT: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.WINDOWS_CERTIFICATE != '' }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -366,8 +367,8 @@ jobs:
         working-directory: apps/desktop
         shell: bash
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ env.HAS_UPDATER_KEY == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ env.HAS_UPDATER_KEY == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         # TAURI_EXTRA_CONFIG is intentionally unquoted: zero or more --config pairs.
         run: npm run tauri -- build --config src-tauri/tauri.bundle.conf.json $TAURI_EXTRA_CONFIG
       - uses: actions/upload-artifact@v7

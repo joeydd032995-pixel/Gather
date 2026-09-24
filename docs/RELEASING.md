@@ -18,7 +18,7 @@ Pushing a `v*` tag builds the installers for Windows, macOS and Linux and publis
 |---|---|
 | Desktop app | `apps/desktop` (Tauri) |
 | `gather-daemon` sidecar | `daemon/`, built for the runner's target |
-| PostgreSQL 16 + pgvector + pgcrypto | `scripts/bundle-postgres.sh` / `.ps1`: compiled from the official source tarball (checksum pinned in the script) and pgvector at a pinned tag, with OpenSSL (for pgcrypto) vendored in |
+| PostgreSQL 16 + pgvector + pgcrypto | `scripts/bundle-postgres.sh` / `.ps1`: compiled from official sources (Linux/macOS: the release tarball, checksum pinned; Windows: the release tag, commit pinned, since meson needs a clean tree) and pgvector at a pinned tag, with OpenSSL (for pgcrypto) vendored in |
 
 The bundling inputs are only merged in for packaging (`--config src-tauri/tauri.bundle.conf.json`),
 so `npm run tauri -- dev` keeps working without them. The Postgres build is cached per OS and
@@ -29,6 +29,12 @@ script version, so changing a pinned version in the scripts rebuilds it.
 Releases start **unsigned**; [INSTALL.md](INSTALL.md#first-launch) walks users through the
 one-time OS warning. Each signing hook in CI is inactive until its secrets exist, so turning one
 on is a matter of adding secrets, with no workflow edits.
+
+Signing secrets are handed only to builds of `v*` tags; branch and pull-request builds never
+receive them. Before adding any, protect those tags so only maintainers can create them
+(**Settings → Rules → Rulesets**: a tag ruleset for `v*` restricting creation, update and
+deletion). Otherwise anyone who can push a tag could run modified build code with the keys.
+For a second gate, move the secrets into a GitHub **environment** with required reviewers.
 
 | What | Configure | Effect |
 |---|---|---|
