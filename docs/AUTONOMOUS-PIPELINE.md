@@ -71,8 +71,8 @@ embedding it is **held, not merged**. With an embedding that agrees, it merges.
 
 The tray holds only what the policy could not decide: low-confidence units, ambiguous merge
 pairs (keyed by the *pair*, so one entity can have several), and entity components too large to
-merge safely. It is ordered by `info_gain`. Today that means most recent first; next it will
-mean *most informative first*, so a handful of answers resolve many cases.
+merge safely. It is ordered by `info_gain`, *most informative first*, so a handful of answers
+settle many cases (see [Active learning](#active-learning-and-auto-tuning)).
 
 You never have to visit it. Items in it are already live.
 
@@ -138,25 +138,78 @@ These run offline in CI and fail the build on regressions:
 | `tests/extraction_quality.rs` | Rule extractor precision ≥ 70% on a labelled golden corpus (baseline 83.3%). Subjects must match, and producing nothing fails |
 | `tests/decision_policy.rs` | The merge gate never auto-merges without agreement or a near-certain signal. Admission defaults never drop data |
 | `tests/clustering.rs` | Real name similarity groups duplicates and keeps distinct names apart |
+| `tests/tuning.rs` | The tuner converges to a known boundary, never leaves its bounds, never moves on thin evidence, never oscillates, and never loosens on reject-only feedback; the tray ranks boundary hubs first |
 
-Integration tests (`feedback_integration.rs`, `cluster_integration.rs`) exercise the feedback
+Integration tests (`feedback_integration.rs`, `cluster_integration.rs`, `tune_integration.rs`) exercise the feedback
 endpoints and the clustering worker end to end against pgvector.
 
-## Tuning
+## Active learning and auto-tuning
 
-- More silent admission and fewer tray items: lower `GATHER_ADMIT_HOLD_BELOW`.
+(`daemon/src/tune/`.) A background worker runs every `GATHER_TUNE_INTERVAL_SECS` and does two
+things.
+
+### Ranking the tray
+
+Each open tray item gets `info_gain = uncertainty × (1 + ln(1 + degree))`:
+
+- **Uncertainty** is how close the item sits to the *Auto* edge of its hold band: 1.0 right at
+  the boundary, 0.0 at the floor. That edge is the one that matters: your answer there decides
+  whether the Auto bar can come down, which is what shrinks the tray.
+- **Degree** is how much of the graph the answer touches: for a unit, the relationships it
+  asserts plus other units about the same subject; for a merge pair, the units about either
+  entity; for an oversized component, its size.
+
+### Tuning the thresholds from your verdicts
+
+The tuner reads your **latest** verdict per item (confirm/accept = keep, reject = not), with
+the score the item had when you judged it, and may move two thresholds:
+
+| Key | Moves | Hard bounds |
+|---|---|---|
+| `admit.hold_below` | unit admission bar | 0.30–0.90, never below the drop floor |
+| `merge.auto_single` | single-signal auto-merge bar | 0.85–0.99 |
+
+Your labels are biased, and the rules lean into that. People mostly reject wrong things they
+happen to notice among auto-accepted items, so measured precision reads *low*, which pushes a
+threshold *up*: the cautious direction. So the rules are asymmetric:
+
+- **Raise** by 0.05 when at least `GATHER_TUNE_MIN_SAMPLES` labels sit at or above the threshold
+  and their precision is below `GATHER_TUNE_TARGET_PRECISION`.
+- **Lower** only to a score you have actually judged, at most 0.05 down, and only when the 95%
+  Wilson lower bound of precision at the new bar clears the target *and* the newly admitted
+  region has its own evidence. Three kept out of three is not enough.
+- The gap between the two rules is hysteresis: the tuner settles instead of oscillating.
+
+Neither the drop floor (the tuner can never auto-discard data) nor the two-signal agreement
+bars nor the review floor are ever tuned. A threshold you set in the environment *outside* the
+tuner's bounds (e.g. `GATHER_ADMIT_HOLD_BELOW=0.1`) is treated as a deliberate choice and left
+alone.
+
+Every move is written to `decision_tuning_audit` with the evidence behind it. When the admission
+bar comes down, low-confidence tray entries that now clear it are dismissed automatically, so
+the tray drains itself (and a held merge pair that a later pass auto-merges is closed too).
+`GET /tuning` shows the current values and history, including the evidence at the new
+threshold for every lowering. `POST /tuning/reset` returns to the env defaults *durably*: only
+verdicts given after the reset count toward tuning that key again.
+`GATHER_TUNE_ENABLED=false` freezes the thresholds.
+
+**Known gap:** there is no entity *unmerge* yet, so an auto-merge can't be undone and can't
+produce a negative label. The merge tuner therefore effectively only loosens on accepted tray
+merges, which is why its floor (0.85) is high.
+
+## Tuning by hand
+
+- More silent admission and fewer tray items: lower `GATHER_ADMIT_HOLD_BELOW` (or let the tuner
+  do it from your tray answers).
 - Automatically discard the weakest units: raise `GATHER_ADMIT_DROP_BELOW` above 0. This loses
   data, so use with care.
 - Tighter or looser topics: raise or lower `GATHER_CLUSTER_THRESHOLD`, and adjust
   `GATHER_CLUSTER_K`.
-- More or fewer entity merges: the merge thresholds are fixed conservative defaults for now.
-  Feedback-driven tuning (stored in `decision_tuning`) is next on the roadmap.
+- Stricter automation overall: raise `GATHER_TUNE_TARGET_PRECISION`.
 
 ## What's next
 
-- **Active learning:** order the tray by information gain (closeness to a decision boundary ×
-  how central the item is in the graph), so a few answers settle many cases.
-- **Auto-tuning:** feedback moves the band thresholds automatically, with no redeploy.
-- **Photo pipeline:** perceptual-hash near-duplicate removal, EXIF time/place albums, optional
-  local vision embeddings for visual topics.
-- **Desktop review tray** and gRPC parity for the feedback and cluster endpoints.
+- **Photo pipeline:** perceptual-hash near-duplicate grouping, EXIF time/place albums, optional
+  local vision captions for visual topics.
+- **Desktop review tray** and gRPC parity for the feedback, tuning and cluster endpoints.
+- **Entity unmerge**, so auto-merges become reversible and labelable.

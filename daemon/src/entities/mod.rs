@@ -13,7 +13,10 @@ use uuid::Uuid;
 use crate::error::ApiError;
 use crate::extract::ollama::OllamaClient;
 
-pub use merge::{dismiss_suggestion, merge_entities, resolve_head, MergeOutcome};
+pub use merge::{
+    dismiss_suggestion, dismiss_suggestion_in, merge_entities, merge_entities_in, resolve_head,
+    MergeOutcome,
+};
 pub use similarity::DEFAULT_THRESHOLD;
 
 /// How many live entities the text pass will consider. Scoring is pairwise, so

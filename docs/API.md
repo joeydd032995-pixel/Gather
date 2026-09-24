@@ -180,9 +180,25 @@ The rare corrections that keep the system honest. Every action is recorded in
 | POST | `/units/{id}/confirm` | Positive label; no state change |
 | PATCH | `/units/{id}` | Correct the wording: `{ "statement": "…", "note": "…" }`. Stores before and after, marks the unit `manual`, and re-queues it for embedding, contradiction scanning and clustering. Returns `400` if the new text duplicates another unit |
 | GET | `/review` | The optional review tray, highest information gain first. Query: `limit` |
-| POST | `/review/{id}/resolve` | Dismiss a tray item without acting on it |
+| POST | `/review/{id}/accept` | Agree with a held item: keep a unit, or perform a held merge (the more specific / longer-named entity survives). Records a positive tuning label |
+| POST | `/review/{id}/reject` | Disagree: retract a unit, or dismiss a held merge pair so it is never suggested again. Records a negative tuning label |
+| POST | `/review/{id}/resolve` | Dismiss a tray item without acting on it (no label) |
 
 Acting on a unit (reject, restore, confirm or edit) also clears its open tray entry.
+
+Oversized entity components cannot be accepted as a whole (`400`); act on their members
+individually.
+
+---
+
+## Tuning
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/tuning` | Thresholds in force with their defaults and hard bounds, the tuner settings, and the 50 most recent changes with the evidence behind each |
+| POST | `/tuning/reset` | Drop learned values so the env defaults apply again. Optional body `{ "key": "admit.hold_below" }` resets one key. Audited and durable: only verdicts given after the reset can tune that key again |
+
+Keys: `admit.hold_below` (unit admission) and `merge.auto_single` (single-signal auto-merge).
 
 ---
 

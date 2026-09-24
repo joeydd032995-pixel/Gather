@@ -185,6 +185,13 @@ pub fn label_from_texts(texts: &[&str]) -> String {
         .unwrap_or_default()
 }
 
+/// Ordering key for choosing a merge survivor: a specifically-typed entity
+/// beats an extraction-created `other` (so a merge never discards the more
+/// specific kind), then the longer name wins. Compare keys; higher survives.
+pub fn survivor_key(kind: &str, name: &str) -> (u8, usize) {
+    ((kind != "other") as u8, name.chars().count())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

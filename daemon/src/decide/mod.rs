@@ -16,6 +16,8 @@
 //! long is a tray entry, while the cost of a wrong Auto is a correction — we
 //! bias toward the former.
 
+pub mod live;
+
 /// What to do with a scored item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Band {

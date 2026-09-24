@@ -50,14 +50,29 @@ pub async fn merge_entities(
     note: Option<String>,
     actor: Option<String>,
 ) -> Result<MergeOutcome, ApiError> {
+    let mut tx = pool.begin().await?;
+    let outcome = merge_entities_in(&mut tx, winner_id, loser_id, note, actor).await?;
+    tx.commit().await?;
+    metrics::counter!("gather_entity_merges_total").increment(1);
+    Ok(outcome)
+}
+
+/// [`merge_entities`] inside a caller's transaction, so a merge can commit
+/// atomically with other writes (e.g. the review tray's tuning label). The
+/// caller commits.
+pub async fn merge_entities_in(
+    tx: &mut Transaction<'_, Postgres>,
+    winner_id: Uuid,
+    loser_id: Uuid,
+    note: Option<String>,
+    actor: Option<String>,
+) -> Result<MergeOutcome, ApiError> {
     if winner_id == loser_id {
         return Err(ApiError::BadRequest(
             "cannot merge an entity into itself".to_string(),
         ));
     }
     let actor = actor.unwrap_or_else(|| "local-user".to_string());
-
-    let mut tx = pool.begin().await?;
 
     // Lock both rows in a stable order so two concurrent merges touching the
     // same pair cannot deadlock.
@@ -72,7 +87,7 @@ pub async fn merge_entities(
     )
     .bind(first)
     .bind(second)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
     if rows.len() != 2 {
         // Report whichever id is missing rather than a generic "not found".
@@ -123,7 +138,7 @@ pub async fn merge_entities(
     .bind(winner_id)
     .bind(loser_id)
     .bind(&loser_name)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?
     .rows_affected();
 
@@ -131,7 +146,7 @@ pub async fn merge_entities(
     // only fire on a hard delete, and the merge is a soft one.
     sqlx::query("DELETE FROM entity_aliases WHERE entity_id = $1")
         .bind(loser_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
     // 2. Units whose subject was the loser now describe the winner.
@@ -148,7 +163,7 @@ pub async fn merge_entities(
     )
     .bind(winner_id)
     .bind(loser_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?
     .rows_affected();
 
@@ -160,7 +175,7 @@ pub async fn merge_entities(
            AND status = 'active'",
     )
     .bind(winner_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?
     .rows_affected();
 
@@ -175,7 +190,7 @@ pub async fn merge_entities(
     )
     .bind(winner_id)
     .bind(loser_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?
     .rows_affected();
 
@@ -203,7 +218,7 @@ pub async fn merge_entities(
     )
     .bind(winner_id)
     .bind(loser_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?
     .rows_affected();
 
@@ -212,14 +227,14 @@ pub async fn merge_entities(
         sqlx::query("UPDATE relationships SET source_entity_id = $1 WHERE source_entity_id = $2")
             .bind(winner_id)
             .bind(loser_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected();
     let targets =
         sqlx::query("UPDATE relationships SET target_entity_id = $1 WHERE target_entity_id = $2")
             .bind(winner_id)
             .bind(loser_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected();
 
@@ -228,7 +243,7 @@ pub async fn merge_entities(
     sqlx::query("UPDATE entities SET merged_into_entity_id = $1 WHERE id = $2")
         .bind(winner_id)
         .bind(loser_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
     // 4b. Flatten: anything previously merged INTO the loser now points at the
@@ -242,7 +257,7 @@ pub async fn merge_entities(
     )
     .bind(winner_id)
     .bind(loser_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?
     .rows_affected();
 
@@ -255,12 +270,8 @@ pub async fn merge_entities(
     .bind(loser_id)
     .bind(&actor)
     .bind(&note)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
-
-    tx.commit().await?;
-
-    metrics::counter!("gather_entity_merges_total").increment(1);
 
     Ok(MergeOutcome {
         winner_id,
@@ -285,6 +296,20 @@ pub async fn dismiss_suggestion(
     note: Option<String>,
     actor: Option<String>,
 ) -> Result<(), ApiError> {
+    let mut tx = pool.begin().await?;
+    dismiss_suggestion_in(&mut tx, a_id, b_id, note, actor).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// [`dismiss_suggestion`] inside a caller's transaction. The caller commits.
+pub async fn dismiss_suggestion_in(
+    tx: &mut Transaction<'_, Postgres>,
+    a_id: Uuid,
+    b_id: Uuid,
+    note: Option<String>,
+    actor: Option<String>,
+) -> Result<(), ApiError> {
     if a_id == b_id {
         return Err(ApiError::BadRequest(
             "cannot dismiss a pair of one entity".to_string(),
@@ -299,7 +324,7 @@ pub async fn dismiss_suggestion(
     .bind(b_id)
     .bind(&actor)
     .bind(&note)
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }

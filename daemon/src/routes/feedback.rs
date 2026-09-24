@@ -12,9 +12,11 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use sqlx::Row;
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use crate::cluster::survivor_key;
+use crate::entities::{dismiss_suggestion_in, merge_entities_in};
 use crate::error::ApiError;
 use crate::extract::persist::normalize_statement;
 use crate::AppState;
@@ -39,8 +41,11 @@ async fn record_feedback(
     note: Option<&str>,
 ) -> Result<(), ApiError> {
     sqlx::query(
-        "INSERT INTO unit_feedback (target_kind, target_id, action, corrected, note) \
-         VALUES ('unit', $1, $2, $3, $4)",
+        // score snapshots the confidence the user judged, so the tuner learns
+        // from what was actually labelled even if the unit is re-scored later.
+        "INSERT INTO unit_feedback (target_kind, target_id, action, corrected, note, score) \
+         VALUES ('unit', $1, $2, $3, $4, \
+                 (SELECT confidence FROM atomic_units WHERE id = $1))",
     )
     .bind(target_id)
     .bind(action)
@@ -73,14 +78,10 @@ async fn unit_status(
     }
 }
 
-/// POST /units/{id}/reject — retract the unit and record a negative label.
-pub async fn reject_unit(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    body: Option<Json<NoteRequest>>,
-) -> Result<Json<Value>, ApiError> {
-    let note = body.and_then(|b| b.0.note);
-    let mut tx = state.pool.begin().await?;
+/// Retract a unit (and the relationships it asserted) and record a negative
+/// label. Shared by the REST handler and the review tray.
+pub async fn reject_unit_core(pool: &PgPool, id: Uuid, note: Option<&str>) -> Result<(), ApiError> {
+    let mut tx = pool.begin().await?;
     unit_status(&mut tx, id).await?;
     sqlx::query("UPDATE atomic_units SET status = 'retracted' WHERE id = $1")
         .bind(id)
@@ -90,8 +91,19 @@ pub async fn reject_unit(
     // (which filters on relationship status) keeps showing the rejected claim.
     // Same propagation the contradiction resolver does for a superseded unit.
     deactivate_relationships(&mut tx, id).await?;
-    record_feedback(&mut tx, id, "reject", None, note.as_deref()).await?;
+    record_feedback(&mut tx, id, "reject", None, note).await?;
     tx.commit().await?;
+    Ok(())
+}
+
+/// POST /units/{id}/reject — retract the unit and record a negative label.
+pub async fn reject_unit(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    body: Option<Json<NoteRequest>>,
+) -> Result<Json<Value>, ApiError> {
+    let note = body.and_then(|b| b.0.note);
+    reject_unit_core(&state.pool, id, note.as_deref()).await?;
     Ok(Json(json!({ "id": id, "status": "retracted" })))
 }
 
@@ -152,6 +164,20 @@ pub async fn restore_unit(
     Ok(Json(json!({ "id": id, "status": "active" })))
 }
 
+/// Record a positive label without changing the unit; returns its status.
+/// Shared by the REST handler and the review tray.
+pub async fn confirm_unit_core(
+    pool: &PgPool,
+    id: Uuid,
+    note: Option<&str>,
+) -> Result<String, ApiError> {
+    let mut tx = pool.begin().await?;
+    let status = unit_status(&mut tx, id).await?;
+    record_feedback(&mut tx, id, "confirm", None, note).await?;
+    tx.commit().await?;
+    Ok(status)
+}
+
 /// POST /units/{id}/confirm — positive label, no state change.
 pub async fn confirm_unit(
     State(state): State<AppState>,
@@ -159,10 +185,7 @@ pub async fn confirm_unit(
     body: Option<Json<NoteRequest>>,
 ) -> Result<Json<Value>, ApiError> {
     let note = body.and_then(|b| b.0.note);
-    let mut tx = state.pool.begin().await?;
-    let status = unit_status(&mut tx, id).await?;
-    record_feedback(&mut tx, id, "confirm", None, note.as_deref()).await?;
-    tx.commit().await?;
+    let status = confirm_unit_core(&state.pool, id, note.as_deref()).await?;
     Ok(Json(json!({ "id": id, "status": status })))
 }
 
@@ -291,4 +314,180 @@ pub async fn resolve_review(
         return Err(ApiError::NotFound(format!("open review item {id}")));
     }
     Ok(Json(json!({ "id": id, "state": "resolved" })))
+}
+
+/// An open tray entry, locked in by id.
+struct ReviewItem {
+    target_kind: String,
+    target_id: Uuid,
+    reason: String,
+    signals: Value,
+}
+
+async fn open_review_item(pool: &PgPool, id: Uuid) -> Result<ReviewItem, ApiError> {
+    let row = sqlx::query(
+        "SELECT target_kind, target_id, reason, signals FROM review_queue \
+         WHERE id = $1 AND state = 'open'",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("open review item {id}")))?;
+    Ok(ReviewItem {
+        target_kind: row.get("target_kind"),
+        target_id: row.get("target_id"),
+        reason: row.get("reason"),
+        signals: row.get("signals"),
+    })
+}
+
+/// The two entities and score behind a held merge pair.
+fn merge_pair(signals: &Value) -> Result<(Uuid, Uuid, Option<f32>), ApiError> {
+    let id = |field: &str| {
+        signals
+            .get(field)
+            .and_then(Value::as_str)
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .ok_or_else(|| ApiError::BadRequest(format!("merge review item lacks '{field}'")))
+    };
+    let score = signals
+        .get("score")
+        .and_then(Value::as_f64)
+        .map(|v| v as f32);
+    Ok((id("a")?, id("b")?, score))
+}
+
+/// Label a merge pair (the tuner's training signal) and close its tray entry,
+/// inside the caller's transaction so the label commits with the action.
+async fn record_merge_verdict(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    review_id: Uuid,
+    item: &ReviewItem,
+    action: &str,
+    score: Option<f32>,
+    note: Option<&str>,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "INSERT INTO unit_feedback (target_kind, target_id, action, corrected, note, score) \
+         VALUES ('merge', $1, $2, $3, $4, $5)",
+    )
+    .bind(item.target_id)
+    .bind(action)
+    .bind(&item.signals)
+    .bind(note)
+    .bind(score)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query("UPDATE review_queue SET state = 'resolved' WHERE id = $1")
+        .bind(review_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Pick the merge survivor with the same rule the auto-merge uses.
+async fn survivor_and_loser(pool: &PgPool, a: Uuid, b: Uuid) -> Result<(Uuid, Uuid), ApiError> {
+    let rows: Vec<(Uuid, String, String)> =
+        sqlx::query_as("SELECT id, name, kind::text FROM entities WHERE id IN ($1, $2)")
+            .bind(a)
+            .bind(b)
+            .fetch_all(pool)
+            .await?;
+    let find = |id: Uuid| {
+        rows.iter()
+            .find(|(rid, _, _)| *rid == id)
+            .ok_or_else(|| ApiError::NotFound(format!("entity {id}")))
+    };
+    let (_, name_a, kind_a) = find(a)?;
+    let (_, name_b, kind_b) = find(b)?;
+    if survivor_key(kind_a, name_a) >= survivor_key(kind_b, name_b) {
+        Ok((a, b))
+    } else {
+        Ok((b, a))
+    }
+}
+
+/// POST /review/{id}/accept — agree with the held item: keep a unit, or perform
+/// a held merge. Either way the verdict becomes a positive tuning label.
+pub async fn accept_review(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    body: Option<Json<NoteRequest>>,
+) -> Result<Json<Value>, ApiError> {
+    let note = body.and_then(|b| b.0.note);
+    let item = open_review_item(&state.pool, id).await?;
+    match (item.target_kind.as_str(), item.reason.as_str()) {
+        ("unit", _) => {
+            confirm_unit_core(&state.pool, item.target_id, note.as_deref()).await?;
+            Ok(Json(
+                json!({ "id": id, "action": "confirmed", "unit_id": item.target_id }),
+            ))
+        }
+        ("entity", "merge-band") => {
+            let (a, b, score) = merge_pair(&item.signals)?;
+            let (winner, loser) = survivor_and_loser(&state.pool, a, b).await?;
+            // Merge and label in one transaction: a merge without its label
+            // would leave the tray entry open and un-retryable.
+            let mut tx = state.pool.begin().await?;
+            merge_entities_in(
+                &mut tx,
+                winner,
+                loser,
+                Some(
+                    note.clone()
+                        .unwrap_or_else(|| "accepted from review tray".to_string()),
+                ),
+                Some("local-user".to_string()),
+            )
+            .await?;
+            record_merge_verdict(&mut tx, id, &item, "confirm", score, note.as_deref()).await?;
+            tx.commit().await?;
+            metrics::counter!("gather_entity_merges_total").increment(1);
+            Ok(Json(
+                json!({ "id": id, "action": "merged", "winner": winner, "loser": loser }),
+            ))
+        }
+        _ => Err(ApiError::BadRequest(
+            "this review item cannot be accepted as a whole; act on its members individually"
+                .to_string(),
+        )),
+    }
+}
+
+/// POST /review/{id}/reject — disagree with the held item: retract a unit, or
+/// dismiss a held merge pair so it is never suggested again. Either way the
+/// verdict becomes a negative tuning label.
+pub async fn reject_review(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    body: Option<Json<NoteRequest>>,
+) -> Result<Json<Value>, ApiError> {
+    let note = body.and_then(|b| b.0.note);
+    let item = open_review_item(&state.pool, id).await?;
+    match (item.target_kind.as_str(), item.reason.as_str()) {
+        ("unit", _) => {
+            reject_unit_core(&state.pool, item.target_id, note.as_deref()).await?;
+            Ok(Json(
+                json!({ "id": id, "action": "retracted", "unit_id": item.target_id }),
+            ))
+        }
+        ("entity", "merge-band") => {
+            let (a, b, score) = merge_pair(&item.signals)?;
+            let mut tx = state.pool.begin().await?;
+            dismiss_suggestion_in(&mut tx, a, b, note.clone(), Some("local-user".to_string()))
+                .await?;
+            record_merge_verdict(&mut tx, id, &item, "reject", score, note.as_deref()).await?;
+            tx.commit().await?;
+            Ok(Json(
+                json!({ "id": id, "action": "dismissed", "pair": [a, b] }),
+            ))
+        }
+        _ => {
+            sqlx::query("UPDATE review_queue SET state = 'dismissed' WHERE id = $1")
+                .bind(id)
+                .execute(&state.pool)
+                .await?;
+            Ok(Json(json!({ "id": id, "action": "dismissed" })))
+        }
+    }
 }

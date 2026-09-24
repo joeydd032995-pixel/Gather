@@ -67,6 +67,8 @@ photo out") rather than reviewing thousands of suggestions.
   units are grouped into **topics** (mutual-kNN graph + connected components)
 - **Feedback loop**: reject / restore / confirm / edit any unit; every correction is recorded
   and reversible, and drives a real-data precision metric
+- **Active learning**: the tray is ordered by information gain, and your verdicts move the
+  decision thresholds automatically (bounded, audited, resettable)
 
 **Contradictions**
 - Background scanner detects conflicts (numeric mismatch, negation, exclusive assignment,
@@ -303,10 +305,10 @@ See §7 of the [technical write-up](docs/TECHNICAL-WRITEUP.md) for the full thre
 
 - **Done:** ingestion adapters, extraction, knowledge graph, contradiction scanning, entity
   resolution, gRPC parity, export/import, observability, backups, the autonomous-pipeline
-  foundation (auto-act + feedback loop) and clustering.
-- **Next:** active-learning ordering of the review tray and feedback-driven threshold
-  auto-tuning; a photo pipeline (perceptual-hash dedup, EXIF time/place albums, optional local
-  vision embeddings); desktop review-tray UI; multi-user support.
+  foundation (auto-act + feedback loop), clustering, and active learning (information-gain
+  tray ordering + feedback-driven threshold auto-tuning).
+- **Next:** a photo pipeline (perceptual-hash dedup, EXIF time/place albums, optional local
+  vision captions); desktop review-tray UI; entity unmerge; multi-user support.
 
 ## License
 

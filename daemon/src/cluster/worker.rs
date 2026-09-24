@@ -20,9 +20,10 @@ use serde_json::json;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use super::{cohesion, components, grouped, label_from_texts, mutual_knn, Edge};
+use super::{cohesion, components, grouped, label_from_texts, mutual_knn, survivor_key, Edge};
 use crate::config::Config;
-use crate::decide::{merge_decision, Band, MergeSignals, MergeThresholds};
+use crate::decide::live::LiveThresholds;
+use crate::decide::{best_score, merge_decision, Band, MergeSignals};
 use crate::entities::similarity::name_similarity;
 use crate::entities::{merge_entities, merge_suggestions};
 use crate::scan::score::{all_tokens, jaccard};
@@ -86,7 +87,8 @@ async fn entity_resolution_pass(
     if suggestions.is_empty() {
         return Ok(());
     }
-    let thresholds = MergeThresholds::conservative();
+    // Tuned merge thresholds (env/conservative defaults when untuned).
+    let thresholds = LiveThresholds::load(pool, config).await?.merge;
 
     // Index entities appearing in suggestions; keep their names for canonical
     // selection.
@@ -143,7 +145,17 @@ async fn entity_resolution_pass(
                      VALUES ('entity', $1, 'merge-band', $2) ON CONFLICT DO NOTHING",
                 )
                 .bind(pair_key(s.a.id, s.b.id))
-                .bind(json!({ "a": s.a.id, "b": s.b.id, "score": s.score, "method": s.method }))
+                // `score` is the strongest signal — the coordinate the
+                // single-signal Auto gate (and so the tuner) works on — with
+                // both raw signals kept alongside for inspection.
+                .bind(json!({
+                    "a": s.a.id,
+                    "b": s.b.id,
+                    "score": best_score(&signals),
+                    "cosine": signals.cosine,
+                    "text": signals.text,
+                    "method": s.method,
+                }))
                 .execute(pool)
                 .await?
                 .rows_affected();
@@ -157,6 +169,7 @@ async fn entity_resolution_pass(
         return Ok(());
     }
     let comp = components(ids.len(), &auto_edges);
+    let mut merged_away: Vec<Uuid> = Vec::new();
     for group in grouped(&comp) {
         if group.len() < 2 {
             continue;
@@ -183,11 +196,8 @@ async fn entity_resolution_pass(
         let winner_local = *group
             .iter()
             .max_by(|&&x, &&y| {
-                let typed_x = (kinds[x] != "other") as u8;
-                let typed_y = (kinds[y] != "other") as u8;
-                typed_x
-                    .cmp(&typed_y)
-                    .then(names[x].chars().count().cmp(&names[y].chars().count()))
+                survivor_key(&kinds[x], &names[x])
+                    .cmp(&survivor_key(&kinds[y], &names[y]))
                     .then(y.cmp(&x))
             })
             .expect("non-empty group");
@@ -216,6 +226,7 @@ async fn entity_resolution_pass(
             .execute(pool)
             .await?;
             if member_id != winner_id {
+                merged_away.push(member_id);
                 merge_entities(
                     pool,
                     winner_id,
@@ -227,6 +238,20 @@ async fn entity_resolution_pass(
                 stats.entities_merged += 1;
             }
         }
+    }
+    // A pair held in an earlier pass may now clear the (possibly re-tuned)
+    // Auto bar and have just been merged: its tray entry is stale, and
+    // accepting it would fail on the already-merged loser. Close every open
+    // merge entry that names an entity merged away this pass.
+    if !merged_away.is_empty() {
+        sqlx::query(
+            "UPDATE review_queue SET state = 'dismissed' \
+             WHERE state = 'open' AND target_kind = 'entity' AND reason = 'merge-band' \
+               AND (signals->>'a' = ANY($1) OR signals->>'b' = ANY($1))",
+        )
+        .bind(merged_away.iter().map(Uuid::to_string).collect::<Vec<_>>())
+        .execute(pool)
+        .await?;
     }
     Ok(())
 }

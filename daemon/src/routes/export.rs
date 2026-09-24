@@ -101,18 +101,22 @@ const TABLES: &[(&str, &str)] = &[
         "entity_merge_audit",
         "id, winner_entity_id, loser_entity_id, action, actor, note, created_at",
     ),
-    // Feedback loop (autonomous pipeline). No FK dependencies between these
-    // three, so ordering among them is free; they round-trip the correction
+    // Feedback loop (autonomous pipeline). No FK dependencies among these
+    // tables, so ordering among them is free; they round-trip the correction
     // history, the review tray, and the learned thresholds.
     (
         "unit_feedback",
-        "id, target_kind, target_id, action, actor, corrected, note, created_at",
+        "id, target_kind, target_id, action, actor, corrected, note, created_at, score",
     ),
     (
         "review_queue",
         "id, target_kind, target_id, info_gain, reason, signals, state, created_at",
     ),
     ("decision_tuning", "key, value, updated_at"),
+    (
+        "decision_tuning_audit",
+        "id, key, old_value, new_value, actor, reason, created_at",
+    ),
     // After clusters (its cluster_id FK). member_id is a plain uuid, no FK.
     ("cluster_members", "cluster_id, member_kind, member_id, sim"),
 ];

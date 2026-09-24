@@ -108,6 +108,21 @@ See [AUTONOMOUS-PIPELINE.md](AUTONOMOUS-PIPELINE.md).
 | `GATHER_CLUSTER_THRESHOLD` | `0.5` | 0–1 | Minimum edge similarity. **Validated** |
 | `GATHER_CLUSTER_MAX_COMPONENT` | `50` | 2–10000 | Components larger than this are too diffuse to auto-label or auto-merge. Such entity components are parked for review instead |
 
+## Active learning & auto-tuning
+
+See [AUTONOMOUS-PIPELINE.md](AUTONOMOUS-PIPELINE.md#active-learning-and-auto-tuning).
+
+| Variable | Default | Range | Description |
+|---|---|---|---|
+| `GATHER_TUNE_ENABLED` | `true` | | Let your feedback move the decision thresholds. The tune worker always runs to re-rank the review tray; this gates only threshold changes |
+| `GATHER_TUNE_INTERVAL_SECS` | `600` | ≥ 1 | Seconds between re-rank / tuning passes |
+| `GATHER_TUNE_MIN_SAMPLES` | `20` | 5–100000 | Labels needed at or above a threshold before it may move |
+| `GATHER_TUNE_TARGET_PRECISION` | `0.90` | 0–1 | Precision the auto-accepted band must hold. **Validated** |
+
+Tuned values live in the database and override `GATHER_ADMIT_HOLD_BELOW` and the single-signal
+merge threshold. Inspect them with `GET /api/v1/tuning`; `POST /api/v1/tuning/reset` returns to
+these env defaults.
+
 ## Metrics worth watching
 
 Exposed at `GET /metrics` (Prometheus format) and graphed in the provisioned Grafana dashboard.
@@ -120,5 +135,7 @@ Exposed at `GET /metrics` (Prometheus format) and graphed in the provisioned Gra
 | `gather_contradictions_open` | Contradictions awaiting review |
 | `gather_review_queue_open` | Items parked in the optional review tray |
 | `gather_realdata_precision` | Of the units you gave a verdict on, the fraction whose latest verdict is "keep" |
+| `gather_decision_threshold{key}` | Thresholds in force (tuned or default) |
+| `gather_tuning_changes_total{key,direction}` | Threshold moves made by the auto-tuner |
 | `gather_http_request_duration_seconds` | Per-route latency |
 | `gather_graph_query_duration_seconds` | Graph traversal latency |
