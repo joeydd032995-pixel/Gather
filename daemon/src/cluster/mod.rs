@@ -47,7 +47,15 @@ where
                 .collect();
             // Descending sim; stable tie-break by index keeps it deterministic.
             scored.sort_by(|x, y| y.1.total_cmp(&x.1).then(x.0.cmp(&y.0)));
-            scored.truncate(k);
+            // Keep the top k, but never split a group of equal-scoring
+            // neighbours by index: cutting mid-tie makes the relation
+            // asymmetric (a high-index node picks a low one but is never picked
+            // back), stranding perfect matches as singletons. So retain every
+            // neighbour whose score is >= the k-th best.
+            if scored.len() > k {
+                let cutoff = scored[k - 1].1;
+                scored.retain(|&(_, s)| s >= cutoff);
+            }
             scored.into_iter().map(|(j, _)| j).collect()
         })
         .collect();
@@ -241,6 +249,26 @@ mod tests {
         ];
         assert!((cohesion(&[0, 1, 2], &edges) - 0.8).abs() < 1e-6);
         assert_eq!(cohesion(&[5], &edges), 1.0); // singleton
+    }
+
+    #[test]
+    fn ties_at_the_kth_neighbour_are_not_split_by_index() {
+        // Six identical nodes, k = 3. If truncation cut ties by index, nodes
+        // 3-5 would pick 0-2 but never be picked back and strand as singletons.
+        // Keeping all ties at the k-th score makes every pair mutual -> one
+        // component of all six.
+        let m: Vec<Vec<f32>> = (0..6)
+            .map(|i| (0..6).map(|j| if i == j { 1.0 } else { 0.95 }).collect())
+            .collect();
+        let sim = |i: usize, j: usize| m[i][j];
+        let edges = mutual_knn(6, 3, 0.6, sim);
+        let groups = grouped(&components(6, &edges));
+        assert_eq!(
+            groups.len(),
+            1,
+            "identical nodes must not strand as singletons"
+        );
+        assert_eq!(groups[0], vec![0, 1, 2, 3, 4, 5]);
     }
 
     #[test]

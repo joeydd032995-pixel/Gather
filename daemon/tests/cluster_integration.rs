@@ -120,10 +120,30 @@ async fn worker_auto_merges_duplicates_and_groups_topics() {
         "the three overlapping units should share one topic cluster, got {clusters:?}"
     );
 
+    let topic = clusters[0].unwrap();
     let label: String = sqlx::query_scalar("SELECT label FROM clusters WHERE id = $1")
-        .bind(clusters[0].unwrap())
+        .bind(topic)
         .fetch_one(&state.pool)
         .await
         .unwrap();
     assert!(!label.is_empty(), "topic cluster should have a label");
+
+    // Cross-batch attach: a unit arriving in a LATER pass, overlapping the same
+    // tokens, joins the existing cluster via the context window instead of
+    // stranding as a singleton.
+    let late = seed_unit(&state, &format!("backup target hetzner later {tag}")).await;
+    run_one_pass(&state.pool, &state.config)
+        .await
+        .expect("second cluster pass");
+    let late_cluster: Option<Uuid> =
+        sqlx::query_scalar("SELECT topic_cluster_id FROM atomic_units WHERE id = $1")
+            .bind(late)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        late_cluster,
+        Some(topic),
+        "a later overlapping unit should attach to the existing topic cluster"
+    );
 }

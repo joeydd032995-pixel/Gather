@@ -23,8 +23,18 @@ use uuid::Uuid;
 use super::{cohesion, components, grouped, label_from_texts, mutual_knn, Edge};
 use crate::config::Config;
 use crate::decide::{merge_decision, Band, MergeSignals, MergeThresholds};
+use crate::entities::similarity::name_similarity;
 use crate::entities::{merge_entities, merge_suggestions};
 use crate::scan::score::{all_tokens, jaccard};
+
+/// A stable id for an unordered entity pair, so a held merge review is keyed by
+/// the pair (not one endpoint). Without this, two held suggestions sharing an
+/// entity collide on `review_queue`'s (target_kind, target_id) unique index and
+/// the second is silently dropped.
+fn pair_key(a: Uuid, b: Uuid) -> Uuid {
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("{lo}:{hi}").as_bytes())
+}
 
 #[derive(Debug, Default)]
 pub struct ClusterStats {
@@ -82,21 +92,33 @@ async fn entity_resolution_pass(
     // selection.
     let mut ids: Vec<Uuid> = Vec::new();
     let mut names: Vec<String> = Vec::new();
+    let mut kinds: Vec<String> = Vec::new();
     let mut index: HashMap<Uuid, usize> = HashMap::new();
-    let mut intern = |id: Uuid, name: &str, ids: &mut Vec<Uuid>, names: &mut Vec<String>| {
+    let mut intern = |id: Uuid,
+                      name: &str,
+                      kind: &str,
+                      ids: &mut Vec<Uuid>,
+                      names: &mut Vec<String>,
+                      kinds: &mut Vec<String>| {
         *index.entry(id).or_insert_with(|| {
             ids.push(id);
             names.push(name.to_string());
+            kinds.push(kind.to_string());
             ids.len() - 1
         })
     };
 
     let mut auto_edges: Vec<Edge> = Vec::new();
     for s in &suggestions {
+        // Supply BOTH signals when they exist. merge_suggestions emits only the
+        // embedding row for a pair it scored both ways, so recompute the text
+        // similarity here; otherwise the two-signal agreement path can never
+        // fire and a pair strong on both is needlessly held.
+        let text_sim = name_similarity(&s.a.name, &s.b.name);
         let signals = if s.method == "embedding:cosine" {
             MergeSignals {
                 cosine: Some(s.score),
-                text: None,
+                text: Some(text_sim),
             }
         } else {
             MergeSignals {
@@ -106,8 +128,12 @@ async fn entity_resolution_pass(
         };
         match merge_decision(&signals, &thresholds) {
             Band::Auto => {
-                let ia = intern(s.a.id, &s.a.name, &mut ids, &mut names);
-                let ib = intern(s.b.id, &s.b.name, &mut ids, &mut names);
+                let ia = intern(
+                    s.a.id, &s.a.name, &s.a.kind, &mut ids, &mut names, &mut kinds,
+                );
+                let ib = intern(
+                    s.b.id, &s.b.name, &s.b.kind, &mut ids, &mut names, &mut kinds,
+                );
                 let (a, b) = if ia < ib { (ia, ib) } else { (ib, ia) };
                 auto_edges.push(Edge { a, b, sim: s.score });
             }
@@ -116,8 +142,8 @@ async fn entity_resolution_pass(
                     "INSERT INTO review_queue (target_kind, target_id, reason, signals) \
                      VALUES ('entity', $1, 'merge-band', $2) ON CONFLICT DO NOTHING",
                 )
-                .bind(s.a.id)
-                .bind(json!({ "other": s.b.id, "score": s.score, "method": s.method }))
+                .bind(pair_key(s.a.id, s.b.id))
+                .bind(json!({ "a": s.a.id, "b": s.b.id, "score": s.score, "method": s.method }))
                 .execute(pool)
                 .await?
                 .rows_affected();
@@ -135,15 +161,33 @@ async fn entity_resolution_pass(
         if group.len() < 2 {
             continue;
         }
-        // Canonical survivor: the longest name (most information), tie-broken by
-        // lowest index for determinism.
+        // Chaining guard: a component larger than the cap is too diffuse to
+        // merge wholesale (a chain of adjacent-Auto pairs can join unrelated
+        // endpoints). Park it for review instead of a destructive auto-merge.
+        if group.len() > config.cluster_max_component {
+            let parked = sqlx::query(
+                "INSERT INTO review_queue (target_kind, target_id, reason, signals) \
+                 VALUES ('entity', $1, 'oversized-component', $2) ON CONFLICT DO NOTHING",
+            )
+            .bind(ids[group[0]])
+            .bind(json!({ "members": group.iter().map(|&i| ids[i]).collect::<Vec<_>>() }))
+            .execute(pool)
+            .await?
+            .rows_affected();
+            stats.entity_pairs_parked += parked as usize;
+            continue;
+        }
+        // Canonical survivor: prefer a specifically-typed entity over an
+        // extraction-created 'other' (so a merge never discards the more
+        // specific kind), then the longest name, then lowest index.
         let winner_local = *group
             .iter()
             .max_by(|&&x, &&y| {
-                names[x]
-                    .chars()
-                    .count()
-                    .cmp(&names[y].chars().count())
+                let typed_x = (kinds[x] != "other") as u8;
+                let typed_y = (kinds[y] != "other") as u8;
+                typed_x
+                    .cmp(&typed_y)
+                    .then(names[x].chars().count().cmp(&names[y].chars().count()))
                     .then(y.cmp(&x))
             })
             .expect("non-empty group");
@@ -193,9 +237,9 @@ async fn topic_clustering_pass(
     stats: &mut ClusterStats,
 ) -> anyhow::Result<()> {
     let mut tx = pool.begin().await?;
-    // Claim a batch: FOR UPDATE SKIP LOCKED so a second worker never processes
-    // the same units, and the cursor stamp below lands in the same transaction.
-    let rows = sqlx::query(
+    // Claim the unclustered batch: FOR UPDATE SKIP LOCKED so a second worker
+    // never processes the same units, and the stamp below lands in the same tx.
+    let new_rows = sqlx::query(
         "SELECT id, statement FROM atomic_units \
          WHERE clustered_at IS NULL AND status = 'active' \
          ORDER BY created_at LIMIT $1 FOR UPDATE SKIP LOCKED",
@@ -203,66 +247,107 @@ async fn topic_clustering_pass(
     .bind(config.cluster_batch)
     .fetch_all(&mut *tx)
     .await?;
-    if rows.is_empty() {
+    if new_rows.is_empty() {
         tx.rollback().await?;
         return Ok(());
     }
 
-    let ids: Vec<Uuid> = rows.iter().map(|r| r.get("id")).collect();
-    let statements: Vec<String> = rows.iter().map(|r| r.get("statement")).collect();
-    let tokens: Vec<Vec<String>> = statements.iter().map(|s| all_tokens(s)).collect();
+    // Context window: a bounded set of already-clustered units. Including them
+    // in the graph lets a new unit attach to a cluster formed in an earlier
+    // pass, so related units that fell on opposite sides of a batch boundary
+    // still end up together instead of stranded as singletons. Only the NEW
+    // units are ever assigned or stamped, so progress always advances.
+    let ctx_rows = sqlx::query(
+        "SELECT id, statement, topic_cluster_id FROM atomic_units \
+         WHERE topic_cluster_id IS NOT NULL AND status = 'active' \
+         ORDER BY created_at DESC LIMIT $1",
+    )
+    .bind(config.cluster_batch)
+    .fetch_all(&mut *tx)
+    .await?;
 
-    let edges = mutual_knn(
-        ids.len(),
-        config.cluster_k,
-        config.cluster_threshold,
-        |i, j| jaccard(&tokens[i], &tokens[j]),
-    );
-    for group in grouped(&components(ids.len(), &edges)) {
-        // Skip singletons and blobs too diffuse to auto-label (chaining guard).
-        if group.len() < 2 || group.len() > config.cluster_max_component {
+    let n = new_rows.len();
+    let new_ids: Vec<Uuid> = new_rows.iter().map(|r| r.get("id")).collect();
+    // Combined node list: new units first (0..n), then context units (n..).
+    let mut statements: Vec<String> = new_rows.iter().map(|r| r.get("statement")).collect();
+    // Per node: the existing cluster it already belongs to (None for new units).
+    let mut ctx_cluster: Vec<Option<Uuid>> = vec![None; n];
+    for r in &ctx_rows {
+        statements.push(r.get("statement"));
+        ctx_cluster.push(r.get("topic_cluster_id"));
+    }
+    let tokens: Vec<Vec<String>> = statements.iter().map(|s| all_tokens(s)).collect();
+    let total = statements.len();
+
+    let edges = mutual_knn(total, config.cluster_k, config.cluster_threshold, |i, j| {
+        jaccard(&tokens[i], &tokens[j])
+    });
+
+    let mut clustered_new: Vec<Uuid> = Vec::new();
+    for group in grouped(&components(total, &edges)) {
+        // Only new units get assigned; a component with none is pure context.
+        let new_in_group: Vec<usize> = group.iter().copied().filter(|&i| i < n).collect();
+        if new_in_group.is_empty() {
             continue;
         }
-        let texts: Vec<&str> = group.iter().map(|&i| statements[i].as_str()).collect();
-        let label = label_from_texts(&texts);
         let coh = cohesion(&group, &edges);
 
-        let cluster_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO clusters (kind, label, cohesion, size) \
-             VALUES ('topic', $1, $2, $3) RETURNING id",
-        )
-        .bind(&label)
-        .bind(coh)
-        .bind(group.len() as i32)
-        .fetch_one(&mut *tx)
-        .await?;
+        // Attach to an existing cluster if the component reaches one; otherwise
+        // form a fresh topic cluster (needs >= 2 new units and must not be a
+        // diffuse blob).
+        let existing = group.iter().find_map(|&i| ctx_cluster[i]);
+        let cluster_id = match existing {
+            Some(cid) => cid,
+            None => {
+                if new_in_group.len() < 2 || group.len() > config.cluster_max_component {
+                    continue;
+                }
+                let texts: Vec<&str> = new_in_group
+                    .iter()
+                    .map(|&i| statements[i].as_str())
+                    .collect();
+                let label = label_from_texts(&texts);
+                let id: Uuid = sqlx::query_scalar(
+                    "INSERT INTO clusters (kind, label, cohesion, size) \
+                     VALUES ('topic', $1, $2, $3) RETURNING id",
+                )
+                .bind(&label)
+                .bind(coh)
+                .bind(new_in_group.len() as i32)
+                .fetch_one(&mut *tx)
+                .await?;
+                stats.topics_created += 1;
+                id
+            }
+        };
 
-        for &i in &group {
+        for &i in &new_in_group {
             sqlx::query(
                 "INSERT INTO cluster_members (cluster_id, member_kind, member_id, sim) \
-                 VALUES ($1, 'unit', $2, $3)",
+                 VALUES ($1, 'unit', $2, $3) ON CONFLICT DO NOTHING",
             )
             .bind(cluster_id)
-            .bind(ids[i])
+            .bind(new_ids[i])
             .bind(coh)
             .execute(&mut *tx)
             .await?;
             sqlx::query("UPDATE atomic_units SET topic_cluster_id = $2 WHERE id = $1")
-                .bind(ids[i])
+                .bind(new_ids[i])
                 .bind(cluster_id)
                 .execute(&mut *tx)
                 .await?;
+            clustered_new.push(new_ids[i]);
         }
-        stats.topics_created += 1;
     }
 
-    // Stamp every claimed unit — including singletons and oversized components —
-    // so the cursor advances and they are not reprocessed each pass.
+    // Stamp every claimed new unit — clustered or not — so the cursor always
+    // advances (a permanent singleton must not be re-claimed forever). Context
+    // units are already stamped and are never re-stamped here.
     sqlx::query("UPDATE atomic_units SET clustered_at = now() WHERE id = ANY($1)")
-        .bind(&ids)
+        .bind(&new_ids)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    stats.units_clustered += ids.len();
+    stats.units_clustered += clustered_new.len();
     Ok(())
 }
