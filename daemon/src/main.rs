@@ -134,6 +134,14 @@ async fn main() -> anyhow::Result<()> {
     } else {
         tracing::info!("contradiction scanner disabled via GATHER_SCAN_ENABLED=false");
     }
+    if config.cluster_enabled {
+        tokio::spawn(gather_daemon::cluster::worker::worker_loop(
+            pool.clone(),
+            config.clone(),
+        ));
+    } else {
+        tracing::info!("clustering worker disabled via GATHER_CLUSTER_ENABLED=false");
+    }
 
     if config.grpc_enabled {
         let grpc_state = state.clone();

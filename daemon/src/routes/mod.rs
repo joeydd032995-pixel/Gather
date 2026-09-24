@@ -1,3 +1,4 @@
+pub mod clusters;
 pub mod contradictions;
 pub mod entities;
 pub mod export;
@@ -78,6 +79,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/units/{id}/restore", post(feedback::restore_unit))
         .route("/review", get(feedback::list_review))
         .route("/review/{id}/resolve", post(feedback::resolve_review))
+        // clustering — the entity/topic "arrangement" surface
+        .route("/clusters", get(clusters::list_clusters))
+        .route("/clusters/{id}", get(clusters::get_cluster))
         // Layer order: the last .layer() added is outermost (runs first), so
         // auth runs before the rate limiter. That way unauthenticated requests
         // are rejected without charging the shared bucket, and a flood of them

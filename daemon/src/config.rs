@@ -64,6 +64,20 @@ pub struct Config {
     /// Confidence below which a unit is retracted on ingest. Default 0.0 — off,
     /// so nothing is dropped unless explicitly configured (conservative).
     pub admit_drop_below: f32,
+    /// Run the background clustering worker (entity auto-resolution + topic
+    /// grouping).
+    pub cluster_enabled: bool,
+    /// Seconds between clustering passes.
+    pub cluster_interval_secs: u64,
+    /// Max unclustered units claimed per topic-clustering pass.
+    pub cluster_batch: i64,
+    /// k for the mutual-kNN graph.
+    pub cluster_k: usize,
+    /// Minimum similarity for a mutual-kNN edge (topic grouping / entity graph).
+    pub cluster_threshold: f32,
+    /// Components larger than this are treated as too diffuse to auto-label and
+    /// are skipped (chaining guard).
+    pub cluster_max_component: usize,
     /// Enable the gRPC server (default true).
     pub grpc_enabled: bool,
     /// Address to bind the gRPC listener. Same loopback policy as bind_addr.
@@ -233,6 +247,32 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .map(|v: f32| v.clamp(0.0, 1.0))
                 .unwrap_or(0.0),
+            cluster_enabled: env_bool("GATHER_CLUSTER_ENABLED", true),
+            cluster_interval_secs: std::env::var("GATHER_CLUSTER_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|v: u64| v.max(1))
+                .unwrap_or(900),
+            cluster_batch: std::env::var("GATHER_CLUSTER_BATCH")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|v: i64| v.clamp(2, 2_000))
+                .unwrap_or(500),
+            cluster_k: std::env::var("GATHER_CLUSTER_K")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|v: usize| v.clamp(1, 50))
+                .unwrap_or(6),
+            cluster_threshold: std::env::var("GATHER_CLUSTER_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|v: f32| v.clamp(0.0, 1.0))
+                .unwrap_or(0.5),
+            cluster_max_component: std::env::var("GATHER_CLUSTER_MAX_COMPONENT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|v: usize| v.clamp(2, 10_000))
+                .unwrap_or(50),
             grpc_enabled,
             grpc_bind_addr,
         })
@@ -266,6 +306,12 @@ impl Config {
             scan_max_candidates: 25,
             admit_hold_below: 0.5,
             admit_drop_below: 0.0,
+            cluster_enabled: true,
+            cluster_interval_secs: 900,
+            cluster_batch: 500,
+            cluster_k: 6,
+            cluster_threshold: 0.5,
+            cluster_max_component: 50,
             grpc_enabled: false,
             grpc_bind_addr: "127.0.0.1:0".parse().expect("static addr"),
         }
