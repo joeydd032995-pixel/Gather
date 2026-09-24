@@ -442,7 +442,15 @@ async fn process_unit_chunks(
             }
         }
 
-        match persist::persist_chunk_units(pool, chunk, &units).await? {
+        match persist::persist_chunk_units(
+            pool,
+            chunk,
+            &units,
+            config.admit_hold_below,
+            config.admit_drop_below,
+        )
+        .await?
+        {
             Some(outcome) => {
                 processed += 1;
                 created += outcome.units_created;

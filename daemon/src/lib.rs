@@ -3,6 +3,7 @@ pub mod auth;
 pub mod auth_token;
 pub mod config;
 pub mod db;
+pub mod decide;
 pub mod entities;
 pub mod error;
 pub mod extract;
@@ -109,6 +110,14 @@ pub fn describe_metrics() {
         "gather_extraction_backlog",
         "Documents/images still waiting for extraction, by modality"
     );
+    metrics::describe_gauge!(
+        "gather_review_queue_open",
+        "Items parked in the review queue for optional human attention"
+    );
+    metrics::describe_gauge!(
+        "gather_realdata_precision",
+        "Auto-admitted units kept vs rejected by the user (confirms / (confirms + rejects))"
+    );
     metrics::describe_histogram!(
         "gather_graph_query_duration_seconds",
         "Knowledge-graph traversal latency"
@@ -146,6 +155,36 @@ pub async fn gauge_refresher(pool: PgPool) {
         .await
         {
             metrics::gauge!("gather_extraction_backlog", "modality" => "image").set(imgs as f64);
+        }
+        if let Ok((open,)) =
+            sqlx::query_as::<_, (i64,)>("SELECT count(*) FROM review_queue WHERE state = 'open'")
+                .fetch_one(&pool)
+                .await
+        {
+            metrics::gauge!("gather_review_queue_open").set(open as f64);
+        }
+        // Real-data extraction precision: of the units the user gave a verdict
+        // on, the fraction whose LATEST verdict is keep. Counting each unit's
+        // most recent confirm/reject (not every historical row) means a
+        // reject-then-restore nets to a keep, not 50%. Undefined until there is
+        // feedback, so the gauge is left untouched when the denominator is zero.
+        if let Ok((confirms, rejects)) = sqlx::query_as::<_, (i64, i64)>(
+            "WITH latest AS ( \
+               SELECT DISTINCT ON (target_id) action \
+               FROM unit_feedback \
+               WHERE target_kind = 'unit' AND action IN ('confirm', 'reject') \
+               ORDER BY target_id, created_at DESC \
+             ) \
+             SELECT count(*) FILTER (WHERE action = 'confirm'), \
+                    count(*) FILTER (WHERE action = 'reject') FROM latest",
+        )
+        .fetch_one(&pool)
+        .await
+        {
+            let acted = confirms + rejects;
+            if acted > 0 {
+                metrics::gauge!("gather_realdata_precision").set(confirms as f64 / acted as f64);
+            }
         }
     }
 }

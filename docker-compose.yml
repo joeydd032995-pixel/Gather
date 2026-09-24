@@ -57,6 +57,8 @@ services:
       GATHER_SCAN_THRESHOLD: ${GATHER_SCAN_THRESHOLD:-0.65}
       GATHER_SCAN_BATCH: ${GATHER_SCAN_BATCH:-32}
       GATHER_SCAN_MAX_CANDIDATES: ${GATHER_SCAN_MAX_CANDIDATES:-25}
+      GATHER_ADMIT_HOLD_BELOW: ${GATHER_ADMIT_HOLD_BELOW:-0.5}
+      GATHER_ADMIT_DROP_BELOW: ${GATHER_ADMIT_DROP_BELOW:-0.0}
       # OPT-IN local LLM; from a container, host Ollama is not loopback —
       # leave empty (default) unless you deliberately route it.
       GATHER_OLLAMA_URL: ${GATHER_OLLAMA_URL:-}

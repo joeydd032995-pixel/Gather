@@ -56,6 +56,14 @@ pub struct Config {
     pub scan_threshold: f32,
     /// Max candidates per blocking strategy per unit.
     pub scan_max_candidates: i64,
+    /// Confidence at/above which a freshly extracted unit is auto-admitted
+    /// silently. In the band below it (but at/above `admit_drop_below`) the unit
+    /// is still admitted, then parked in `review_queue` for optional review.
+    /// Default 0.5.
+    pub admit_hold_below: f32,
+    /// Confidence below which a unit is retracted on ingest. Default 0.0 — off,
+    /// so nothing is dropped unless explicitly configured (conservative).
+    pub admit_drop_below: f32,
     /// Enable the gRPC server (default true).
     pub grpc_enabled: bool,
     /// Address to bind the gRPC listener. Same loopback policy as bind_addr.
@@ -79,6 +87,29 @@ pub enum ConfigError {
         value: String,
         reason: &'static str,
     },
+}
+
+/// Parse a `[0,1]` float env var, rejecting non-finite values (a NaN would
+/// survive `clamp` and poison every threshold comparison). Absent → default.
+fn parse_unit_float(var: &'static str, default: f32) -> Result<f32, ConfigError> {
+    match std::env::var(var) {
+        Err(_) => Ok(default),
+        Ok(raw) => {
+            let v: f32 = raw.parse().map_err(|_| ConfigError::BadEnvValue {
+                var,
+                value: raw.clone(),
+                reason: "expected a number in [0, 1]",
+            })?;
+            if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+                return Err(ConfigError::BadEnvValue {
+                    var,
+                    value: raw,
+                    reason: "expected a finite number in [0, 1]",
+                });
+            }
+            Ok(v)
+        }
+    }
 }
 
 impl Config {
@@ -154,6 +185,20 @@ impl Config {
             .map(|v| v.to_lowercase())
             .unwrap_or_else(|_| "env".to_string());
 
+        // Admission thresholds are validated rather than clamped: a non-finite
+        // value (NaN survives clamp) would make every comparison false and
+        // silently auto-admit everything, and drop_below > hold_below would
+        // erase the hold band and drop units the docs say are auto-admitted.
+        let admit_hold_below = parse_unit_float("GATHER_ADMIT_HOLD_BELOW", 0.5)?;
+        let admit_drop_below = parse_unit_float("GATHER_ADMIT_DROP_BELOW", 0.0)?;
+        if admit_drop_below > admit_hold_below {
+            return Err(ConfigError::BadEnvValue {
+                var: "GATHER_ADMIT_DROP_BELOW",
+                value: admit_drop_below.to_string(),
+                reason: "must be <= GATHER_ADMIT_HOLD_BELOW",
+            });
+        }
+
         let grpc_enabled = env_bool("GATHER_GRPC_ENABLED", true);
         let grpc_raw =
             std::env::var("GATHER_GRPC_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:7602".to_string());
@@ -215,6 +260,8 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .map(|v: i64| v.clamp(1, 200))
                 .unwrap_or(25),
+            admit_hold_below,
+            admit_drop_below,
             grpc_enabled,
             grpc_bind_addr,
         })
@@ -246,6 +293,8 @@ impl Config {
             scan_batch: 32,
             scan_threshold: 0.65,
             scan_max_candidates: 25,
+            admit_hold_below: 0.5,
+            admit_drop_below: 0.0,
             grpc_enabled: false,
             grpc_bind_addr: "127.0.0.1:0".parse().expect("static addr"),
         }

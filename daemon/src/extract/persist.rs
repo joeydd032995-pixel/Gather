@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use super::ollama::OllamaClient;
 use super::rules::ExtractedUnit;
+use crate::decide::{admit_unit, Band};
 use crate::error::ApiError;
 
 #[derive(Debug, Clone, Copy)]
@@ -59,6 +60,8 @@ pub async fn persist_chunk_units(
     pool: &PgPool,
     chunk: &Chunk,
     units: &[(ExtractedUnit, &'static str, Option<String>)], // (unit, method, model)
+    hold_below: f32,
+    drop_below: f32,
 ) -> Result<Option<PersistOutcome>, ApiError> {
     let mut tx = pool.begin().await?;
 
@@ -167,6 +170,43 @@ pub async fn persist_chunk_units(
             }
         };
 
+        // Auto-act admission (autonomous pipeline, Phase A). `confidence`
+        // already carries the source-context adjustments above. Auto -> keep
+        // active (the INSERT default); Hold -> still active but parked in
+        // review_queue for optional attention; Drop -> retract (off by default,
+        // drop_below = 0). Only new units are classified; a re-assertion keeps
+        // whatever state it already had.
+        let admit_band = if is_new {
+            admit_unit(confidence, hold_below, drop_below)
+        } else {
+            Band::Auto
+        };
+        if is_new {
+            match admit_band {
+                Band::Auto => {}
+                Band::Hold => {
+                    sqlx::query(
+                        r#"
+                        INSERT INTO review_queue (target_kind, target_id, reason, signals)
+                        VALUES ('unit', $1, 'low-confidence',
+                                jsonb_build_object('confidence', $2::float4))
+                        ON CONFLICT DO NOTHING
+                        "#,
+                    )
+                    .bind(unit_id)
+                    .bind(confidence)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                Band::Drop => {
+                    sqlx::query("UPDATE atomic_units SET status = 'retracted' WHERE id = $1")
+                        .bind(unit_id)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+            }
+        }
+
         let (message_id, segment_id, image_id) = match chunk.anchor {
             ChunkAnchor::Message(id) => (Some(id), None, None),
             ChunkAnchor::Segment(id) => (None, Some(id), None),
@@ -198,8 +238,9 @@ pub async fn persist_chunk_units(
         .await?;
 
         // Relationship edges asserted by this unit (only on first creation;
-        // re-assertions already carry them).
-        if is_new {
+        // re-assertions already carry them). A dropped unit is retracted, so it
+        // must not seed active edges.
+        if is_new && admit_band != Band::Drop {
             if let Some(source_entity) = subject_entity_id {
                 for (object_name, relation) in &unit.objects {
                     let target_entity = resolve_or_create_entity(&mut tx, object_name).await?;

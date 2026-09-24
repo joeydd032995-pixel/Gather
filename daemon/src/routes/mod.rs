@@ -1,6 +1,7 @@
 pub mod contradictions;
 pub mod entities;
 pub mod export;
+pub mod feedback;
 pub mod health;
 pub mod ingest;
 pub mod query;
@@ -9,7 +10,7 @@ use axum::extract::{DefaultBodyLimit, MatchedPath, Request, State};
 use axum::http::{HeaderValue, Method};
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -70,6 +71,13 @@ pub fn build_router(state: AppState) -> Router {
             "/contradictions/{id}/annotations",
             post(contradictions::annotate_contradiction),
         )
+        // feedback loop — reversible corrections + the optional review tray
+        .route("/units/{id}", patch(feedback::edit_unit))
+        .route("/units/{id}/confirm", post(feedback::confirm_unit))
+        .route("/units/{id}/reject", post(feedback::reject_unit))
+        .route("/units/{id}/restore", post(feedback::restore_unit))
+        .route("/review", get(feedback::list_review))
+        .route("/review/{id}/resolve", post(feedback::resolve_review))
         // Layer order: the last .layer() added is outermost (runs first), so
         // auth runs before the rate limiter. That way unauthenticated requests
         // are rejected without charging the shared bucket, and a flood of them
@@ -91,7 +99,7 @@ pub fn build_router(state: AppState) -> Router {
                 .map(|o| HeaderValue::from_static(o))
                 .collect::<Vec<_>>(),
         )
-        .allow_methods([Method::GET, Method::POST])
+        .allow_methods([Method::GET, Method::POST, Method::PATCH])
         .allow_headers([
             axum::http::header::AUTHORIZATION,
             axum::http::header::CONTENT_TYPE,
