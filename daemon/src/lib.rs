@@ -9,6 +9,7 @@ pub mod entities;
 pub mod error;
 pub mod extract;
 pub mod grpc;
+pub mod photo;
 pub mod routes;
 pub mod scan;
 pub mod tune;

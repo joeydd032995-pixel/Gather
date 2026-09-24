@@ -148,6 +148,14 @@ async fn main() -> anyhow::Result<()> {
         pool.clone(),
         config.clone(),
     ));
+    if config.photo_enabled {
+        tokio::spawn(gather_daemon::photo::worker::worker_loop(
+            pool.clone(),
+            config.clone(),
+        ));
+    } else {
+        tracing::info!("photo worker disabled via GATHER_PHOTO_ENABLED=false");
+    }
     if !config.tune_enabled {
         tracing::info!("threshold auto-tuning disabled via GATHER_TUNE_ENABLED=false");
     }

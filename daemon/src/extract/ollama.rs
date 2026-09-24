@@ -19,7 +19,29 @@ pub struct OllamaClient {
     http: reqwest::Client,
     pub model: String,
     pub embed_model: String,
+    /// Vision model for photo captions; None when not configured.
+    pub vision_model: Option<String>,
 }
+
+/// Why a caption could not be produced.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CaptionError {
+    /// The model is unreachable, overloaded or erroring: retry later.
+    Unavailable(String),
+    /// The model answered but can't caption this image: don't retry it.
+    Rejected(String),
+}
+
+impl std::fmt::Display for CaptionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CaptionError::Unavailable(m) | CaptionError::Rejected(m) => f.write_str(m),
+        }
+    }
+}
+
+const CAPTION_PROMPT: &str = "Describe this photo in one factual sentence: the main subject, \
+the setting, and any visible text. No speculation.";
 
 const EXTRACTION_SYSTEM_PROMPT: &str = "You extract atomic factual statements from text. \
 Respond with JSON only: {\"units\": [{\"kind\": \"fact|claim|decision|preference|event\", \
@@ -61,6 +83,7 @@ impl OllamaClient {
             http,
             model: config.ollama_model.clone(),
             embed_model: config.ollama_embed_model.clone(),
+            vision_model: config.ollama_vision_model.clone(),
         }))
     }
 
@@ -91,6 +114,57 @@ impl OllamaClient {
             ));
         }
         Ok(parsed.embeddings)
+    }
+
+    /// One-sentence caption of a photo from the local vision model.
+    ///
+    /// Errors are split so callers can tell a model that is down (retry the
+    /// whole batch later) from one that rejected this particular image (skip
+    /// it, don't block the queue behind it).
+    pub async fn caption(&self, image_bytes: &[u8]) -> Result<String, CaptionError> {
+        use base64::Engine;
+        let model = self
+            .vision_model
+            .as_deref()
+            .ok_or_else(|| CaptionError::Unavailable("no vision model configured".to_string()))?;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(image_bytes);
+        let response = self
+            .http
+            .post(format!("{}/api/generate", self.base))
+            .json(&json!({
+                "model": model,
+                "prompt": CAPTION_PROMPT,
+                "images": [encoded],
+                "stream": false,
+            }))
+            .send()
+            .await
+            .map_err(|e| CaptionError::Unavailable(format!("ollama caption request: {e}")))?;
+        let status = response.status();
+        if status.is_client_error() {
+            // Bad input for this model (e.g. an image format it can't read).
+            return Err(CaptionError::Rejected(format!(
+                "ollama caption status: {status}"
+            )));
+        }
+        if !status.is_success() {
+            return Err(CaptionError::Unavailable(format!(
+                "ollama caption status: {status}"
+            )));
+        }
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| CaptionError::Rejected(format!("ollama caption decode: {e}")))?;
+        let caption = body
+            .get("response")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .ok_or_else(|| {
+                CaptionError::Rejected("ollama caption response missing text".to_string())
+            })?;
+        Ok(caption.to_string())
     }
 
     /// LLM-assisted extraction over one chunk. Anti-hallucination gate: a

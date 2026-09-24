@@ -13,6 +13,8 @@ pub struct ImageAnalysis {
     pub height: Option<i32>,
     pub exif: Value,
     pub taken_at: Option<DateTime<Utc>>,
+    /// EXIF GPS position (latitude, longitude) in decimal degrees.
+    pub gps: Option<(f64, f64)>,
 }
 
 /// Best-effort metadata pass; never fails (missing EXIF is normal for
@@ -25,6 +27,7 @@ pub fn analyze(bytes: &[u8]) -> ImageAnalysis {
 
     let mut exif_map = Map::new();
     let mut taken_at = None;
+    let mut gps = None;
     if let Ok(exif) = exif::Reader::new().read_from_container(&mut Cursor::new(bytes)) {
         for field in exif.fields() {
             exif_map.insert(
@@ -42,6 +45,7 @@ pub fn analyze(bytes: &[u8]) -> ImageAnalysis {
             })
             .and_then(|s| NaiveDateTime::parse_from_str(&s, "%Y:%m:%d %H:%M:%S").ok())
             .map(|dt| DateTime::from_naive_utc_and_offset(dt, Utc));
+        gps = gps_from_exif(&exif);
     }
 
     ImageAnalysis {
@@ -49,7 +53,57 @@ pub fn analyze(bytes: &[u8]) -> ImageAnalysis {
         height,
         exif: Value::Object(exif_map),
         taken_at,
+        gps,
     }
+}
+
+/// Degrees/minutes/seconds to signed decimal degrees.
+pub fn dms_to_degrees(degrees: f64, minutes: f64, seconds: f64, negative: bool) -> f64 {
+    let value = degrees + minutes / 60.0 + seconds / 3600.0;
+    if negative {
+        -value
+    } else {
+        value
+    }
+}
+
+/// Validate a decoded position. (0, 0) is rejected: it is what cameras write
+/// when they have no fix, not a photo taken in the Gulf of Guinea.
+pub fn valid_position(lat: f64, lon: f64) -> Option<(f64, f64)> {
+    let plausible = lat.is_finite()
+        && lon.is_finite()
+        && (-90.0..=90.0).contains(&lat)
+        && (-180.0..=180.0).contains(&lon)
+        && !(lat == 0.0 && lon == 0.0);
+    plausible.then_some((lat, lon))
+}
+
+fn gps_from_exif(exif: &exif::Exif) -> Option<(f64, f64)> {
+    let coordinate = |value_tag: exif::Tag, ref_tag: exif::Tag, negative_ref: u8| {
+        let field = exif.get_field(value_tag, exif::In::PRIMARY)?;
+        let exif::Value::Rational(parts) = &field.value else {
+            return None;
+        };
+        if parts.len() < 3 || parts.iter().any(|r| r.denom == 0) {
+            return None;
+        }
+        let negative = match exif.get_field(ref_tag, exif::In::PRIMARY).map(|f| &f.value) {
+            Some(exif::Value::Ascii(v)) => v
+                .first()
+                .and_then(|s| s.first())
+                .is_some_and(|c| c.to_ascii_uppercase() == negative_ref),
+            _ => false,
+        };
+        Some(dms_to_degrees(
+            parts[0].to_f64(),
+            parts[1].to_f64(),
+            parts[2].to_f64(),
+            negative,
+        ))
+    };
+    let lat = coordinate(exif::Tag::GPSLatitude, exif::Tag::GPSLatitudeRef, b'S')?;
+    let lon = coordinate(exif::Tag::GPSLongitude, exif::Tag::GPSLongitudeRef, b'W')?;
+    valid_position(lat, lon)
 }
 
 pub struct OcrResult {

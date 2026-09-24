@@ -13,7 +13,7 @@ use crate::AppState;
 
 #[derive(Deserialize)]
 pub struct ClusterListParams {
-    /// Optional filter: 'entity' or 'topic'.
+    /// Optional filter: 'entity', 'topic', 'photo_dup', 'album' or 'photo_topic'.
     pub kind: Option<String>,
     pub limit: Option<i64>,
 }
@@ -25,7 +25,7 @@ pub async fn list_clusters(
 ) -> Result<Json<Value>, ApiError> {
     let limit = params.limit.unwrap_or(100).clamp(1, 500);
     let rows = sqlx::query(
-        "SELECT id, kind, label, cohesion, size, updated_at FROM clusters \
+        "SELECT id, kind, label, cohesion, size, representative_id, updated_at FROM clusters \
          WHERE ($1::text IS NULL OR kind = $1) \
          ORDER BY updated_at DESC LIMIT $2",
     )
@@ -43,6 +43,7 @@ pub async fn list_clusters(
                 "label": r.get::<String, _>("label"),
                 "cohesion": r.get::<f32, _>("cohesion"),
                 "size": r.get::<i32, _>("size"),
+                "representative_id": r.get::<Option<Uuid>, _>("representative_id"),
                 "updated_at": r.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"),
             })
         })
@@ -51,13 +52,14 @@ pub async fn list_clusters(
 }
 
 /// GET /clusters/{id} — one cluster and its members. Unit members carry their
-/// statement so the group is readable in a single call.
+/// statement and image members their file name and capture time, so the group
+/// is readable in a single call.
 pub async fn get_cluster(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let cluster = sqlx::query(
-        "SELECT id, kind, label, cohesion, size, created_at, updated_at \
+        "SELECT id, kind, label, cohesion, size, representative_id, created_at, updated_at \
          FROM clusters WHERE id = $1",
     )
     .bind(id)
@@ -66,10 +68,13 @@ pub async fn get_cluster(
     .ok_or_else(|| ApiError::NotFound(format!("cluster {id}")))?;
 
     let members = sqlx::query(
-        "SELECT m.member_kind, m.member_id, m.sim, u.statement AS unit_statement \
+        "SELECT m.member_kind, m.member_id, m.sim, u.statement AS unit_statement, \
+                a.original_filename, i.taken_at, i.caption \
          FROM cluster_members m \
          LEFT JOIN atomic_units u ON m.member_kind = 'unit' AND u.id = m.member_id \
-         WHERE m.cluster_id = $1 ORDER BY m.sim DESC",
+         LEFT JOIN images i ON m.member_kind = 'image' AND i.id = m.member_id \
+         LEFT JOIN artifacts a ON a.id = i.artifact_id \
+         WHERE m.cluster_id = $1 ORDER BY m.sim DESC, i.taken_at NULLS LAST, m.member_id",
     )
     .bind(id)
     .fetch_all(&state.pool)
@@ -83,6 +88,9 @@ pub async fn get_cluster(
                 "member_id": r.get::<Uuid, _>("member_id"),
                 "sim": r.get::<f32, _>("sim"),
                 "statement": r.get::<Option<String>, _>("unit_statement"),
+                "filename": r.get::<Option<String>, _>("original_filename"),
+                "taken_at": r.get::<Option<chrono::DateTime<chrono::Utc>>, _>("taken_at"),
+                "caption": r.get::<Option<String>, _>("caption"),
             })
         })
         .collect();
@@ -93,6 +101,7 @@ pub async fn get_cluster(
         "label": cluster.get::<String, _>("label"),
         "cohesion": cluster.get::<f32, _>("cohesion"),
         "size": cluster.get::<i32, _>("size"),
+        "representative_id": cluster.get::<Option<Uuid>, _>("representative_id"),
         "created_at": cluster.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
         "updated_at": cluster.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"),
         "members": member_items,

@@ -5,6 +5,7 @@ pub mod export;
 pub mod feedback;
 pub mod health;
 pub mod ingest;
+pub mod photos;
 pub mod query;
 pub mod tuning;
 
@@ -88,6 +89,8 @@ pub fn build_router(state: AppState) -> Router {
         // clustering — the entity/topic "arrangement" surface
         .route("/clusters", get(clusters::list_clusters))
         .route("/clusters/{id}", get(clusters::get_cluster))
+        // photos — thumbnails for duplicate groups, albums and visual topics
+        .route("/images/{id}/thumbnail", get(photos::thumbnail))
         // Layer order: the last .layer() added is outermost (runs first), so
         // auth runs before the rate limiter. That way unauthenticated requests
         // are rejected without charging the shared bucket, and a flood of them

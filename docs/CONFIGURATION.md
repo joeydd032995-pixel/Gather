@@ -73,6 +73,7 @@ Extracts PDF text, runs image OCR and produces atomic units.
 | `GATHER_OLLAMA_URL` | *(empty)* | Empty disables all LLM and embedding features. For example `http://127.0.0.1:11434`. Must be loopback unless `GATHER_ALLOW_NON_LOOPBACK=true` |
 | `GATHER_OLLAMA_MODEL` | `llama3.2:3b` | Chat model for LLM-assisted extraction and the contradiction judge |
 | `GATHER_OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Embedding model. It must produce 768-dimension vectors to match the schema |
+| `GATHER_OLLAMA_VISION_MODEL` | *(empty)* | Vision model for photo captions and visual topics, e.g. `moondream` or `llava`. Empty disables captions. Needs `GATHER_OLLAMA_URL` |
 
 With Ollama enabled you get LLM-extracted units, embeddings for units, segments and entities,
 semantic search, and embedding-based entity-merge and contradiction candidates. Without it,
@@ -122,6 +123,21 @@ See [AUTONOMOUS-PIPELINE.md](AUTONOMOUS-PIPELINE.md#active-learning-and-auto-tun
 Tuned values live in the database and override `GATHER_ADMIT_HOLD_BELOW` and the single-signal
 merge threshold. Inspect them with `GET /api/v1/tuning`; `POST /api/v1/tuning/reset` returns to
 these env defaults.
+
+## Photo pipeline
+
+See [AUTONOMOUS-PIPELINE.md](AUTONOMOUS-PIPELINE.md#photos).
+
+| Variable | Default | Range | Description |
+|---|---|---|---|
+| `GATHER_PHOTO_ENABLED` | `true` | | Run the photo worker (hashing, duplicate groups, albums, optional captions) |
+| `GATHER_PHOTO_INTERVAL_SECS` | `600` | ≥ 1 | Seconds between passes |
+| `GATHER_PHOTO_BATCH` | `32` | 1–1000 | Photos hashed (and captioned) per pass |
+| `GATHER_PHOTO_DUP_MAX_DISTANCE` | `6` | 0–16 | Max differing perceptual-hash bits for two photos to count as near-duplicates |
+| `GATHER_PHOTO_ALBUM_GAP_HOURS` | `3` | 1–720 | A longer gap between shots starts a new album |
+| `GATHER_PHOTO_ALBUM_SPLIT_KM` | `10` | 0.1–20000 | Consecutive located shots further apart than this start a new album |
+| `GATHER_PHOTO_ALBUM_MIN_SIZE` | `2` | 1–1000 | Smallest group of photos that becomes an album |
+| `GATHER_PHOTO_TOPIC_THRESHOLD` | `0.8` | 0–1 | Caption-embedding similarity for two photos to share a visual topic. **Validated** |
 
 ## Metrics worth watching
 
