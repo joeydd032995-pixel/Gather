@@ -313,7 +313,8 @@ See §7 of the [technical write-up](docs/TECHNICAL-WRITEUP.md) for the full thre
   (perceptual-hash duplicate groups, EXIF albums, optional local vision captions), with a
   desktop review tray, group/photo browsers and a tuning view, gRPC parity for all of it, and
   exact entity unmerge (wrong auto-merges become tuning signal).
-- **Next:** multi-user support.
+- **Next:** one-download distribution. Gather stays a single-user, fully offline app; the goal
+  is that anyone can install their own private copy (bundled daemon and database, no Docker).
 
 ## License
 

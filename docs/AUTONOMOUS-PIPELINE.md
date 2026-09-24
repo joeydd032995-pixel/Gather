@@ -262,4 +262,4 @@ The same operations are available over REST and gRPC (`FeedbackService`, `Cluste
 
 ## What's next
 
-- **Multi-user support**: separate brains, feedback and thresholds per local user.
+- **One-download distribution**: each person installs their own private, offline copy; the pipeline runs per install with no shared state.

@@ -1168,7 +1168,9 @@ variant. There is no telemetry, no update phone-home, no crash reporting.
   restore drills (✅ shipped: Tier-1 CI drill `scripts/ci-restore-drill.sh`; Tier-2 user
   runbook `scripts/vps-restore-drill.sh`, `docs/BACKUP-RUNBOOK.md`). CI/IaC/observability
   are already in place from day one.
-- **Phase 3 — scale (only if measured)**: multi-user namespaces, VPS live replication.
+- **Phase 3 — scale (only if measured)**: VPS live replication to the user's *own* server.
+  Gather is single-user by design and never shares data: "more users" means more people each
+  running their own private install, not accounts or namespaces within one.
   **Neo4j is explicitly deferred**: adopt only if recursive-CTE traversal p95 exceeds 150 ms at
   >1M relationship rows after index tuning — the `entity_neighborhood()` function is the single
   seam where a graph-store swap would land. **The trigger is not met on the evidence in §9.1**;
