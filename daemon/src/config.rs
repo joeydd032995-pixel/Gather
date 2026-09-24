@@ -56,6 +56,14 @@ pub struct Config {
     pub scan_threshold: f32,
     /// Max candidates per blocking strategy per unit.
     pub scan_max_candidates: i64,
+    /// Confidence at/above which a freshly extracted unit is auto-admitted
+    /// silently. In the band below it (but at/above `admit_drop_below`) the unit
+    /// is still admitted, then parked in `review_queue` for optional review.
+    /// Default 0.5.
+    pub admit_hold_below: f32,
+    /// Confidence below which a unit is retracted on ingest. Default 0.0 — off,
+    /// so nothing is dropped unless explicitly configured (conservative).
+    pub admit_drop_below: f32,
     /// Enable the gRPC server (default true).
     pub grpc_enabled: bool,
     /// Address to bind the gRPC listener. Same loopback policy as bind_addr.
@@ -215,6 +223,16 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .map(|v: i64| v.clamp(1, 200))
                 .unwrap_or(25),
+            admit_hold_below: std::env::var("GATHER_ADMIT_HOLD_BELOW")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|v: f32| v.clamp(0.0, 1.0))
+                .unwrap_or(0.5),
+            admit_drop_below: std::env::var("GATHER_ADMIT_DROP_BELOW")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|v: f32| v.clamp(0.0, 1.0))
+                .unwrap_or(0.0),
             grpc_enabled,
             grpc_bind_addr,
         })
@@ -246,6 +264,8 @@ impl Config {
             scan_batch: 32,
             scan_threshold: 0.65,
             scan_max_candidates: 25,
+            admit_hold_below: 0.5,
+            admit_drop_below: 0.0,
             grpc_enabled: false,
             grpc_bind_addr: "127.0.0.1:0".parse().expect("static addr"),
         }
