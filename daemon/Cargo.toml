@@ -51,7 +51,7 @@ tokio-stream = { version = "0.1", features = ["net"] }
 governor = "0.10.4"
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-build = "0.14"
 protox = "0.7"
 
 [profile.release]
