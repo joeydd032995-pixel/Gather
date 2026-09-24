@@ -64,12 +64,18 @@ const TABLES: &[(&str, &str)] = &[
          created_at, updated_at",
     ),
     ("entity_aliases", "id, entity_id, alias"),
+    // Before atomic_units, whose topic_cluster_id references it. Clusters have
+    // no outbound FKs, so this position is safe.
+    (
+        "clusters",
+        "id, kind, label, cohesion, size, created_at, updated_at",
+    ),
     (
         "atomic_units",
         "id, kind, statement, statement_hash, subject_entity_id, confidence, \
          extraction_method, extraction_model, embedding, valid_from, valid_to, \
          status, superseded_by_unit_id, attrs, created_at, updated_at, \
-         contradiction_scanned_at",
+         contradiction_scanned_at, topic_cluster_id, clustered_at",
     ),
     (
         "atomic_unit_provenance",
@@ -107,6 +113,8 @@ const TABLES: &[(&str, &str)] = &[
         "id, target_kind, target_id, info_gain, reason, signals, state, created_at",
     ),
     ("decision_tuning", "key, value, updated_at"),
+    // After clusters (its cluster_id FK). member_id is a plain uuid, no FK.
+    ("cluster_members", "cluster_id, member_kind, member_id, sim"),
 ];
 
 // ---------------------------------------------------------------------------

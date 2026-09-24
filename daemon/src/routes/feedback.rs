@@ -212,7 +212,8 @@ pub async fn edit_unit(
     sqlx::query(
         "UPDATE atomic_units \
          SET statement = $2, statement_hash = $3, extraction_method = 'manual', \
-             embedding = NULL, contradiction_scanned_at = NULL \
+             embedding = NULL, contradiction_scanned_at = NULL, \
+             clustered_at = NULL, topic_cluster_id = NULL \
          WHERE id = $1",
     )
     .bind(id)
