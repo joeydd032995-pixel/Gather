@@ -5,13 +5,21 @@
 | Gate | Criterion | Produced by |
 |---|---|---|
 | **Phase 1 "Go"** (latency) | graph queries stay <150 ms at personal scale | `scripts/graph-benchmark.sh` |
-| **Phase 1 "Go"** (quality) | ≥70% of sampled units judged usable | `scripts/unit-quality-sample.sh` |
+| **Phase 1 "Go"** (quality, automated) | rule extractor holds ≥70% precision on the golden corpus | `cargo test --test extraction_quality` |
+| **Phase 1 "Go"** (quality, human) | ≥70% of sampled real units judged usable | `scripts/unit-quality-sample.sh` |
 | **Phase 3 trigger** | adopt Neo4j only if traversal p95 >150 ms at >1M relationship rows, *after index tuning* | `scripts/graph-benchmark.sh` |
 
-Both scripts are **tier 2**: you run them deliberately, against a scratch database, and the
-numbers they print are the evidence. CI runs a cut-down tier-1 version of the benchmark
+The two benchmark scripts are **tier 2**: you run them deliberately, against a scratch database,
+and the numbers they print are the evidence. CI runs a cut-down tier-1 version of the benchmark
 (`graph-benchmark` job) purely as a regression guard — a shared runner's p95 is not evidence
 about a 150 ms threshold, and the CI scale is far below the 1M-row bar.
+
+The quality gate now has **two complementary halves**. The automated golden-corpus eval
+(`daemon/tests/extraction_quality.rs`, §3 below) rides the ordinary `test` job on every push and
+turns rule-extractor precision into a CI-enforced number so quality cannot silently regress. The
+human sampler (`scripts/unit-quality-sample.sh`, §2) still owns the judgment that matters for the
+release decision — whether units drawn from *real ingested data* are usable — since only a person
+can make that call, and the corpus is a fixed proxy, not live data.
 
 ---
 
@@ -165,3 +173,72 @@ quality figure.
 The default is 100 units. At that size a single unit moves the result by a full percentage point,
 so a figure landing within a couple of points of 70% should be treated as inconclusive rather than
 as a pass or a fail — draw a larger sample with `GATHER_SAMPLE_SIZE` before deciding.
+
+---
+
+## 3. Extraction quality — `cargo test --test extraction_quality`
+
+The automated half of the quality gate. It scores the always-on, offline **rule-based** extractor
+(`daemon/src/extract/rules.rs`) against a hand-labelled golden corpus
+(`daemon/tests/fixtures/extraction_golden.json`) and fails the build if precision drops below the
+threshold. Unlike the human sampler it needs no database and no Ollama — it calls the pure
+`extract_units()` function — so it runs in the ordinary `test` job on every push.
+
+```bash
+cd daemon
+cargo test --test extraction_quality -- --nocapture   # --nocapture prints the summary below
+```
+
+### What it measures
+
+Each corpus case pairs an input chunk with the atomic units a human judged **usable** for that
+text. The eval runs `extract_units()` over every input and matches produced units against the
+labels on `(kind, normalized statement)` — normalization collapses case and whitespace and strips
+trailing `.!?`, so a golden statement only has to agree on wording, not formatting.
+
+- **precision = usable_produced / produced** — the automatable analogue of the write-up's
+  "≥70% of sampled units judged usable" gate. This is the number the test asserts on
+  (`threshold_precision` in the JSON, currently `0.70`).
+- **recall = matched_expected / expected** — informational only. The rules are
+  high-precision/low-recall by design (Ollama supplements them when enabled), so recall is *not*
+  gated; it is printed to make coverage regressions visible.
+
+The corpus deliberately includes noise cases that must produce nothing, adversarial over-matches
+that produce an **unusable** unit (these are what cost precision), and facts the rules cannot catch
+(these cost recall). A summary prints per run:
+
+```
+── extraction quality (rule-based, offline) ──
+cases:       13
+produced:    12  (usable 10, spurious 2)
+labelled:    12  (found 10)
+precision:   83.3%  (gate ≥ 70%)
+recall:      83.3%  (informational — rules are high-precision/low-recall)
+```
+
+### Baseline
+
+At the corpus's current 13 cases the rule extractor scores **83.3% precision, 83.3% recall**. The
+two precision misses are the intentional adversarial-vacuous cases ("I have no idea what to do
+next", "We decided to think about it later"); the two recall misses are the intentional
+implicit/third-person facts the deterministic patterns don't reach. That leaves ~13 points of
+head-room above the 70% gate, so an ordinary refactor won't trip it, but a change that starts
+emitting vacuous units will.
+
+### Extending the corpus
+
+Add a case to `extraction_golden.json` whenever you find a real input the rules handle notably well
+or badly. Write each `expected` statement as the **full sentence the extractor renders** (tidied,
+trailing punctuation stripped) with the `kind` the rule assigns (`decision`, `fact`, `preference`,
+`event`, `claim`). To pin a *precision* case, add an adversarial input with `expected: []`; to
+track a known *recall* gap, add the input with its usable unit in `expected` and let it show up as a
+miss until a pattern (or Ollama) covers it. Keep `threshold_precision` at 0.70 unless the release
+gate itself moves.
+
+### How it relates to §2
+
+This eval and the human sampler answer different questions and neither replaces the other. The eval
+proves the *rules* haven't regressed on a fixed, reviewable set — cheap, deterministic, CI-enforced.
+The sampler proves *real ingested data* clears the usable bar — the judgment the release actually
+turns on, which only a person can make. Ship both: green CI here, plus a human sampler pass on real
+data before calling the Phase 1 quality gate met.
