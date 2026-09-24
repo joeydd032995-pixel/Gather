@@ -25,7 +25,7 @@ use super::phash::{compute_phash, hamming, near_duplicate_groups};
 use crate::cluster::label_from_texts;
 use crate::config::Config;
 use crate::extract::image::analyze;
-use crate::extract::ollama::OllamaClient;
+use crate::extract::ollama::{CaptionError, OllamaClient};
 
 #[derive(Debug, Default)]
 pub struct PhotoStats {
@@ -107,22 +107,33 @@ async fn prepare_pass(pool: &PgPool, config: &Config) -> anyhow::Result<usize> {
         let bytes: Option<Vec<u8>> = row.get("raw_content");
         // Decoding is CPU-bound; keep it off the async runtime. An artifact
         // stored only by path (no bytes) is stamped with no hash.
-        let (phash, gps) = match bytes {
+        let (phash, analysis) = match bytes {
             Some(bytes) => {
-                tokio::task::spawn_blocking(move || (compute_phash(&bytes), analyze(&bytes).gps))
-                    .await?
+                let (phash, analysis) =
+                    tokio::task::spawn_blocking(move || (compute_phash(&bytes), analyze(&bytes)))
+                        .await?;
+                (phash, Some(analysis))
             }
             None => (None, None),
         };
+        let gps = analysis.as_ref().and_then(|a| a.gps);
+        // The regroup reads dimensions and capture time, which the extraction
+        // worker may not have filled yet: store them here too (COALESCE keeps
+        // whatever extraction already wrote), so a photo is never grouped
+        // with missing metadata.
         sqlx::query(
             "UPDATE images SET phash = $2, latitude = $3, longitude = $4, \
-             photo_prepared_at = now() WHERE id = $1",
+             width = COALESCE(width, $5), height = COALESCE(height, $6), \
+             taken_at = COALESCE(taken_at, $7), photo_prepared_at = now() WHERE id = $1",
         )
         .bind(id)
         // Stored as the same 64 bits in a signed column.
         .bind(phash.map(|h| h as i64))
         .bind(gps.map(|g| g.0))
         .bind(gps.map(|g| g.1))
+        .bind(analysis.as_ref().and_then(|a| a.width))
+        .bind(analysis.as_ref().and_then(|a| a.height))
+        .bind(analysis.as_ref().and_then(|a| a.taken_at))
         .execute(&mut *tx)
         .await?;
     }
@@ -447,7 +458,7 @@ async fn caption_pass(
 ) -> anyhow::Result<()> {
     // Only decodable photos (hashed) are sent to the vision model.
     let rows = sqlx::query(
-        "SELECT i.id, a.raw_content FROM images i \
+        "SELECT i.id, i.caption, a.raw_content FROM images i \
          JOIN artifacts a ON a.id = i.artifact_id \
          WHERE i.captioned_at IS NULL AND i.phash IS NOT NULL AND a.raw_content IS NOT NULL \
          ORDER BY i.id LIMIT $1",
@@ -456,16 +467,41 @@ async fn caption_pass(
     .fetch_all(pool)
     .await?;
 
-    let model = client.vision_model.clone().unwrap_or_default();
+    let model = format!("ollama:{}", client.vision_model.clone().unwrap_or_default());
     for row in &rows {
         let id: Uuid = row.get("id");
-        let bytes: Vec<u8> = row.get("raw_content");
-        let caption = match client.caption(&bytes).await {
-            Ok(c) => c,
-            Err(e) => {
-                // Model down or overloaded: stop, retry the rest next pass.
-                tracing::warn!(error = %e, "photo caption failed; retrying next pass");
-                break;
+        // A caption that predates the cursor (older rows, imported bundles)
+        // is kept and only embedded; the vision model never overwrites it.
+        let existing: Option<String> = row
+            .get::<Option<String>, _>("caption")
+            .filter(|c| !c.trim().is_empty());
+        let (caption, generated) = match existing {
+            Some(caption) => (caption, false),
+            None => {
+                let bytes: Vec<u8> = row.get("raw_content");
+                match client.caption(&bytes).await {
+                    Ok(caption) => (caption, true),
+                    Err(CaptionError::Rejected(e)) => {
+                        // This image can't be captioned by this model: record
+                        // why and move on, so it never blocks the queue.
+                        tracing::warn!(image = %id, error = %e, "photo caption rejected; skipping");
+                        sqlx::query(
+                            "UPDATE images SET captioned_at = now(), \
+                             metadata = metadata || jsonb_build_object('caption_error', $2::text) \
+                             WHERE id = $1",
+                        )
+                        .bind(id)
+                        .bind(&e)
+                        .execute(pool)
+                        .await?;
+                        continue;
+                    }
+                    Err(CaptionError::Unavailable(e)) => {
+                        // Model down or overloaded: stop, retry the rest next pass.
+                        tracing::warn!(error = %e, "photo captioning unavailable; retrying next pass");
+                        break;
+                    }
+                }
             }
         };
         let embedding = client
@@ -476,19 +512,25 @@ async fn caption_pass(
             .next()
             .ok_or_else(|| anyhow::anyhow!("no embedding returned for caption"))?;
 
+        // Caption, cursor and topic assignment commit together: a failure in
+        // between must leave the photo retryable, not captioned-but-ungrouped.
+        let mut tx = pool.begin().await?;
         sqlx::query(
-            "UPDATE images SET caption = $2, caption_model = $3, embedding = $4, \
-             captioned_at = now() WHERE id = $1",
+            "UPDATE images SET caption = $2, \
+             caption_model = CASE WHEN $5 THEN $3 ELSE caption_model END, \
+             embedding = $4, captioned_at = now() WHERE id = $1",
         )
         .bind(id)
         .bind(&caption)
-        .bind(format!("ollama:{model}"))
+        .bind(&model)
         .bind(Vector::from(embedding.clone()))
-        .execute(pool)
+        .bind(generated)
+        .execute(&mut *tx)
         .await?;
+        let joined = join_nearest_topic(&mut tx, config, id, &caption, embedding).await?;
+        tx.commit().await?;
         stats.captioned += 1;
-
-        if join_nearest_topic(pool, config, id, &caption, embedding).await? {
+        if joined {
             stats.topic_joins += 1;
         }
     }
@@ -497,8 +539,9 @@ async fn caption_pass(
 
 /// Attach a freshly captioned photo to its nearest visual neighbour's topic
 /// (or start a topic with that neighbour) when they are similar enough.
+/// Runs inside the caller's transaction.
 async fn join_nearest_topic(
-    pool: &PgPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     config: &Config,
     id: Uuid,
     caption: &str,
@@ -511,7 +554,7 @@ async fn join_nearest_topic(
     )
     .bind(Vector::from(embedding))
     .bind(id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await?;
     let Some(n) = neighbour else {
         return Ok(false);
@@ -523,12 +566,11 @@ async fn join_nearest_topic(
     let neighbour_id: Uuid = n.get("id");
     let neighbour_topic: Option<Uuid> = n.get("topic_cluster_id");
 
-    let mut tx = pool.begin().await?;
     let topic = match neighbour_topic {
         Some(topic) => {
             sqlx::query("UPDATE clusters SET size = size + 1, updated_at = now() WHERE id = $1")
                 .bind(topic)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
             topic
         }
@@ -542,14 +584,13 @@ async fn join_nearest_topic(
             .bind(label_from_texts(&[caption, &neighbour_caption]))
             .bind(sim)
             .bind(neighbour_id)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?;
-            tag_topic(&mut tx, topic, neighbour_id, sim).await?;
+            tag_topic(tx, topic, neighbour_id, sim).await?;
             topic
         }
     };
-    tag_topic(&mut tx, topic, id, sim).await?;
-    tx.commit().await?;
+    tag_topic(tx, topic, id, sim).await?;
     Ok(true)
 }
 

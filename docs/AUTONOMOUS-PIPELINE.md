@@ -233,7 +233,10 @@ deleted**. A background worker (`GATHER_PHOTO_*`) runs three steps:
 3. **Caption** (opt-in, only with `GATHER_OLLAMA_VISION_MODEL`): a local vision model captions
    the photo, the caption is embedded with the existing 768-dimension model, and the photo
    joins the topic of its nearest visual neighbour (pgvector HNSW) when they are at least
-   `GATHER_PHOTO_TOPIC_THRESHOLD` similar.
+   `GATHER_PHOTO_TOPIC_THRESHOLD` similar. A caption that already exists (older data, an
+   imported bundle) is kept and only embedded. If the model is down, captioning pauses and
+   resumes next pass; if it rejects one particular image, that photo is skipped with the reason
+   in `images.metadata.caption_error`, so it never blocks the rest.
 
 Browse with `GET /clusters?kind=photo_dup|album|photo_topic` and render previews with
 `GET /images/{id}/thumbnail`.

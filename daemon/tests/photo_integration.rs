@@ -58,14 +58,16 @@ fn jpeg(img: &RgbImage, quality: u8) -> Vec<u8> {
 async fn seed_photo(
     state: &AppState,
     bytes: &[u8],
-    size: (i32, i32),
+    size: Option<(i32, i32)>,
     taken_at: chrono::DateTime<Utc>,
 ) -> Uuid {
     // A per-run hash: the same synthetic bytes are re-seeded on every run.
     let hash = hex::encode(Sha256::digest(Uuid::new_v4().as_bytes()));
     let artifact: Uuid = sqlx::query_scalar(
-        "INSERT INTO artifacts (kind, original_filename, media_type, byte_size, content_hash, raw_content) \
-         VALUES ('image_photo', $1, 'image/jpeg', $2, $3, $4) RETURNING id",
+        "INSERT INTO artifacts \
+           (kind, original_filename, media_type, byte_size, content_hash, raw_content, metadata) \
+         VALUES ('image_photo', $1, 'image/jpeg', $2, $3, $4, '{\"fixture\": \"photo_integration\"}') \
+         RETURNING id",
     )
     .bind(format!("photo-{}.jpg", &hash[..8]))
     .bind(bytes.len() as i64)
@@ -79,8 +81,8 @@ async fn seed_photo(
          VALUES ($1, $2, $3, $4, 'completed') RETURNING id",
     )
     .bind(artifact)
-    .bind(size.0)
-    .bind(size.1)
+    .bind(size.map(|s| s.0))
+    .bind(size.map(|s| s.1))
     .bind(taken_at)
     .fetch_one(&state.pool)
     .await
@@ -92,7 +94,20 @@ async fn spawn_mock_ollama() -> String {
     let app = Router::new()
         .route(
             "/api/generate",
-            post(|| async { Json(json!({ "response": "A striped test pattern." })) }),
+            post(|Json(body): Json<Value>| async move {
+                // Tiny images stand in for a format the model can't read.
+                let size = body["images"][0].as_str().map_or(0, str::len);
+                if size < 2_000 {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "error": "unsupported image" })),
+                    );
+                }
+                (
+                    StatusCode::OK,
+                    Json(json!({ "response": "A striped test pattern." })),
+                )
+            }),
         )
         .route(
             "/api/embed",
@@ -127,24 +142,53 @@ async fn photos_are_hashed_grouped_albumed_thumbnailed_and_captioned() {
     config.ollama_vision_model = Some("mock-vision".to_string());
     config.photo_batch = 500;
     let state = test_state(config).await;
+    // Photos from an earlier run of this suite would join our albums and
+    // duplicate groups (grouping is library-wide): start from a clean slate.
+    sqlx::query("DELETE FROM artifacts WHERE metadata->>'fixture' = 'photo_integration'")
+        .execute(&state.pool)
+        .await
+        .unwrap();
     let vision = vision_client(&state.config).expect("vision client");
 
     let original = scene();
     let half = imageops::resize(&original, 240, 180, imageops::FilterType::Triangle);
     let day = Utc.with_ymd_and_hms(2026, 5, 3, 9, 0, 0).unwrap();
-    let sharp = seed_photo(&state, &jpeg(&original, 90), (480, 360), day).await;
+    let sharp = seed_photo(&state, &jpeg(&original, 90), Some((480, 360)), day).await;
     let small = seed_photo(
         &state,
         &jpeg(&half, 70),
-        (240, 180),
+        Some((240, 180)),
         day + Duration::minutes(5),
     )
     .await;
-    let later = seed_photo(
+    // Not yet touched by the extraction worker: no dimensions stored. The
+    // photo worker must fill them itself before grouping.
+    let later = seed_photo(&state, &jpeg(&original, 80), None, day + Duration::days(40)).await;
+    // A caption that predates the cursor must survive (embedded, not replaced).
+    let pre_captioned = seed_photo(
         &state,
-        &jpeg(&original, 80),
-        (480, 360),
-        day + Duration::days(40),
+        &jpeg(
+            &imageops::resize(&original, 320, 240, imageops::FilterType::Triangle),
+            85,
+        ),
+        Some((320, 240)),
+        day + Duration::days(80),
+    )
+    .await;
+    sqlx::query("UPDATE images SET caption = 'Imported caption' WHERE id = $1")
+        .bind(pre_captioned)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    // One the model rejects: skipped with the reason, never blocking the queue.
+    let tiny = seed_photo(
+        &state,
+        &jpeg(
+            &imageops::resize(&original, 12, 9, imageops::FilterType::Triangle),
+            50,
+        ),
+        Some((12, 9)),
+        day + Duration::days(120),
     )
     .await;
 
@@ -157,7 +201,7 @@ async fn photos_are_hashed_grouped_albumed_thumbnailed_and_captioned() {
             "SELECT count(*) FROM images WHERE id = ANY($1) \
              AND (photo_grouped_at IS NULL OR captioned_at IS NULL)",
         )
-        .bind(vec![sharp, small, later])
+        .bind(vec![sharp, small, later, pre_captioned, tiny])
         .fetch_one(&state.pool)
         .await
         .unwrap();
@@ -255,6 +299,36 @@ async fn photos_are_hashed_grouped_albumed_thumbnailed_and_captioned() {
         tagged >= 2,
         "identical captions should share a visual topic"
     );
+
+    // Metadata the extraction worker hadn't written yet was filled in.
+    let width: Option<i32> = sqlx::query_scalar("SELECT width FROM images WHERE id = $1")
+        .bind(later)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    assert_eq!(width, Some(480));
+
+    // The imported caption was kept (and embedded), not regenerated.
+    let (kept, embedded): (Option<String>, bool) =
+        sqlx::query_as("SELECT caption, embedding IS NOT NULL FROM images WHERE id = $1")
+            .bind(pre_captioned)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert_eq!(kept.as_deref(), Some("Imported caption"));
+    assert!(embedded);
+
+    // The rejected image was skipped with its reason recorded.
+    let (caption, error): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT caption, metadata->>'caption_error' FROM images \
+         WHERE id = $1 AND captioned_at IS NOT NULL",
+    )
+    .bind(tiny)
+    .fetch_one(&state.pool)
+    .await
+    .expect("rejected image is stamped, not retried forever");
+    assert_eq!(caption, None);
+    assert!(error.is_some());
 
     // Thumbnails: a small JPEG for a stored photo, 404 for an unknown id.
     let app = routes::build_router(state.clone());

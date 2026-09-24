@@ -78,7 +78,8 @@ pub fn phash_luma(img: &GrayImage) -> u64 {
     // dominate the median without saying anything about structure.
     let mut ac: Vec<f64> = coeffs[1..].to_vec();
     ac.sort_by(f64::total_cmp);
-    let median = (ac[ac.len() / 2 - 1] + ac[ac.len() / 2]) / 2.0;
+    // 63 AC terms: odd count, so the median is the middle element.
+    let median = ac[ac.len() / 2];
 
     coeffs.iter().enumerate().fold(
         0u64,
