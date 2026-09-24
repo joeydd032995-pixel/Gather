@@ -214,7 +214,7 @@ jobs:
           GATHER_GRPC_BIND_ADDR=0.0.0.0:7602 DATABASE_URL=postgres://x@localhost/x \
             ./target/release/gather-daemon
           test $? -ne 0 # the gRPC listener obeys the same loopback guard
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: gather-daemon-linux-x86_64
           path: daemon/target/release/gather-daemon
@@ -262,7 +262,7 @@ jobs:
       - name: tauri build
         working-directory: apps/desktop
         run: npm run tauri -- build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: gather-desktop-${{ matrix.platform }}
           path: |
