@@ -10,13 +10,19 @@ variable "ssh_public_key" {
 }
 
 variable "admin_cidr" {
-  description = "CIDR allowed to reach SSH (e.g. your home IP as x.x.x.x/32). 0.0.0.0/0 works but weakens hardening — set your real IP."
+  description = "CIDR allowed to reach SSH (e.g. your home IP as x.x.x.x/32). Opening it to the whole internet is refused unless allow_open_ssh = true."
   type        = string
 
   validation {
     condition     = can(cidrhost(var.admin_cidr, 0))
     error_message = "admin_cidr must be a valid IPv4 CIDR, e.g. 203.0.113.7/32."
   }
+}
+
+variable "allow_open_ssh" {
+  description = "Escape hatch to permit admin_cidr = 0.0.0.0/0 (or ::/0). Leave false; opening SSH to the world defeats the firewall's purpose. Only set true if you deliberately front the VM with another control."
+  type        = bool
+  default     = false
 }
 
 variable "location" {

@@ -12,6 +12,9 @@ pub struct Config {
     /// requires GATHER_ALLOW_NON_LOOPBACK=true as an explicit override.
     pub bind_addr: SocketAddr,
     pub database_url: String,
+    /// Max Postgres connections in the shared pool. Sized for concurrent
+    /// REST/gRPC handlers plus the extraction and scan workers.
+    pub db_max_connections: u32,
     /// Optional bearer token. When set, every /api/v1 request must carry
     /// `Authorization: Bearer <token>`. Health and metrics stay open (loopback only).
     pub api_token: Option<String>,
@@ -20,6 +23,10 @@ pub struct Config {
     pub auth_mode: String,
     /// Upload cap per request body, in megabytes.
     pub max_upload_mb: usize,
+    /// Requests/sec allowed across /api/v1 and the gRPC services combined
+    /// (a shared global bucket). 0 disables rate limiting. Bounds a runaway
+    /// local client; the listener is loopback-only regardless.
+    pub rate_limit_rps: u32,
     /// Emit JSON logs instead of human-readable ones.
     pub log_json: bool,
     /// Explicit opt-out of the loopback-only policy (bind address and
@@ -66,6 +73,12 @@ pub enum ConfigError {
          (Gather is offline/local-only by default)"
     )]
     NonLoopbackBind(SocketAddr),
+    #[error("{var} has an invalid value {value:?}: {reason}")]
+    BadEnvValue {
+        var: &'static str,
+        value: String,
+        reason: &'static str,
+    },
 }
 
 impl Config {
@@ -86,6 +99,27 @@ impl Config {
         let database_url =
             std::env::var("DATABASE_URL").map_err(|_| ConfigError::MissingDatabaseUrl)?;
 
+        // A set-but-invalid value is a misconfiguration, not a reason to
+        // silently fall back to the default; only an unset var uses the default.
+        let db_max_connections = match std::env::var("GATHER_DB_MAX_CONNECTIONS") {
+            Err(_) => 8,
+            Ok(raw) => {
+                let n: u32 = raw.parse().map_err(|_| ConfigError::BadEnvValue {
+                    var: "GATHER_DB_MAX_CONNECTIONS",
+                    value: raw.clone(),
+                    reason: "expected a positive integer",
+                })?;
+                if n == 0 {
+                    return Err(ConfigError::BadEnvValue {
+                        var: "GATHER_DB_MAX_CONNECTIONS",
+                        value: raw,
+                        reason: "must be at least 1",
+                    });
+                }
+                n
+            }
+        };
+
         let api_token = std::env::var("GATHER_API_TOKEN")
             .ok()
             .filter(|t| !t.is_empty());
@@ -94,6 +128,17 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(256);
+
+        // 0 is a valid value (rate limiting disabled); only a malformed value
+        // is an error rather than a silent fall-back to the default.
+        let rate_limit_rps = match std::env::var("GATHER_RATE_LIMIT_RPS") {
+            Err(_) => 50,
+            Ok(raw) => raw.parse().map_err(|_| ConfigError::BadEnvValue {
+                var: "GATHER_RATE_LIMIT_RPS",
+                value: raw,
+                reason: "expected a non-negative integer",
+            })?,
+        };
 
         let log_json = std::env::var("GATHER_LOG_JSON")
             .map(|v| v == "true" || v == "1")
@@ -122,9 +167,11 @@ impl Config {
         Ok(Self {
             bind_addr,
             database_url,
+            db_max_connections,
             api_token,
             auth_mode,
             max_upload_mb,
+            rate_limit_rps,
             log_json,
             allow_non_loopback,
             extraction_enabled: env_bool("GATHER_EXTRACTION_ENABLED", true),
@@ -180,9 +227,11 @@ impl Config {
         Self {
             bind_addr: "127.0.0.1:0".parse().expect("static addr"),
             database_url,
+            db_max_connections: 8,
             api_token: None,
             auth_mode: "env".to_string(),
             max_upload_mb: 16,
+            rate_limit_rps: 0,
             log_json: false,
             allow_non_loopback: false,
             extraction_enabled: true,

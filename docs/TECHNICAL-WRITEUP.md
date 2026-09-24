@@ -161,16 +161,21 @@ by the daemon at startup via embedded sqlx migrations). Design highlights:
 - **Multimodal**: one `artifacts` table with a `kind` enum spanning chat, agent logs, three
   document kinds and two image kinds; modality detail lives in `conversations`/`messages`,
   `documents`/`document_segments`, `images`.
-- **Provenance**: `atomic_unit_provenance` always carries `artifact_id` plus at most one
-  fine-grained anchor (`message_id` | `document_segment_id` | `image_id`) with optional char
-  offsets and a verbatim quote — so "why do you believe X?" is one indexed join away from any
-  modality.
+- **Provenance**: `atomic_unit_provenance` always carries `artifact_id` plus exactly one
+  fine-grained anchor (`message_id` | `document_segment_id` | `image_id`, enforced by a CHECK
+  since migration 0006) with optional char offsets and a verbatim quote — so "why do you
+  believe X?" is one indexed join away from any modality.
 - **Vectors**: `vector(768)` (nomic-embed-text via local Ollama) on `atomic_units`,
   `document_segments`, `entities`, each with an HNSW cosine index; generated `tsvector` columns +
-  GIN indexes give full-text search with zero extra infrastructure.
+  GIN indexes give full-text search with zero extra infrastructure. Note: embeddings are populated
+  only when Ollama is enabled (§5.3), so on an offline-only install these three HNSW indexes sit on
+  all-NULL columns — inert overhead, harmless but not free, until embeddings are backfilled.
 - **Graph**: `relationships` is indexed both directions (`(source_entity_id, relation_type,
-  status)` and target-side) and traversed by the cycle-safe `entity_neighborhood()` recursive
-  CTE function. Measured on the running stack: depth-2 traversal ≈ 5 ms (budget: <150 ms).
+  status)` and target-side) and traversed by the cycle-safe, node-budgeted `entity_neighborhood()`
+  function (rewritten as a bounded BFS in migration 0005). For measured traversal latency across
+  hub and long-tail roots at depths 1–3, see the benchmark table in §9.1 — do not assume a single
+  headline number; depth-2 p95 ranges from tens of ms to sub-second depending on root degree and
+  graph scale.
 - **Import-friendliness**: self-referential FKs are `DEFERRABLE` so the portable bundle (§4.4)
   restores in one transaction regardless of row order.
 

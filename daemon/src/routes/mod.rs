@@ -70,6 +70,13 @@ pub fn build_router(state: AppState) -> Router {
             "/contradictions/{id}/annotations",
             post(contradictions::annotate_contradiction),
         )
+        // Layer order: the last .layer() added is outermost (runs first), so
+        // auth runs before the rate limiter. That way unauthenticated requests
+        // are rejected without charging the shared bucket, and a flood of them
+        // can't starve authenticated clients into 429s. When no token is
+        // configured the auth layer passes everything through, so the limiter
+        // still bounds a runaway local client.
+        .layer(middleware::from_fn_with_state(state.clone(), rate_limit))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_bearer,
@@ -103,6 +110,21 @@ pub fn build_router(state: AppState) -> Router {
         .layer(cors)
         .layer(DefaultBodyLimit::max(max_body))
         .with_state(state)
+}
+
+/// Global request-rate guard for /api/v1. Returns 429 when the shared bucket
+/// is empty; a no-op when GATHER_RATE_LIMIT_RPS=0 (limiter absent).
+async fn rate_limit(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, crate::error::ApiError> {
+    if let Some(limiter) = &state.rate_limiter {
+        if limiter.check().is_err() {
+            return Err(crate::error::ApiError::TooManyRequests);
+        }
+    }
+    Ok(next.run(request).await)
 }
 
 /// Per-route latency histogram feeding the Grafana dashboard.

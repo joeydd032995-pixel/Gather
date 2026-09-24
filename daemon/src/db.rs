@@ -3,9 +3,17 @@ use std::time::Duration;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{ConnectOptions, PgPool};
 
+/// Connect to Postgres with the default pool size (8). Used by tests and any
+/// caller that doesn't tune the pool.
+pub async fn connect(database_url: &str) -> anyhow::Result<PgPool> {
+    connect_with_max(database_url, 8).await
+}
+
 /// Connect to Postgres with bounded retries so `docker compose up` ordering
 /// races (daemon ready before Postgres finishes initdb) resolve themselves.
-pub async fn connect(database_url: &str) -> anyhow::Result<PgPool> {
+/// `max_connections` sizes the pool shared by the REST/gRPC handlers and the
+/// background workers; clamped to at least 1.
+pub async fn connect_with_max(database_url: &str, max_connections: u32) -> anyhow::Result<PgPool> {
     let options: PgConnectOptions = database_url
         .parse::<PgConnectOptions>()?
         .log_statements(tracing::log::LevelFilter::Debug);
@@ -14,7 +22,7 @@ pub async fn connect(database_url: &str) -> anyhow::Result<PgPool> {
     loop {
         attempt += 1;
         match PgPoolOptions::new()
-            .max_connections(8)
+            .max_connections(max_connections.max(1))
             .min_connections(1)
             .acquire_timeout(Duration::from_secs(10))
             .connect_with(options.clone())

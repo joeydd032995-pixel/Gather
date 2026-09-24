@@ -31,6 +31,7 @@ async fn test_state() -> Option<AppState> {
             .build_recorder()
             .handle(),
         ollama: None,
+        rate_limiter: None,
     })
 }
 
@@ -295,4 +296,79 @@ async fn new_platform_adapters_ingest_through_the_api() {
         assert_eq!(artifact["source_platform"], json!(platform));
         assert!(artifact["source_format_version"].as_str().unwrap().len() > 3);
     }
+}
+
+#[tokio::test]
+async fn rate_limit_returns_429_and_spares_health() {
+    let Some(mut state) = test_state().await else {
+        return;
+    };
+    // One allowance that does not replenish within the test: a per-hour quota
+    // with burst 1. Using build_rate_limiter(1) would replenish after 1s, so a
+    // slow first request (DB latency under CI load) could let the second pass.
+    let quota = governor::Quota::with_period(std::time::Duration::from_secs(3600))
+        .unwrap()
+        .allow_burst(std::num::NonZeroU32::new(1).unwrap());
+    state.rate_limiter = Some(std::sync::Arc::new(governor::RateLimiter::direct(quota)));
+    let app = routes::build_router(state);
+
+    let first = app
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/artifacts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let second = app
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/artifacts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    // Health endpoints are outside /api/v1 and never rate limited.
+    let health = app
+        .clone()
+        .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn merge_suggestions_rejects_non_finite_threshold() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let app = routes::build_router(state);
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/entities/merge-suggestions?threshold=NaN")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // A finite threshold still works.
+    let ok = app
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/entities/merge-suggestions?threshold=0.7")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
 }

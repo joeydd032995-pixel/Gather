@@ -29,6 +29,7 @@ async fn test_state() -> Option<AppState> {
             .build_recorder()
             .handle(),
         ollama: None,
+        rate_limiter: None,
     })
 }
 

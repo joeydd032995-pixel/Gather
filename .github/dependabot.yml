@@ -1,0 +1,28 @@
+# Dependency-update automation. Surfaces upgrades for the pre-1.0 crates the
+# daemon leans on (sqlx, keyring, tonic, …) and the desktop's npm tree, plus
+# the GitHub Actions used by CI. Weekly, grouped to keep PR volume manageable.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /daemon
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: npm
+    directory: /apps/desktop
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

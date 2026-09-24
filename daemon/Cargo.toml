@@ -48,6 +48,7 @@ tonic = { version = "0.12", features = ["transport"] }
 prost = "0.13"
 prost-types = "0.13"
 tokio-stream = { version = "0.1", features = ["net"] }
+governor = "0.10.4"
 
 [build-dependencies]
 tonic-build = "0.12"
@@ -61,3 +62,4 @@ strip = "symbols"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tonic = { version = "0.12", features = ["transport"] }
+governor = "0.10"

@@ -1,0 +1,6 @@
+# Pin formatting so `cargo fmt --check` behaves identically across contributor
+# machines and toolchain versions. These are rustfmt's stable defaults made
+# explicit (edition matches Cargo.toml), so the existing tree is already
+# conformant — this file changes no formatting, it just locks it in.
+edition = "2021"
+max_width = 100

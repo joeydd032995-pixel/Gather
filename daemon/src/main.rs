@@ -40,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut config = Config::from_env()?;
     gather_daemon::init_tracing(config.log_json);
-    gather_daemon::auth_token::resolve(&mut config);
+    gather_daemon::auth_token::resolve(&mut config).map_err(|e| anyhow::anyhow!(e))?;
 
     let metrics_handle = PrometheusBuilder::new()
         .set_buckets_for_metric(
@@ -60,7 +60,38 @@ async fn main() -> anyhow::Result<()> {
         "starting gather-daemon (offline-by-default: no outbound connections)"
     );
 
-    let pool = db::connect(&config.database_url).await?;
+    // Surface the auth posture loudly and as a scrapeable gauge. The API stays
+    // open on loopback when no token is configured (docker-compose dev default),
+    // but that fact must be impossible to miss and observable in Grafana.
+    if config.api_token.is_some() {
+        metrics::gauge!("gather_api_auth_enabled").set(1.0);
+    } else {
+        metrics::gauge!("gather_api_auth_enabled").set(0.0);
+        // Whether the open API is genuinely loopback-scoped depends on the
+        // actual bind addresses, which GATHER_ALLOW_NON_LOOPBACK can widen
+        // (the container image sets it, so a published 0.0.0.0 port is
+        // possible). Only claim "loopback-only" when it's actually true.
+        let grpc_non_loopback = config.grpc_enabled && !config.grpc_bind_addr.ip().is_loopback();
+        if !config.bind_addr.ip().is_loopback() || grpc_non_loopback {
+            tracing::warn!(
+                http_bind = %config.bind_addr,
+                grpc_bind = %config.grpc_bind_addr,
+                grpc_enabled = config.grpc_enabled,
+                "/api/v1 IS SERVING UNAUTHENTICATED ON A NON-LOOPBACK ADDRESS — anything that can \
+                 reach the bind address (limited only by how the port is published) has full API \
+                 access. Set GATHER_API_TOKEN (or GATHER_AUTH_MODE=keychain) to enforce bearer \
+                 auth, or bind a loopback address."
+            );
+        } else {
+            tracing::warn!(
+                "/api/v1 IS SERVING UNAUTHENTICATED — any process that can reach the loopback \
+                 port has full API access. This is safe only because the listener is loopback-only. \
+                 Set GATHER_API_TOKEN (or GATHER_AUTH_MODE=keychain) to enforce bearer auth."
+            );
+        }
+    }
+
+    let pool = db::connect_with_max(&config.database_url, config.db_max_connections).await?;
     db::migrate(&pool).await?;
     tracing::info!("database connected, migrations applied");
 
@@ -83,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
         config: Arc::new(config.clone()),
         metrics: metrics_handle,
         ollama: ollama_client,
+        rate_limiter: gather_daemon::build_rate_limiter(config.rate_limit_rps),
     };
 
     tokio::spawn(gather_daemon::gauge_refresher(pool.clone()));

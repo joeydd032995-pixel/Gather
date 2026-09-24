@@ -329,3 +329,123 @@ message ImportBundleResponse {
   }
   repeated TableCount tables = 1;
 }
+
+// ---------------------------------------------------------------------------
+// EntityService — mirrors GET/POST /api/v1/entities/…
+//
+// Entity resolution over gRPC: list entities, review suggested duplicates,
+// merge them, dismiss a suggested pair, or add an alias directly. Merge,
+// dismiss, and add-alias share the exact REST cores in crate::entities, so the
+// two API surfaces cannot diverge in persistence semantics.
+// ---------------------------------------------------------------------------
+
+service EntityService {
+  rpc ListEntities(ListEntitiesRequest) returns (ListEntitiesResponse);
+  rpc ListMergeSuggestions(ListMergeSuggestionsRequest) returns (ListMergeSuggestionsResponse);
+  rpc GetEntity(GetEntityRequest) returns (EntityDetail);
+  rpc MergeEntities(MergeEntitiesRequest) returns (MergeOutcome);
+  rpc DismissMergeSuggestion(DismissMergeSuggestionRequest) returns (DismissMergeSuggestionResponse);
+  rpc AddAlias(AddAliasRequest) returns (AddAliasResponse);
+}
+
+message EntitySummary {
+  string id = 1;                                   // entities.id
+  string name = 2;                                 // entities.name
+  string kind = 3;                                 // entities.kind
+  string description = 4;                          // entities.description
+  string merged_into_entity_id = 5;                // entities.merged_into_entity_id ("" = live)
+  int64 alias_count = 6;                           // count(entity_aliases)
+  int64 edge_count = 7;                            // count(relationships touching this entity)
+  google.protobuf.Timestamp created_at = 8;        // entities.created_at
+}
+
+message EntityMergeAuditEntry {
+  string action = 1;                               // entity_merge_audit.action (merge | dismiss)
+  string actor = 2;                                // entity_merge_audit.actor
+  string note = 3;                                 // entity_merge_audit.note
+  string winner_entity_id = 4;                     // entity_merge_audit.winner_entity_id
+  string loser_entity_id = 5;                      // entity_merge_audit.loser_entity_id
+  google.protobuf.Timestamp created_at = 6;        // entity_merge_audit.created_at
+}
+
+message EntityDetail {
+  string id = 1;
+  string name = 2;
+  string kind = 3;
+  string description = 4;
+  string merged_into_entity_id = 5;
+  google.protobuf.Timestamp created_at = 6;
+  repeated string aliases = 7;                     // entity_aliases.alias
+  repeated EntityMergeAuditEntry audit = 8;        // entity_merge_audit rows touching this entity
+}
+
+message SuggestedMerge {
+  Entity a = 1;                                    // higher-degree / surviving candidate
+  Entity b = 2;
+  float score = 3;                                 // 0..1 similarity
+  string method = 4;                               // rule:name-similarity | embedding:cosine
+}
+
+message MergeOutcome {
+  string winner_id = 1;
+  string loser_id = 2;
+  string winner_name = 3;
+  string loser_name = 4;
+  uint64 aliases_added = 5;
+  uint64 units_repointed = 6;
+  uint64 units_requeued_for_scan = 7;
+  uint64 relationships_repointed = 8;
+  uint64 relationships_dropped = 9;
+  uint64 descendants_flattened = 10;
+}
+
+message ListEntitiesRequest {
+  string q = 1;                                    // case-insensitive substring on name
+  string kind = 2;                                 // exact entities.kind filter
+  int32 limit = 3;
+  int32 offset = 4;
+  bool include_merged = 5;                         // include merged-away entities
+}
+
+message ListEntitiesResponse {
+  repeated EntitySummary items = 1;
+}
+
+message ListMergeSuggestionsRequest {
+  float threshold = 1;                             // 0 = server default (entities::DEFAULT_THRESHOLD)
+  int32 limit = 2;
+}
+
+message ListMergeSuggestionsResponse {
+  repeated SuggestedMerge items = 1;
+  float threshold = 2;                             // effective threshold applied
+}
+
+message GetEntityRequest {
+  string id = 1;
+}
+
+message MergeEntitiesRequest {
+  string winner_id = 1;                            // survives
+  string loser_id = 2;                             // folded into winner
+  string note = 3;
+  string actor = 4;                                // "" -> local-user
+}
+
+message DismissMergeSuggestionRequest {
+  string id = 1;
+  string other_id = 2;
+  string note = 3;
+  string actor = 4;
+}
+
+message DismissMergeSuggestionResponse {}
+
+message AddAliasRequest {
+  string entity_id = 1;
+  string alias = 2;
+}
+
+message AddAliasResponse {
+  bool added = 1;                                  // false when the alias already existed
+}

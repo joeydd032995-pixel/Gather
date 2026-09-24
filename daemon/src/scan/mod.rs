@@ -110,8 +110,27 @@ pub async fn run_one_scan(
             }
         }
 
-        // Persist findings and stamp the cursor atomically.
+        // Claim, persist findings, and stamp the cursor in one transaction.
+        // The FOR UPDATE SKIP LOCKED claim makes each unit scanned exactly once
+        // even if more than one scanner instance runs: whichever transaction
+        // locks the row first stamps it, and the others find it already
+        // scanned/locked and skip. Findings are idempotent regardless (ON
+        // CONFLICT below), and a crash before commit leaves the row unscanned
+        // for a later pass — so the marker never gets set without the work.
         let mut tx = pool.begin().await?;
+        let claimed: Option<(Uuid,)> = sqlx::query_as(
+            r#"
+            SELECT id FROM atomic_units
+            WHERE id = $1 AND contradiction_scanned_at IS NULL AND status = 'active'
+            FOR UPDATE SKIP LOCKED
+            "#,
+        )
+        .bind(unit.id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if claimed.is_none() {
+            continue; // another scanner claimed it, or it was scanned/retired since listing
+        }
         for (other_id, conflict) in &conflicts {
             let (a, b) = if unit.id < *other_id {
                 (unit.id, *other_id)

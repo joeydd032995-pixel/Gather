@@ -22,6 +22,18 @@ use tracing_subscriber::{EnvFilter, Layer};
 use crate::config::Config;
 use crate::extract::ollama::OllamaClient;
 
+/// Global request-rate limiter shared by the REST and gRPC surfaces.
+pub type SharedRateLimiter = Arc<governor::DefaultDirectRateLimiter>;
+
+/// Build a shared global rate limiter, or None when `rps == 0` (disabled).
+pub fn build_rate_limiter(rps: u32) -> Option<SharedRateLimiter> {
+    std::num::NonZeroU32::new(rps).map(|rps| {
+        Arc::new(governor::RateLimiter::direct(governor::Quota::per_second(
+            rps,
+        )))
+    })
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
@@ -30,6 +42,8 @@ pub struct AppState {
     /// Shared Ollama client for server-side query embedding.
     /// None when GATHER_OLLAMA_URL is unset.
     pub ollama: Option<Arc<OllamaClient>>,
+    /// Shared request-rate limiter; None when GATHER_RATE_LIMIT_RPS=0.
+    pub rate_limiter: Option<SharedRateLimiter>,
 }
 
 pub fn init_tracing(json: bool) {
@@ -82,6 +96,10 @@ pub fn describe_metrics() {
     metrics::describe_histogram!(
         "gather_scan_duration_seconds",
         "Contradiction scan pass duration"
+    );
+    metrics::describe_gauge!(
+        "gather_api_auth_enabled",
+        "1 when /api/v1 requires a bearer token, 0 when the API is open (loopback only)"
     );
     metrics::describe_gauge!(
         "gather_contradictions_open",
