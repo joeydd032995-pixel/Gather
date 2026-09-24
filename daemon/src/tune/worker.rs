@@ -27,8 +27,8 @@ use crate::decide::live::{
 
 /// Largest threshold change per pass.
 const MAX_STEP: f32 = 0.05;
-/// Open tray items re-ranked per pass (oldest first).
-const RESCORE_LIMIT: i64 = 5_000;
+/// Open tray items re-ranked per query page.
+const RESCORE_PAGE: i64 = 5_000;
 /// Uncertainty for held items with no single score (oversized components).
 const NEUTRAL_UNCERTAINTY: f32 = 0.5;
 
@@ -98,7 +98,7 @@ pub async fn run_one_pass(pool: &PgPool, config: &Config) -> anyhow::Result<Tune
                 .min(ADMIT_HOLD_BOUNDS.max),
             max: ADMIT_HOLD_BOUNDS.max,
         };
-        let unit_labels = load_labels(pool, "unit").await?;
+        let unit_labels = load_labels(pool, "unit", KEY_ADMIT_HOLD_BELOW).await?;
         if let Some(change) = tune_key(
             pool,
             KEY_ADMIT_HOLD_BELOW,
@@ -116,7 +116,7 @@ pub async fn run_one_pass(pool: &PgPool, config: &Config) -> anyhow::Result<Tune
             stats.changes.push(change);
         }
 
-        let merge_labels = load_labels(pool, "merge").await?;
+        let merge_labels = load_labels(pool, "merge", KEY_MERGE_AUTO_SINGLE).await?;
         if let Some(change) = tune_key(
             pool,
             KEY_MERGE_AUTO_SINGLE,
@@ -142,15 +142,30 @@ pub async fn run_one_pass(pool: &PgPool, config: &Config) -> anyhow::Result<Tune
 
 /// The latest keep/reject verdict per target, with the score the item carried
 /// when judged. A reject later undone by a restore counts as a keep.
-async fn load_labels(pool: &PgPool, target_kind: &str) -> Result<Vec<Label>, sqlx::Error> {
+///
+/// Only verdicts given after the last `POST /tuning/reset` of `key` count, so
+/// a reset is durable: the same historical labels can't re-create the value
+/// on the next pass. New feedback after the reset tunes it again.
+async fn load_labels(
+    pool: &PgPool,
+    target_kind: &str,
+    key: &str,
+) -> Result<Vec<Label>, sqlx::Error> {
     let rows: Vec<(String, Option<f32>)> = sqlx::query_as(
-        "SELECT DISTINCT ON (f.target_id) f.action, COALESCE(f.score, u.confidence) \
+        "WITH cutoff AS ( \
+           SELECT max(created_at) AS at FROM decision_tuning_audit \
+           WHERE key = $2 AND reason->>'action' = 'reset' \
+         ) \
+         SELECT DISTINCT ON (f.target_id) f.action, COALESCE(f.score, u.confidence) \
          FROM unit_feedback f \
          LEFT JOIN atomic_units u ON f.target_kind = 'unit' AND u.id = f.target_id \
+         CROSS JOIN cutoff \
          WHERE f.target_kind = $1 AND f.action IN ('confirm', 'reject') \
+           AND (cutoff.at IS NULL OR f.created_at > cutoff.at) \
          ORDER BY f.target_id, f.created_at DESC, f.id DESC",
     )
     .bind(target_kind)
+    .bind(key)
     .fetch_all(pool)
     .await?;
     Ok(rows
@@ -179,8 +194,16 @@ async fn tune_key(
     }
     let reason = json!({
         "direction": proposal.direction.as_str(),
+        // At/above the OLD threshold.
         "precision": proposal.precision,
         "support": proposal.support,
+        // At the NEW threshold, when lowering.
+        "lowering": proposal.lowering.map(|e| json!({
+            "support": e.support,
+            "wilson_lower_bound": e.lower_bound,
+            "region_support": e.region_support,
+            "region_precision": e.region_precision,
+        })),
         "labels": labels.len(),
         "target_precision": params.target_precision,
         "min_samples": params.min_samples,
@@ -239,7 +262,29 @@ async fn drain_cleared_units(pool: &PgPool, hold_below: f32) -> Result<usize, sq
 /// Degree = graph facts the answer affects: for a unit, the relationships it
 /// asserts plus other active units about the same subject; for a merge pair,
 /// the active units about either entity; for an oversized component, its size.
+///
+/// Walks the whole open set in keyset pages, so every item is re-ranked each
+/// pass however large the tray grows.
 async fn rescore_review_queue(pool: &PgPool, live: &LiveThresholds) -> Result<usize, sqlx::Error> {
+    let mut rescored = 0;
+    let mut after = Uuid::nil();
+    loop {
+        let (page, last) = rescore_page(pool, live, after).await?;
+        rescored += page;
+        match last {
+            Some(id) => after = id,
+            None => return Ok(rescored),
+        }
+    }
+}
+
+/// Re-rank one page of open items with id > `after`. Returns the number
+/// updated and the last id seen (None when the page was empty).
+async fn rescore_page(
+    pool: &PgPool,
+    live: &LiveThresholds,
+    after: Uuid,
+) -> Result<(usize, Option<Uuid>), sqlx::Error> {
     let rows = sqlx::query(
         "SELECT r.id, r.target_kind, r.reason, r.signals, \
            CASE \
@@ -258,15 +303,16 @@ async fn rescore_review_queue(pool: &PgPool, live: &LiveThresholds) -> Result<us
                jsonb_array_length(r.signals->'members')::bigint \
              ELSE 0 \
            END AS degree \
-         FROM review_queue r WHERE r.state = 'open' \
-         ORDER BY r.created_at LIMIT $1",
+         FROM review_queue r WHERE r.state = 'open' AND r.id > $2 \
+         ORDER BY r.id LIMIT $1",
     )
-    .bind(RESCORE_LIMIT)
+    .bind(RESCORE_PAGE)
+    .bind(after)
     .fetch_all(pool)
     .await?;
-    if rows.is_empty() {
-        return Ok(0);
-    }
+    let Some(last) = rows.last().map(|r| r.get::<Uuid, _>("id")) else {
+        return Ok((0, None));
+    };
 
     let mut ids: Vec<Uuid> = Vec::with_capacity(rows.len());
     let mut gains: Vec<f32> = Vec::with_capacity(rows.len());
@@ -290,7 +336,7 @@ async fn rescore_review_queue(pool: &PgPool, live: &LiveThresholds) -> Result<us
     .execute(pool)
     .await?
     .rows_affected();
-    Ok(updated as usize)
+    Ok((updated as usize, Some(last)))
 }
 
 /// Closeness to the Auto boundary for one held item.

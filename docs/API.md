@@ -196,7 +196,7 @@ individually.
 | Method | Path | Description |
 |---|---|---|
 | GET | `/tuning` | Thresholds in force with their defaults and hard bounds, the tuner settings, and the 50 most recent changes with the evidence behind each |
-| POST | `/tuning/reset` | Drop learned values so the env defaults apply again. Optional body `{ "key": "admit.hold_below" }` resets one key. Audited |
+| POST | `/tuning/reset` | Drop learned values so the env defaults apply again. Optional body `{ "key": "admit.hold_below" }` resets one key. Audited and durable: only verdicts given after the reset can tune that key again |
 
 Keys: `admit.hold_below` (unit admission) and `merge.auto_single` (single-signal auto-merge).
 

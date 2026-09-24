@@ -72,6 +72,20 @@ pub struct Proposal {
     pub precision: Option<f64>,
     /// Number of labels at/above the current threshold.
     pub support: usize,
+    /// What justified a lowering (None for raise/stay): the audit trail must
+    /// show the evidence at the NEW threshold, not just the old one.
+    pub lowering: Option<LoweringEvidence>,
+}
+
+/// Statistics at the candidate threshold that justified a lowering.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LoweringEvidence {
+    /// Labels at/above the new threshold, and their 95% Wilson lower bound.
+    pub support: usize,
+    pub lower_bound: f64,
+    /// Labels in the newly admitted band [new, old), and their precision.
+    pub region_support: usize,
+    pub region_precision: f64,
 }
 
 /// 95% two-sided z.
@@ -136,14 +150,15 @@ fn keeps_and_total<'a>(labels: impl Iterator<Item = &'a Label>) -> (usize, usize
 ///   threshold never moves into a region nobody has judged.
 /// - Otherwise **stay**.
 ///
-/// The result is always within `bounds`.
+/// A move never leaves `bounds`. A `current` value already outside them (an
+/// operator's explicit env setting) is left alone: clamping it first would
+/// jump the live bar by more than `max_step` in one pass.
 pub fn propose_threshold(
     labels: &[Label],
     current: f32,
     bounds: Bounds,
     params: &TuneParams,
 ) -> Proposal {
-    let current = current.clamp(bounds.min, bounds.max);
     let labels: Vec<Label> = labels
         .iter()
         .copied()
@@ -157,7 +172,11 @@ pub fn propose_threshold(
         direction: Direction::Stay,
         precision,
         support,
+        lowering: None,
     };
+    if !current.is_finite() || current < bounds.min || current > bounds.max {
+        return stay;
+    }
 
     if let Some(p) = precision {
         if support >= params.min_samples && p < params.target_precision {
@@ -187,14 +206,24 @@ pub fn propose_threshold(
         let (keeps_t, n_t) = keeps_and_total(labels.iter().filter(|l| l.score >= t));
         let (keeps_r, n_r) =
             keeps_and_total(labels.iter().filter(|l| l.score >= t && l.score < current));
-        let region_ok =
-            n_r >= min_region && (keeps_r as f64 / n_r as f64) >= params.target_precision;
-        let overall_ok = n_t >= params.min_samples
-            && wilson_lower_bound(keeps_t, n_t, Z_95) >= params.target_precision;
+        let region_precision = if n_r > 0 {
+            keeps_r as f64 / n_r as f64
+        } else {
+            0.0
+        };
+        let lower_bound = wilson_lower_bound(keeps_t, n_t, Z_95);
+        let region_ok = n_r >= min_region && region_precision >= params.target_precision;
+        let overall_ok = n_t >= params.min_samples && lower_bound >= params.target_precision;
         if region_ok && overall_ok && current - t > EPSILON {
             return Proposal {
                 value: t,
                 direction: Direction::Lower,
+                lowering: Some(LoweringEvidence {
+                    support: n_t,
+                    lower_bound,
+                    region_support: n_r,
+                    region_precision,
+                }),
                 ..stay
             };
         }
@@ -265,6 +294,20 @@ mod tests {
         let p = propose_threshold(&l, 0.5, BOUNDS, &PARAMS);
         assert_eq!(p.direction, Direction::Lower);
         assert!((p.value - 0.46).abs() < 1e-6);
+        let evidence = p.lowering.expect("lowering evidence recorded");
+        assert_eq!(evidence.support, 70);
+        assert_eq!(evidence.region_support, 10);
+        assert!(evidence.lower_bound >= PARAMS.target_precision);
+    }
+
+    #[test]
+    fn leaves_an_out_of_bounds_operator_setting_alone() {
+        // Env hold_below 0.10 is legal but below the tuner's 0.30 floor:
+        // clamping first would jump the live bar by 0.25 in one pass.
+        let l = labels(0.6, 5, 40);
+        let p = propose_threshold(&l, 0.10, BOUNDS, &PARAMS);
+        assert_eq!(p.direction, Direction::Stay);
+        assert_eq!(p.value, 0.10);
     }
 
     #[test]
