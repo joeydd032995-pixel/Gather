@@ -1,11 +1,16 @@
 import { useState } from "react";
-import { getCluster, listClusters, type ClusterKind, type ClusterSummary } from "./api";
+import { getCluster, type ClusterKind, type ClusterMember, type ClusterSummary } from "./api";
 import { useAsync } from "./hooks/useAsync";
+import { usePagedClusters } from "./hooks/usePagedClusters";
 
 const KINDS: { kind: ClusterKind; label: string }[] = [
   { kind: "topic", label: "Topics" },
   { kind: "entity", label: "Merged duplicates" },
 ];
+
+function memberLabel(m: ClusterMember): string {
+  return m.statement ?? m.name ?? m.filename ?? m.member_id;
+}
 
 function ClusterMembers({ id }: { id: string }) {
   const detail = useAsync(() => getCluster(id), [id]);
@@ -14,9 +19,7 @@ function ClusterMembers({ id }: { id: string }) {
   return (
     <ul className="prov-list">
       {(detail.data?.members ?? []).map((m) => (
-        <li key={m.member_id}>
-          {m.statement ?? m.filename ?? m.member_id}
-        </li>
+        <li key={m.member_id}>{memberLabel(m)}</li>
       ))}
     </ul>
   );
@@ -47,7 +50,7 @@ function ClusterRow({ cluster }: { cluster: ClusterSummary }) {
 /** How the pipeline arranged the brain: topic groups and merged duplicates. */
 export default function Clusters() {
   const [kind, setKind] = useState<ClusterKind>("topic");
-  const clusters = useAsync(() => listClusters(kind), [kind]);
+  const clusters = usePagedClusters(kind);
 
   return (
     <section>
@@ -62,16 +65,21 @@ export default function Clusters() {
           </button>
         ))}
       </nav>
-      {clusters.loading && !clusters.data && <p>Loading…</p>}
       {clusters.error && <p className="error">{clusters.error}</p>}
-      {clusters.data?.length === 0 && (
+      {!clusters.loading && clusters.items.length === 0 && (
         <p className="prov-empty">Nothing grouped yet; groups appear as the clustering worker runs.</p>
       )}
       <ul className="conflict-list">
-        {(clusters.data ?? []).map((c) => (
+        {clusters.items.map((c) => (
           <ClusterRow key={c.id} cluster={c} />
         ))}
       </ul>
+      {clusters.loading && <p>Loading…</p>}
+      {clusters.hasMore && !clusters.loading && (
+        <button className="load-more" onClick={clusters.loadMore}>
+          Load more
+        </button>
+      )}
     </section>
   );
 }

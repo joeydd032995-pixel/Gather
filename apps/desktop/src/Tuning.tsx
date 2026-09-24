@@ -40,7 +40,7 @@ export default function Tuning() {
             )}% of auto-accepted items hold up, and loosens only on strong evidence (at least ${
               state.min_samples
             } answers).`
-          : "Auto-tuning is off (GATHER_TUNE_ENABLED=false); thresholds stay at their defaults."}
+          : "Auto-tuning is paused (GATHER_TUNE_ENABLED=false): the thresholds below are frozen at their current values, learned or default, until it is turned back on or reset."}
       </p>
       {error && <p className="error">{error}</p>}
       <table className="results">
@@ -84,6 +84,12 @@ export default function Tuning() {
               {h.key}: {h.old_value?.toFixed(2) ?? "default"} →{" "}
               {h.new_value?.toFixed(2) ?? "default"}{" "}
               <span className="prov-kind">({h.actor})</span>
+              {Object.keys(h.reason).length > 0 && (
+                <details className="audit">
+                  <summary>why</summary>
+                  <pre className="evidence">{JSON.stringify(h.reason, null, 2)}</pre>
+                </details>
+              )}
             </li>
           ))}
         </ul>

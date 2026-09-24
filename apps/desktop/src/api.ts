@@ -248,6 +248,9 @@ export interface ReviewItem {
   signals: Record<string, unknown>;
   /** Unit statement, for unit items. */
   statement: string | null;
+  /** Entity names, for held merge pairs. */
+  a_name: string | null;
+  b_name: string | null;
   created_at: string;
 }
 
@@ -339,6 +342,8 @@ export interface ClusterMember {
   member_id: string;
   sim: number;
   statement: string | null;
+  /** Entity members: the entity's name. */
+  name: string | null;
   filename: string | null;
   taken_at: string | null;
   caption: string | null;
@@ -349,9 +354,14 @@ export interface ClusterDetail extends ClusterSummary {
   members: ClusterMember[];
 }
 
-export async function listClusters(kind: ClusterKind, limit = 200): Promise<ClusterSummary[]> {
+/** One page of clusters of a kind, newest first. */
+export async function listClusters(
+  kind: ClusterKind,
+  limit: number,
+  offset: number,
+): Promise<ClusterSummary[]> {
   const body = await getJson<{ items: ClusterSummary[] }>(
-    `/clusters?kind=${kind}&limit=${limit}`,
+    `/clusters?kind=${kind}&limit=${limit}&offset=${offset}`,
   );
   return body.items;
 }

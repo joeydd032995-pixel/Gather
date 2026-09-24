@@ -201,7 +201,8 @@ pub async fn confirm_unit(
     Ok(Json(json!({ "id": id, "status": status })))
 }
 
-/// Correct a unit's statement; returns the stored (trimmed) statement. Records
+/// Correct a unit's statement; returns the stored (trimmed) statement and the
+/// unit's (unchanged) status. Records
 /// the edit and re-hashes for dedup; a collision with an existing statement is
 /// a BadRequest. Shared by REST and gRPC.
 pub async fn edit_unit_core(
@@ -209,7 +210,7 @@ pub async fn edit_unit_core(
     id: Uuid,
     statement: &str,
     note: Option<&str>,
-) -> Result<String, ApiError> {
+) -> Result<(String, String), ApiError> {
     let statement = statement.trim().to_string();
     if statement.is_empty() {
         return Err(ApiError::BadRequest(
@@ -221,12 +222,12 @@ pub async fn edit_unit_core(
     let mut tx = pool.begin().await?;
     // Lock the row and capture the pre-edit statement so the correction is
     // reversible: the feedback row keeps both before and after.
-    let before: Option<(String,)> =
-        sqlx::query_as("SELECT statement FROM atomic_units WHERE id = $1 FOR UPDATE")
+    let before: Option<(String, String)> =
+        sqlx::query_as("SELECT statement, status::text FROM atomic_units WHERE id = $1 FOR UPDATE")
             .bind(id)
             .fetch_optional(&mut *tx)
             .await?;
-    let Some((before,)) = before else {
+    let Some((before, status)) = before else {
         return Err(ApiError::NotFound(format!("unit {id}")));
     };
 
@@ -267,7 +268,7 @@ pub async fn edit_unit_core(
     )
     .await?;
     tx.commit().await?;
-    Ok(statement)
+    Ok((statement, status))
 }
 
 /// PATCH /units/{id} — correct a unit's statement.
@@ -276,8 +277,11 @@ pub async fn edit_unit(
     Path(id): Path<Uuid>,
     Json(req): Json<EditRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let statement = edit_unit_core(&state.pool, id, &req.statement, req.note.as_deref()).await?;
-    Ok(Json(json!({ "id": id, "statement": statement })))
+    let (statement, status) =
+        edit_unit_core(&state.pool, id, &req.statement, req.note.as_deref()).await?;
+    Ok(Json(
+        json!({ "id": id, "statement": statement, "status": status }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -296,6 +300,10 @@ pub struct ReviewEntry {
     pub signals: Value,
     /// The unit's statement, for unit items.
     pub statement: Option<String>,
+    /// Entity names for a held merge pair (signals.a / signals.b), so a UI
+    /// needn't fetch each entity separately.
+    pub a_name: Option<String>,
+    pub b_name: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -304,7 +312,13 @@ pub struct ReviewEntry {
 pub async fn list_review_core(pool: &PgPool, limit: i64) -> Result<Vec<ReviewEntry>, ApiError> {
     let rows = sqlx::query(
         "SELECT r.id, r.target_kind, r.target_id, r.reason, r.info_gain, r.signals, \
-                r.created_at, u.statement AS unit_statement \
+                r.created_at, u.statement AS unit_statement, \
+                (SELECT e.name FROM entities e WHERE e.id = CASE \
+                   WHEN r.signals->>'a' ~* '^[0-9a-f-]{36}$' THEN (r.signals->>'a')::uuid END) \
+                  AS a_name, \
+                (SELECT e.name FROM entities e WHERE e.id = CASE \
+                   WHEN r.signals->>'b' ~* '^[0-9a-f-]{36}$' THEN (r.signals->>'b')::uuid END) \
+                  AS b_name \
          FROM review_queue r \
          LEFT JOIN atomic_units u ON r.target_kind = 'unit' AND u.id = r.target_id \
          WHERE r.state = 'open' \
@@ -324,6 +338,8 @@ pub async fn list_review_core(pool: &PgPool, limit: i64) -> Result<Vec<ReviewEnt
             info_gain: r.get("info_gain"),
             signals: r.get("signals"),
             statement: r.get("unit_statement"),
+            a_name: r.get("a_name"),
+            b_name: r.get("b_name"),
             created_at: r.get("created_at"),
         })
         .collect())

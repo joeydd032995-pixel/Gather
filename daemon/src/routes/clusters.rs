@@ -18,6 +18,7 @@ pub struct ClusterListParams {
     /// Optional filter: 'entity', 'topic', 'photo_dup', 'album' or 'photo_topic'.
     pub kind: Option<String>,
     pub limit: Option<i64>,
+    pub offset: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -39,6 +40,8 @@ pub struct ClusterMember {
     pub sim: f32,
     /// Unit members: the statement.
     pub statement: Option<String>,
+    /// Entity members: the entity's name.
+    pub name: Option<String>,
     /// Image members: file name, capture time and caption.
     pub filename: Option<String>,
     pub taken_at: Option<DateTime<Utc>>,
@@ -70,14 +73,16 @@ pub async fn list_clusters_core(
     pool: &PgPool,
     kind: Option<&str>,
     limit: i64,
+    offset: i64,
 ) -> Result<Vec<ClusterSummary>, ApiError> {
     let rows = sqlx::query(
         "SELECT id, kind, label, cohesion, size, representative_id, updated_at FROM clusters \
          WHERE ($1::text IS NULL OR kind = $1) \
-         ORDER BY updated_at DESC LIMIT $2",
+         ORDER BY updated_at DESC, id LIMIT $2 OFFSET $3",
     )
     .bind(kind)
     .bind(limit.clamp(1, 500))
+    .bind(offset.max(0))
     .fetch_all(pool)
     .await?;
     Ok(rows.iter().map(summary_from).collect())
@@ -92,6 +97,7 @@ pub async fn list_clusters(
         &state.pool,
         params.kind.as_deref(),
         params.limit.unwrap_or(100),
+        params.offset.unwrap_or(0),
     )
     .await?;
     Ok(Json(json!({ "items": items })))
@@ -112,9 +118,10 @@ pub async fn get_cluster_core(pool: &PgPool, id: Uuid) -> Result<ClusterDetail, 
 
     let members = sqlx::query(
         "SELECT m.member_kind, m.member_id, m.sim, u.statement AS unit_statement, \
-                a.original_filename, i.taken_at, i.caption \
+                en.name AS entity_name, a.original_filename, i.taken_at, i.caption \
          FROM cluster_members m \
          LEFT JOIN atomic_units u ON m.member_kind = 'unit' AND u.id = m.member_id \
+         LEFT JOIN entities en ON m.member_kind = 'entity' AND en.id = m.member_id \
          LEFT JOIN images i ON m.member_kind = 'image' AND i.id = m.member_id \
          LEFT JOIN artifacts a ON a.id = i.artifact_id \
          WHERE m.cluster_id = $1 ORDER BY m.sim DESC, i.taken_at NULLS LAST, m.member_id",
@@ -128,6 +135,7 @@ pub async fn get_cluster_core(pool: &PgPool, id: Uuid) -> Result<ClusterDetail, 
         member_id: r.get("member_id"),
         sim: r.get("sim"),
         statement: r.get("unit_statement"),
+        name: r.get("entity_name"),
         filename: r.get("original_filename"),
         taken_at: r.get("taken_at"),
         caption: r.get("caption"),

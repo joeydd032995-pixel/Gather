@@ -216,6 +216,23 @@ async fn feedback_tunes_thresholds_drains_the_tray_and_is_reversible() {
     .fetch_one(&state.pool)
     .await
     .unwrap();
+    // The tray carries both entity names, so a UI needs no per-entity fetch.
+    let res = app
+        .clone()
+        .oneshot(Request::get("/api/v1/review").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let tray: Value = serde_json::from_slice(&bytes).unwrap();
+    let held = tray["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == json!(pair))
+        .expect("held pair listed");
+    assert_eq!(held["a_name"], json!(base));
+    assert_eq!(held["b_name"], json!(format!("{base} Inc")));
+
     let (status, body) = post(&app, format!("/api/v1/review/{pair}/accept"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["winner"], json!(b), "longer name survives");

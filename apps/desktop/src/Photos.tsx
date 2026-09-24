@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { getCluster, listClusters, type ClusterKind, type ClusterSummary } from "./api";
+import { getCluster, type ClusterKind, type ClusterSummary } from "./api";
 import { useAsync } from "./hooks/useAsync";
+import { usePagedClusters } from "./hooks/usePagedClusters";
 import Thumbnail from "./Thumbnail";
 
 const KINDS: { kind: ClusterKind; label: string; empty: string }[] = [
@@ -23,23 +24,39 @@ const KINDS: { kind: ClusterKind; label: string; empty: string }[] = [
 
 const PREVIEW_SIZE = 96;
 const COVER_SIZE = 160;
+/** Thumbnails shown per expanded group before "Show more" (each is a local decode). */
+const PHOTOS_PER_PAGE = 48;
 
 function GroupPhotos({ cluster }: { cluster: ClusterSummary }) {
   const detail = useAsync(() => getCluster(cluster.id), [cluster.id]);
+  const [shown, setShown] = useState(PHOTOS_PER_PAGE);
   if (detail.loading) return <p className="prov-empty">Loading…</p>;
   if (detail.error) return <p className="error">{detail.error}</p>;
+  const members = detail.data?.members ?? [];
+  // Only a duplicate group's representative is its sharpest copy; for albums
+  // and topics it is just the first photo, so it gets no badge.
+  const isDuplicateGroup = cluster.kind === "photo_dup";
   return (
-    <div className="photo-grid">
-      {(detail.data?.members ?? []).map((m) => (
-        <figure key={m.member_id} className="photo">
-          <Thumbnail imageId={m.member_id} alt={m.filename ?? "photo"} size={PREVIEW_SIZE} />
-          <figcaption>
-            {m.member_id === cluster.representative_id && <span className="prov-badge">best</span>}
-            {m.caption ?? m.filename ?? ""}
-          </figcaption>
-        </figure>
-      ))}
-    </div>
+    <>
+      <div className="photo-grid">
+        {members.slice(0, shown).map((m) => (
+          <figure key={m.member_id} className="photo">
+            <Thumbnail imageId={m.member_id} alt={m.filename ?? "photo"} size={PREVIEW_SIZE} />
+            <figcaption>
+              {isDuplicateGroup && m.member_id === cluster.representative_id && (
+                <span className="prov-badge">best</span>
+              )}
+              {m.caption ?? m.filename ?? ""}
+            </figcaption>
+          </figure>
+        ))}
+      </div>
+      {members.length > shown && (
+        <button className="load-more" onClick={() => setShown((n) => n + PHOTOS_PER_PAGE)}>
+          Show more ({members.length - shown} left)
+        </button>
+      )}
+    </>
   );
 }
 
@@ -66,7 +83,7 @@ function PhotoGroup({ cluster }: { cluster: ClusterSummary }) {
  *  grouped with the sharpest copy marked "best". */
 export default function Photos() {
   const [kind, setKind] = useState<ClusterKind>("album");
-  const groups = useAsync(() => listClusters(kind), [kind]);
+  const groups = usePagedClusters(kind);
   const current = KINDS.find((k) => k.kind === kind);
 
   return (
@@ -82,14 +99,21 @@ export default function Photos() {
           </button>
         ))}
       </nav>
-      {groups.loading && !groups.data && <p>Loading…</p>}
       {groups.error && <p className="error">{groups.error}</p>}
-      {groups.data?.length === 0 && <p className="prov-empty">{current?.empty}</p>}
+      {!groups.loading && groups.items.length === 0 && (
+        <p className="prov-empty">{current?.empty}</p>
+      )}
       <ul className="photo-groups">
-        {(groups.data ?? []).map((c) => (
+        {groups.items.map((c) => (
           <PhotoGroup key={c.id} cluster={c} />
         ))}
       </ul>
+      {groups.loading && <p>Loading…</p>}
+      {groups.hasMore && !groups.loading && (
+        <button className="load-more" onClick={groups.loadMore}>
+          Load more
+        </button>
+      )}
     </section>
   );
 }

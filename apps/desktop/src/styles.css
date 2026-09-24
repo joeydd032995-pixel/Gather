@@ -110,3 +110,12 @@ kbd {
 .conflict-row { box-sizing: border-box; }
 .conflict-row .statements { min-width: 0; overflow-wrap: anywhere; }
 .conflict-row .method, .conflict-row .prov-badge { flex-shrink: 0; }
+.load-more {
+  margin-top: 0.75rem; padding: 0.35rem 0.9rem;
+  border: 1px solid #8886; border-radius: 6px; cursor: pointer;
+}
+.link-button {
+  background: none; border: none; padding: 0; color: #4a7dff;
+  cursor: pointer; font: inherit; text-decoration: underline;
+}
+.evidence { font-size: 0.75rem; margin: 0.3rem 0 0; white-space: pre-wrap; }

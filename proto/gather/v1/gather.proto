@@ -499,6 +499,8 @@ message ReviewEntry {
   google.protobuf.Struct signals = 6;              // the scores behind the hold
   string statement = 7;                            // unit items: the statement
   google.protobuf.Timestamp created_at = 8;
+  string a_name = 9;                               // merge-band items: entity names
+  string b_name = 10;
 }
 
 message ListReviewResponse {
@@ -531,6 +533,7 @@ service ClusterService {
 message ListClustersRequest {
   string kind = 1;                                 // "" = all; entity | topic | photo_dup | album | photo_topic
   int32 limit = 2;                                 // 0 = 100
+  int32 offset = 3;                                // for paging
 }
 
 message ClusterSummary {
@@ -559,6 +562,7 @@ message ClusterMember {
   string filename = 5;                             // image members
   google.protobuf.Timestamp taken_at = 6;          // image members
   string caption = 7;                              // image members (opt-in captions)
+  string name = 8;                                 // entity members
 }
 
 message ClusterDetail {

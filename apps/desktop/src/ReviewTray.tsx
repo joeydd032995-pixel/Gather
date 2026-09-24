@@ -3,7 +3,6 @@ import {
   acceptReview,
   dismissReview,
   editUnit,
-  getEntity,
   listReview,
   rejectReview,
   restoreUnit,
@@ -12,6 +11,8 @@ import {
 import { useAsync } from "./hooks/useAsync";
 
 const TRAY_LIMIT = 100;
+/** Re-read the tray this often: background workers park new items. */
+const REFRESH_MS = 15000;
 
 const REASON_LABELS: Record<string, string> = {
   "low-confidence": "Low-confidence fact",
@@ -23,24 +24,6 @@ const REASON_LABELS: Record<string, string> = {
 interface LastAction {
   label: string;
   undo?: () => Promise<unknown>;
-}
-
-function EntityName({ id }: { id: string }) {
-  const [name, setName] = useState<string | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    getEntity(id)
-      .then((e) => {
-        if (!cancelled) setName(e.name);
-      })
-      .catch(() => {
-        if (!cancelled) setName(id.slice(0, 8));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [id]);
-  return <strong>{name ?? "…"}</strong>;
 }
 
 function asString(value: unknown): string | null {
@@ -68,15 +51,23 @@ function ItemSummary({ item }: { item: ReviewItem }) {
     const b = asString(item.signals.b);
     const score = asNumber(item.signals.score);
     if (!a || !b) return <span>Malformed merge suggestion</span>;
+    // Names come with the tray listing; an id means the entity is gone.
     return (
       <span>
-        <EntityName id={a} /> ↔ <EntityName id={b} />
+        <strong>{item.a_name ?? a.slice(0, 8)}</strong> ↔{" "}
+        <strong>{item.b_name ?? b.slice(0, 8)}</strong>
         {score !== null && <span className="method"> · similarity {score.toFixed(2)}</span>}
       </span>
     );
   }
   const members = Array.isArray(item.signals.members) ? item.signals.members.length : 0;
   return <span>{members} entities chained together; too large to merge automatically</span>;
+}
+
+/** Oversized duplicate groups can only be dismissed: there is no single
+ *  pair to accept or reject, and the server refuses a wholesale action. */
+function canJudge(item: ReviewItem): boolean {
+  return item.reason !== "oversized-component";
 }
 
 function isTyping(target: EventTarget | null): boolean {
@@ -176,9 +167,9 @@ export default function ReviewTray() {
         setSelected((s) => Math.max(s - 1, 0));
       } else if (key === "u") {
         undo();
-      } else if (current && key === "a") {
+      } else if (current && key === "a" && canJudge(current)) {
         accept(current);
-      } else if (current && key === "r") {
+      } else if (current && key === "r" && canJudge(current)) {
         reject(current);
       } else if (current && key === "d") {
         dismiss(current);
@@ -194,6 +185,13 @@ export default function ReviewTray() {
     return () => window.removeEventListener("keydown", onKey);
   }, [accept, busy, current, dismiss, items.length, reject, undo]);
 
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (!busy && editingId === null) reload();
+    }, REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [busy, editingId, reload]);
+
   if (tray.loading && !tray.data) return <p>Loading review tray…</p>;
   if (tray.error) return <p className="error">{tray.error}</p>;
 
@@ -203,7 +201,10 @@ export default function ReviewTray() {
         Optional. Everything here is already live in your brain; answering only
         teaches Gather where its thresholds should sit. Keys: <kbd>j</kbd>/<kbd>k</kbd>{" "}
         move, <kbd>a</kbd> accept, <kbd>r</kbd> reject, <kbd>d</kbd> dismiss,{" "}
-        <kbd>e</kbd> edit, <kbd>u</kbd> undo.
+        <kbd>e</kbd> edit, <kbd>u</kbd> undo.{" "}
+        <button className="link-button" onClick={reload} disabled={busy}>
+          Refresh
+        </button>
       </p>
       {last && (
         <div className="toast" role="status">
@@ -253,14 +254,16 @@ export default function ReviewTray() {
                 </div>
               ) : (
                 <div className="conflict-actions">
-                  {item.reason !== "oversized-component" && (
-                    <button onClick={() => accept(item)} disabled={busy}>
-                      {item.target_kind === "unit" ? "Keep" : "Merge"}
-                    </button>
+                  {canJudge(item) && (
+                    <>
+                      <button onClick={() => accept(item)} disabled={busy}>
+                        {item.target_kind === "unit" ? "Keep" : "Merge"}
+                      </button>
+                      <button onClick={() => reject(item)} disabled={busy}>
+                        {item.target_kind === "unit" ? "Remove" : "Not duplicates"}
+                      </button>
+                    </>
                   )}
-                  <button onClick={() => reject(item)} disabled={busy}>
-                    {item.target_kind === "unit" ? "Remove" : "Not duplicates"}
-                  </button>
                   {item.target_kind === "unit" && (
                     <button
                       onClick={() => {

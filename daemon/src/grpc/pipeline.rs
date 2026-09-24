@@ -99,7 +99,7 @@ impl pb::feedback_service_server::FeedbackService for FeedbackApi {
     ) -> Result<Response<pb::UnitActionResponse>, Status> {
         let req = request.into_inner();
         let id = parse_uuid(&req.unit_id, "unit_id")?;
-        let statement = feedback::edit_unit_core(
+        let (statement, status) = feedback::edit_unit_core(
             &self.state.pool,
             id,
             &req.statement,
@@ -107,7 +107,7 @@ impl pb::feedback_service_server::FeedbackService for FeedbackApi {
         )
         .await
         .map_err(status_from)?;
-        Ok(Response::new(unit_response(id, "active", statement)))
+        Ok(Response::new(unit_response(id, &status, statement)))
     }
 
     async fn list_review(
@@ -128,6 +128,8 @@ impl pb::feedback_service_server::FeedbackService for FeedbackApi {
                 signals: prost_struct(&e.signals),
                 statement: e.statement.unwrap_or_default(),
                 created_at: timestamp(Some(e.created_at)),
+                a_name: e.a_name.unwrap_or_default(),
+                b_name: e.b_name.unwrap_or_default(),
             })
             .collect();
         Ok(Response::new(pb::ListReviewResponse { items }))
@@ -204,6 +206,7 @@ impl pb::cluster_service_server::ClusterService for ClusterApi {
             &self.state.pool,
             kind.as_deref(),
             limit_or_default(req.limit),
+            i64::from(req.offset.max(0)),
         )
         .await
         .map_err(status_from)?
@@ -235,6 +238,7 @@ impl pb::cluster_service_server::ClusterService for ClusterApi {
                     filename: m.filename.unwrap_or_default(),
                     taken_at: timestamp(m.taken_at),
                     caption: m.caption.unwrap_or_default(),
+                    name: m.name.unwrap_or_default(),
                 })
                 .collect(),
         }))

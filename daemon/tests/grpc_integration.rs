@@ -877,6 +877,8 @@ async fn pipeline_services_mirror_rest() {
         .expect("edit")
         .into_inner();
     assert_eq!(edited.statement, format!("grpc corrected fact {salt}"));
+    // The edit reports the unit's real status, not an assumed one.
+    assert_eq!(edited.status, "active");
 
     // Park the unit in the tray, see it listed, accept it.
     let review_id: Uuid = sqlx::query_scalar(
@@ -933,6 +935,7 @@ async fn pipeline_services_mirror_rest() {
         .list_clusters(pb::ListClustersRequest {
             kind: "topic".to_string(),
             limit: 500,
+            offset: 0,
         })
         .await
         .expect("list clusters")
