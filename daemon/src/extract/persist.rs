@@ -176,8 +176,13 @@ pub async fn persist_chunk_units(
         // review_queue for optional attention; Drop -> retract (off by default,
         // drop_below = 0). Only new units are classified; a re-assertion keeps
         // whatever state it already had.
+        let admit_band = if is_new {
+            admit_unit(confidence, hold_below, drop_below)
+        } else {
+            Band::Auto
+        };
         if is_new {
-            match admit_unit(confidence, hold_below, drop_below) {
+            match admit_band {
                 Band::Auto => {}
                 Band::Hold => {
                     sqlx::query(
@@ -233,8 +238,9 @@ pub async fn persist_chunk_units(
         .await?;
 
         // Relationship edges asserted by this unit (only on first creation;
-        // re-assertions already carry them).
-        if is_new {
+        // re-assertions already carry them). A dropped unit is retracted, so it
+        // must not seed active edges.
+        if is_new && admit_band != Band::Drop {
             if let Some(source_entity) = subject_entity_id {
                 for (object_name, relation) in &unit.objects {
                     let target_entity = resolve_or_create_entity(&mut tx, object_name).await?;

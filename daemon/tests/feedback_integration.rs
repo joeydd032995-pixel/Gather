@@ -109,6 +109,27 @@ async fn reject_retracts_and_restore_reverses_it() {
 }
 
 #[tokio::test]
+async fn restore_rejects_a_non_retracted_unit() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let app = routes::build_router(state.clone());
+    let id = seed_unit(&state, "active, never rejected").await;
+    // Restoring an active (or superseded) unit must be refused, so it can't
+    // strip contradiction lifecycle metadata.
+    let res = app
+        .oneshot(
+            Request::post(format!("/api/v1/units/{id}/restore"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(unit_status(&state, id).await, "active");
+}
+
+#[tokio::test]
 async fn rejecting_resolves_the_open_review_entry() {
     let Some(state) = test_state().await else {
         return;

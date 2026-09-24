@@ -86,9 +86,43 @@ pub async fn reject_unit(
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    // Relationships this unit asserted must go inactive too, or the graph
+    // (which filters on relationship status) keeps showing the rejected claim.
+    // Same propagation the contradiction resolver does for a superseded unit.
+    deactivate_relationships(&mut tx, id).await?;
     record_feedback(&mut tx, id, "reject", None, note.as_deref()).await?;
     tx.commit().await?;
     Ok(Json(json!({ "id": id, "status": "retracted" })))
+}
+
+/// Retract the relationships a unit asserts (graph edges hang off `atomic_unit_id`).
+async fn deactivate_relationships(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    unit_id: Uuid,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "UPDATE relationships SET status = 'retracted' \
+         WHERE atomic_unit_id = $1 AND status = 'active'",
+    )
+    .bind(unit_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Reactivate the relationships a unit asserts, on restore.
+async fn reactivate_relationships(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    unit_id: Uuid,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "UPDATE relationships SET status = 'active' \
+         WHERE atomic_unit_id = $1 AND status = 'retracted'",
+    )
+    .bind(unit_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 /// POST /units/{id}/restore — undo a reject.
@@ -99,11 +133,20 @@ pub async fn restore_unit(
 ) -> Result<Json<Value>, ApiError> {
     let note = body.and_then(|b| b.0.note);
     let mut tx = state.pool.begin().await?;
-    unit_status(&mut tx, id).await?;
+    let status = unit_status(&mut tx, id).await?;
+    // Restore is the inverse of reject, nothing else. A unit superseded by a
+    // contradiction resolution carries superseded_by_unit_id / valid_to that
+    // this endpoint must not silently strip, so only a retracted unit qualifies.
+    if status != "retracted" {
+        return Err(ApiError::BadRequest(format!(
+            "only a retracted unit can be restored; unit {id} is '{status}'"
+        )));
+    }
     sqlx::query("UPDATE atomic_units SET status = 'active' WHERE id = $1")
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    reactivate_relationships(&mut tx, id).await?;
     record_feedback(&mut tx, id, "confirm", None, note.as_deref()).await?;
     tx.commit().await?;
     Ok(Json(json!({ "id": id, "status": "active" })))
@@ -139,7 +182,16 @@ pub async fn edit_unit(
     let hash = hex::encode(Sha256::digest(normalize_statement(&statement)));
 
     let mut tx = state.pool.begin().await?;
-    unit_status(&mut tx, id).await?;
+    // Lock the row and capture the pre-edit statement so the correction is
+    // reversible: the feedback row keeps both before and after.
+    let before: Option<(String,)> =
+        sqlx::query_as("SELECT statement FROM atomic_units WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some((before,)) = before else {
+        return Err(ApiError::NotFound(format!("unit {id}")));
+    };
 
     let clash: Option<(Uuid,)> =
         sqlx::query_as("SELECT id FROM atomic_units WHERE statement_hash = $1 AND id <> $2")
@@ -153,9 +205,15 @@ pub async fn edit_unit(
         ));
     }
 
+    // Changing the text invalidates derived state: the old embedding no longer
+    // matches (search would rank the new text by the old vector) and the
+    // contradiction scanner must re-examine the unit (it only picks up rows
+    // with a null cursor).
     sqlx::query(
-        "UPDATE atomic_units SET statement = $2, statement_hash = $3, \
-         extraction_method = 'manual' WHERE id = $1",
+        "UPDATE atomic_units \
+         SET statement = $2, statement_hash = $3, extraction_method = 'manual', \
+             embedding = NULL, contradiction_scanned_at = NULL \
+         WHERE id = $1",
     )
     .bind(id)
     .bind(&statement)
@@ -166,7 +224,7 @@ pub async fn edit_unit(
         &mut tx,
         id,
         "edit",
-        Some(json!({ "statement": statement })),
+        Some(json!({ "before": before, "after": statement })),
         req.note.as_deref(),
     )
     .await?;
