@@ -78,8 +78,9 @@ photo out") rather than reviewing thousands of suggestions.
 
 **Interfaces**
 - **REST** API (`127.0.0.1:7601/api/v1`) and an equivalent **gRPC** API (`127.0.0.1:7602`)
-- **Desktop app** (Tauri v2 + React) with drag-and-drop upload, contradiction review and
-  entity management
+- **Desktop app** (Tauri v2 + React) with drag-and-drop upload, the optional review tray
+  (keyboard-driven, with undo), topic and photo browsers, contradiction review, entity
+  management and a view of what the auto-tuner learned
 - Full-store **export / import** bundle for backup, migration and replication
 
 **Operations**
@@ -309,8 +310,9 @@ See §7 of the [technical write-up](docs/TECHNICAL-WRITEUP.md) for the full thre
   resolution, gRPC parity, export/import, observability, backups, the autonomous-pipeline
   foundation (auto-act + feedback loop), clustering, and active learning (information-gain
   tray ordering + feedback-driven threshold auto-tuning), and the photo pipeline
-  (perceptual-hash duplicate groups, EXIF albums, optional local vision captions).
-- **Next:** desktop review-tray UI; entity unmerge; multi-user support.
+  (perceptual-hash duplicate groups, EXIF albums, optional local vision captions), with a
+  desktop review tray, group/photo browsers and a tuning view, and gRPC parity for all of it.
+- **Next:** entity unmerge; multi-user support.
 
 ## License
 

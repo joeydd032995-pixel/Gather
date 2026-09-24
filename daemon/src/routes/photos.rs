@@ -10,6 +10,7 @@ use axum::http::header;
 use axum::response::IntoResponse;
 use image::codecs::jpeg::JpegEncoder;
 use image::{ImageReader, Limits};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::ApiError;
@@ -43,27 +44,32 @@ fn render_thumbnail(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// GET /images/{id}/thumbnail — a JPEG no larger than 256 px on its long side.
-/// `415` when the format can't be decoded locally (e.g. HEIC).
-pub async fn thumbnail(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Result<impl IntoResponse, ApiError> {
+/// A JPEG thumbnail, at most 256 px on its long side. `UnsupportedMedia` when
+/// the format can't be decoded locally (e.g. HEIC). Shared by REST and gRPC.
+pub async fn thumbnail_core(pool: &PgPool, id: Uuid) -> Result<Vec<u8>, ApiError> {
     let bytes: Option<Option<Vec<u8>>> = sqlx::query_scalar(
         "SELECT a.raw_content FROM images i JOIN artifacts a ON a.id = i.artifact_id \
          WHERE i.id = $1",
     )
     .bind(id)
-    .fetch_optional(&state.pool)
+    .fetch_optional(pool)
     .await?;
     let bytes = bytes
         .ok_or_else(|| ApiError::NotFound(format!("image {id}")))?
         .ok_or_else(|| ApiError::NotFound(format!("image {id} has no stored bytes")))?;
 
-    let jpeg = tokio::task::spawn_blocking(move || render_thumbnail(&bytes))
+    tokio::task::spawn_blocking(move || render_thumbnail(&bytes))
         .await
         .map_err(anyhow::Error::from)?
-        .ok_or_else(|| ApiError::UnsupportedMedia("image cannot be decoded locally".to_string()))?;
+        .ok_or_else(|| ApiError::UnsupportedMedia("image cannot be decoded locally".to_string()))
+}
+
+/// GET /images/{id}/thumbnail
+pub async fn thumbnail(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, ApiError> {
+    let jpeg = thumbnail_core(&state.pool, id).await?;
     Ok((
         [
             (header::CONTENT_TYPE, "image/jpeg"),

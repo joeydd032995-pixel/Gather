@@ -6,8 +6,24 @@ import {
   type FileResult,
   type HealthState,
 } from "./api";
+import Clusters from "./Clusters";
 import Contradictions from "./Contradictions";
 import Entities from "./Entities";
+import Photos from "./Photos";
+import ReviewTray from "./ReviewTray";
+import Tuning from "./Tuning";
+
+type Tab = "upload" | "review" | "clusters" | "photos" | "contradictions" | "entities" | "tuning";
+
+const TABS: { id: Tab; label: string }[] = [
+  { id: "upload", label: "Upload" },
+  { id: "review", label: "Review" },
+  { id: "clusters", label: "Groups" },
+  { id: "photos", label: "Photos" },
+  { id: "contradictions", label: "Contradictions" },
+  { id: "entities", label: "Entities" },
+  { id: "tuning", label: "Tuning" },
+];
 
 // Native file picker (Tauri dialog plugin). In a plain browser (vite dev
 // outside Tauri) we fall back to a hidden <input type="file">.
@@ -38,7 +54,7 @@ async function pickWithNativeDialog(): Promise<File[]> {
 }
 
 export default function App() {
-  const [tab, setTab] = useState<"upload" | "contradictions" | "entities">("upload");
+  const [tab, setTab] = useState<Tab>("upload");
   const [health, setHealth] = useState<HealthState>({ reachable: false, ready: false });
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -118,25 +134,24 @@ export default function App() {
       </header>
 
       <nav className="tabs">
-        <button
-          className={tab === "upload" ? "tab active" : "tab"}
-          onClick={() => setTab("upload")}
-        >
-          Upload
-        </button>
-        <button
-          className={tab === "contradictions" ? "tab active" : "tab"}
-          onClick={() => setTab("contradictions")}
-        >
-          Contradictions
-        </button>
-        <button
-          className={tab === "entities" ? "tab active" : "tab"}
-          onClick={() => setTab("entities")}
-        >
-          Entities
-        </button>
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            className={tab === t.id ? "tab active" : "tab"}
+            onClick={() => setTab(t.id)}
+          >
+            {t.label}
+          </button>
+        ))}
       </nav>
+
+      {tab === "review" && <ReviewTray />}
+
+      {tab === "clusters" && <Clusters />}
+
+      {tab === "photos" && <Photos />}
+
+      {tab === "tuning" && <Tuning />}
 
       {tab === "contradictions" && <Contradictions />}
 

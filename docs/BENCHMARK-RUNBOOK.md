@@ -6,7 +6,7 @@
 |---|---|---|
 | **Phase 1 "Go"** (latency) | graph queries stay <150 ms at personal scale | `scripts/graph-benchmark.sh` |
 | **Phase 1 "Go"** (quality, automated) | rule extractor holds ≥70% precision on the golden corpus | `cargo test --test extraction_quality` |
-| **Phase 1 "Go"** (quality, human) | ≥70% of sampled real units judged usable | `scripts/unit-quality-sample.sh` |
+| **Phase 1 "Go"** (quality, real data) | ≥70% of real units you gave a verdict on are kept | `gather_realdata_precision` (continuous, from the feedback loop); `scripts/unit-quality-sample.sh` for a one-off audit |
 | **Phase 3 trigger** | adopt Neo4j only if traversal p95 >150 ms at >1M relationship rows, *after index tuning* | `scripts/graph-benchmark.sh` |
 
 The two benchmark scripts are **tier 2**: you run them deliberately, against a scratch database,
@@ -17,9 +17,11 @@ about a 150 ms threshold, and the CI scale is far below the 1M-row bar.
 The quality gate now has **two complementary halves**. The automated golden-corpus eval
 (`daemon/tests/extraction_quality.rs`, §3 below) rides the ordinary `test` job on every push and
 turns rule-extractor precision into a CI-enforced number so quality cannot silently regress. The
-human sampler (`scripts/unit-quality-sample.sh`, §2) still owns the judgment that matters for the
-release decision — whether units drawn from *real ingested data* are usable — since only a person
-can make that call, and the corpus is a fixed proxy, not live data.
+real-data half no longer needs a batch-labelling session: the autonomous pipeline's feedback loop
+turns the rare corrections you make anyway (reject, restore, confirm, edit, review-tray answers)
+into `gather_realdata_precision`, a live measurement on *your* ingested data (see
+`docs/AUTONOMOUS-PIPELINE.md`). The human sampler (§2) remains for a deliberate one-off audit, for
+example before a release or when you have given too few verdicts for the gauge to mean much.
 
 ---
 
@@ -237,8 +239,26 @@ gate itself moves.
 
 ### How it relates to §2
 
-This eval and the human sampler answer different questions and neither replaces the other. The eval
-proves the *rules* haven't regressed on a fixed, reviewable set — cheap, deterministic, CI-enforced.
-The sampler proves *real ingested data* clears the usable bar — the judgment the release actually
-turns on, which only a person can make. Ship both: green CI here, plus a human sampler pass on real
-data before calling the Phase 1 quality gate met.
+This eval and the real-data measurement answer different questions and neither replaces the
+other. The eval proves the *rules* haven't regressed on a fixed, reviewable set — cheap,
+deterministic, CI-enforced. `gather_realdata_precision` (or a sampler pass) proves *real ingested
+data* clears the usable bar — the judgment the release actually turns on. Ship both: green CI
+here, plus a real-data precision at or above 70% on a meaningful number of verdicts.
+
+---
+
+## 4. Autonomous-pipeline evals — `cargo test`
+
+The organising machinery is guarded the same way as extraction: offline, deterministic tests on
+the ordinary `test` job, so a change that weakens the pipeline fails CI.
+
+| Suite | Guards |
+|---|---|
+| `tests/decision_policy.rs` | The conservative merge gate never auto-merges without two agreeing signals or a near-certain one; admission defaults never drop data |
+| `tests/clustering.rs` | Mutual-kNN + union-find groups real duplicate names and keeps distinct ones apart; the chaining guard holds |
+| `tests/tuning.rs` | The threshold tuner converges to a known quality boundary, never leaves its bounds, never moves on thin evidence, never oscillates, and never loosens on reject-only feedback; the tray ranks boundary hubs first |
+| `tests/photo_pipeline.rs` | Re-encoded and resized copies of a scene hash within the duplicate distance, different scenes hash far apart, a mixed library groups exactly by scene, and albums split on time gaps and travel |
+
+The matching integration suites (`cluster_integration`, `feedback_integration`,
+`tune_integration`, `photo_integration`, `grpc_integration`) run the same paths end to end
+against pgvector; the photo suite uses a mock loopback Ollama, so no model is needed.

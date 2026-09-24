@@ -134,6 +134,17 @@ pub fn opt(s: Option<String>) -> String {
     s.unwrap_or_default()
 }
 
+/// Parse a UUID request field, naming the field in the error.
+pub fn parse_uuid(raw: &str, field: &str) -> Result<uuid::Uuid, tonic::Status> {
+    raw.parse()
+        .map_err(|_| tonic::Status::invalid_argument(format!("{field} is not a valid UUID")))
+}
+
+/// A proto3 string field where "" means "not set".
+pub fn non_empty(value: String) -> Option<String> {
+    Some(value).filter(|v| !v.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

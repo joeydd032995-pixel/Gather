@@ -238,7 +238,8 @@ by the backup scripts and restore drills (see [BACKUP-RUNBOOK.md](BACKUP-RUNBOOK
 
 ## gRPC
 
-Five services in package `gather.v1`, served with the same bearer-token interceptor:
+Nine services in package `gather.v1`, served with the same bearer-token interceptor. Each RPC
+calls the same core function as its REST route:
 
 | Service | RPCs |
 |---|---|
@@ -247,8 +248,10 @@ Five services in package `gather.v1`, served with the same bearer-token intercep
 | `ContradictionService` | `ListContradictions`, `GetContradiction`, `ResolveContradiction`, `AnnotateContradiction` |
 | `EntityService` | `ListEntities`, `ListMergeSuggestions`, `GetEntity`, `MergeEntities`, `DismissMergeSuggestion`, `AddAlias` |
 | `ExportService` | `ExportBundle` (server streaming), `ImportBundle` (client streaming) |
-
-The feedback and cluster endpoints are REST-only for now; gRPC parity is on the roadmap.
+| `FeedbackService` | `RejectUnit`, `RestoreUnit`, `ConfirmUnit`, `EditUnit`, `ListReview`, `AcceptReview`, `RejectReview`, `ResolveReview` |
+| `ClusterService` | `ListClusters`, `GetCluster` |
+| `TuningService` | `GetTuning`, `ResetTuning` |
+| `PhotoService` | `GetThumbnail` |
 
 ```bash
 grpcurl -plaintext -H "authorization: Bearer $TOKEN" \
