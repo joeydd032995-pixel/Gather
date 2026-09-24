@@ -164,14 +164,20 @@ pub async fn gauge_refresher(pool: PgPool) {
         {
             metrics::gauge!("gather_review_queue_open").set(open as f64);
         }
-        // Real-data extraction precision: of the auto-admitted units the user
-        // acted on, the fraction they kept. Undefined until there is feedback,
-        // so leave the gauge untouched when the denominator is zero.
+        // Real-data extraction precision: of the units the user gave a verdict
+        // on, the fraction whose LATEST verdict is keep. Counting each unit's
+        // most recent confirm/reject (not every historical row) means a
+        // reject-then-restore nets to a keep, not 50%. Undefined until there is
+        // feedback, so the gauge is left untouched when the denominator is zero.
         if let Ok((confirms, rejects)) = sqlx::query_as::<_, (i64, i64)>(
-            "SELECT \
-               count(*) FILTER (WHERE action = 'confirm'), \
-               count(*) FILTER (WHERE action = 'reject') \
-             FROM unit_feedback WHERE target_kind = 'unit'",
+            "WITH latest AS ( \
+               SELECT DISTINCT ON (target_id) action \
+               FROM unit_feedback \
+               WHERE target_kind = 'unit' AND action IN ('confirm', 'reject') \
+               ORDER BY target_id, created_at DESC \
+             ) \
+             SELECT count(*) FILTER (WHERE action = 'confirm'), \
+                    count(*) FILTER (WHERE action = 'reject') FROM latest",
         )
         .fetch_one(&pool)
         .await

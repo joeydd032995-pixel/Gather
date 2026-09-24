@@ -103,6 +103,29 @@ pub enum ConfigError {
     },
 }
 
+/// Parse a `[0,1]` float env var, rejecting non-finite values (a NaN would
+/// survive `clamp` and poison every threshold comparison). Absent → default.
+fn parse_unit_float(var: &'static str, default: f32) -> Result<f32, ConfigError> {
+    match std::env::var(var) {
+        Err(_) => Ok(default),
+        Ok(raw) => {
+            let v: f32 = raw.parse().map_err(|_| ConfigError::BadEnvValue {
+                var,
+                value: raw.clone(),
+                reason: "expected a number in [0, 1]",
+            })?;
+            if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+                return Err(ConfigError::BadEnvValue {
+                    var,
+                    value: raw,
+                    reason: "expected a finite number in [0, 1]",
+                });
+            }
+            Ok(v)
+        }
+    }
+}
+
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
         let bind_raw =
@@ -176,6 +199,20 @@ impl Config {
             .map(|v| v.to_lowercase())
             .unwrap_or_else(|_| "env".to_string());
 
+        // Admission thresholds are validated rather than clamped: a non-finite
+        // value (NaN survives clamp) would make every comparison false and
+        // silently auto-admit everything, and drop_below > hold_below would
+        // erase the hold band and drop units the docs say are auto-admitted.
+        let admit_hold_below = parse_unit_float("GATHER_ADMIT_HOLD_BELOW", 0.5)?;
+        let admit_drop_below = parse_unit_float("GATHER_ADMIT_DROP_BELOW", 0.0)?;
+        if admit_drop_below > admit_hold_below {
+            return Err(ConfigError::BadEnvValue {
+                var: "GATHER_ADMIT_DROP_BELOW",
+                value: admit_drop_below.to_string(),
+                reason: "must be <= GATHER_ADMIT_HOLD_BELOW",
+            });
+        }
+
         let grpc_enabled = env_bool("GATHER_GRPC_ENABLED", true);
         let grpc_raw =
             std::env::var("GATHER_GRPC_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:7602".to_string());
@@ -237,16 +274,8 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .map(|v: i64| v.clamp(1, 200))
                 .unwrap_or(25),
-            admit_hold_below: std::env::var("GATHER_ADMIT_HOLD_BELOW")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .map(|v: f32| v.clamp(0.0, 1.0))
-                .unwrap_or(0.5),
-            admit_drop_below: std::env::var("GATHER_ADMIT_DROP_BELOW")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .map(|v: f32| v.clamp(0.0, 1.0))
-                .unwrap_or(0.0),
+            admit_hold_below,
+            admit_drop_below,
             cluster_enabled: env_bool("GATHER_CLUSTER_ENABLED", true),
             cluster_interval_secs: std::env::var("GATHER_CLUSTER_INTERVAL_SECS")
                 .ok()
@@ -263,11 +292,9 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .map(|v: usize| v.clamp(1, 50))
                 .unwrap_or(6),
-            cluster_threshold: std::env::var("GATHER_CLUSTER_THRESHOLD")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .map(|v: f32| v.clamp(0.0, 1.0))
-                .unwrap_or(0.5),
+            // Validated (not clamped) so GATHER_CLUSTER_THRESHOLD=NaN is a
+            // startup error rather than a threshold every comparison fails.
+            cluster_threshold: parse_unit_float("GATHER_CLUSTER_THRESHOLD", 0.5)?,
             cluster_max_component: std::env::var("GATHER_CLUSTER_MAX_COMPONENT")
                 .ok()
                 .and_then(|v| v.parse().ok())

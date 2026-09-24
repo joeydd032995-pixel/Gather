@@ -103,7 +103,7 @@ pub fn build_router(state: AppState) -> Router {
                 .map(|o| HeaderValue::from_static(o))
                 .collect::<Vec<_>>(),
         )
-        .allow_methods([Method::GET, Method::POST])
+        .allow_methods([Method::GET, Method::POST, Method::PATCH])
         .allow_headers([
             axum::http::header::AUTHORIZATION,
             axum::http::header::CONTENT_TYPE,
