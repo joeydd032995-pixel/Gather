@@ -11,7 +11,7 @@ license = "MIT"
 [dependencies]
 axum = { version = "0.8", features = ["multipart", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "time", "process", "fs"] }
-tower-http = { version = "0.6", features = ["trace", "limit", "cors"] }
+tower-http = { version = "0.7", features = ["trace", "limit", "cors"] }
 sqlx = { version = "0.9", features = [
     "runtime-tokio",
     "tls-rustls",
