@@ -59,6 +59,17 @@ try {
   Invoke-Checked 'meson build' { meson compile -C $build }
   Invoke-Checked 'meson install' { meson install -C $build --quiet }
 
+  # pgvector's Makefile.win links against lib\postgres.lib, the server's
+  # import library; meson builds it but does not install it.
+  $implib = Join-Path $Out 'lib/postgres.lib'
+  if (-not (Test-Path $implib)) {
+    $found = Get-ChildItem $build -Recurse -File |
+      Where-Object { $_.Name -in 'postgres.lib', 'postgres.exe.lib' } |
+      Select-Object -First 1
+    if (-not $found) { throw 'the server import library (postgres.lib) was not built' }
+    Copy-Item $found.FullName $implib
+  }
+
   Write-Host "==> pgvector $PgvectorTag"
   $pgvector = Join-Path $Work 'pgvector'
   Invoke-Checked 'clone pgvector' {
