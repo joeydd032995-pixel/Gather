@@ -1148,11 +1148,17 @@ variant. There is no telemetry, no update phone-home, no crash reporting.
   daemon `print-api-token` + the app's `get_api_token`), entity resolution (✅ shipped, §6.4 —
   aliases and reviewed merges, so the graph keeps one node per real-world thing).
   **Go** when ≥70% of sampled units are judged usable and graph queries stay <150 ms at personal
-  scale. The latency half is now measurable and measured — see §9.1. The quality half needs a
-  human pass over `scripts/unit-quality-sample.sh sample`; the harness supplies the sampling and
-  arithmetic, not the judgment, so that number stays **unmeasured until someone reviews a sheet**.
-- **Phase 2 — hardening**: gRPC server (✅ shipped: all four services on `127.0.0.1:7602`,
-  shared cores with REST), server-side query embeddings for semantic search (✅ shipped,
+  scale. The latency half is now measurable and measured — see §9.1. The quality half is now
+  measured two ways: a deterministic, offline **golden-corpus eval** (`daemon/tests/
+  extraction_quality.rs` against `tests/fixtures/extraction_golden.json`) scores the rule-based
+  extractor's precision — the automatable analogue of "usable %" — and gates it at ≥70% in CI;
+  the current baseline is **83.3% precision, 83.3% recall** on that corpus. That is a proxy on a
+  fixed corpus, not the real-data verdict: the complementary human check still runs over your own
+  ingested data with `scripts/unit-quality-sample.sh sample` (the harness supplies the sampling and
+  arithmetic, not the judgment). So the gate is no longer perpetually **unmeasured** — it is
+  CI-enforced on the corpus and human-confirmable on real data.
+- **Phase 2 — hardening**: gRPC server (✅ shipped: all five services — Ingest, Query,
+  Contradiction, Entity, Export — on `127.0.0.1:7602`, shared cores with REST), server-side query embeddings for semantic search (✅ shipped,
   Ollama opt-in), LLM-assisted extraction (✅ shipped, §5.3), scheduled encrypted export
   (✅ shipped: `scripts/gather-backup.{sh,ps1}` + per-OS scheduler installers — see §11),
   restore drills (✅ shipped: Tier-1 CI drill `scripts/ci-restore-drill.sh`; Tier-2 user

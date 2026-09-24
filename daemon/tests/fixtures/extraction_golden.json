@@ -1,0 +1,108 @@
+{
+  "_doc": [
+    "Golden-corpus evaluation set for the always-on, offline rule-based extractor",
+    "(daemon/src/extract/rules.rs). Each case pairs an input chunk with the atomic",
+    "units a human judges USABLE for that text. The eval (tests/extraction_quality.rs)",
+    "runs extract_units() over every input and scores:",
+    "  precision = usable_produced / produced   (the automatable analogue of the",
+    "              write-up's Phase-1 '>=70% of sampled units judged usable' gate)",
+    "  recall    = matched_expected / expected  (coverage; low by design, since the",
+    "              rules are high-precision/low-recall and Ollama supplements them)",
+    "The gate asserts precision only. Inputs deliberately include noise (should",
+    "produce nothing), adversarial over-matches (produce an UNUSABLE unit -> lowers",
+    "precision), and facts the rules cannot catch (lower recall). Statements are the",
+    "full sentence as the extractor renders it (tidied, trailing . ! ? stripped).",
+    "A unit matches a label on (kind, statement, subject): subject is part of the",
+    "key because persistence resolves it into subject_entity_id and hangs graph",
+    "edges off it. Matching normalizes case/whitespace so wording just has to agree."
+  ],
+  "threshold_precision": 0.70,
+  "cases": [
+    {
+      "name": "decision-clean",
+      "input": "We decided on Hetzner CX22 for the backup target.",
+      "expected": [
+        { "kind": "decision", "statement": "We decided on Hetzner CX22 for the backup target", "subject": "Me" }
+      ]
+    },
+    {
+      "name": "first-person-fact-and-preference",
+      "input": "I use PostgreSQL for the knowledge store. I prefer dark mode in every editor.",
+      "expected": [
+        { "kind": "fact", "statement": "I use PostgreSQL for the knowledge store", "subject": "Me" },
+        { "kind": "preference", "statement": "I prefer dark mode in every editor", "subject": "Me" }
+      ]
+    },
+    {
+      "name": "numeric-claim",
+      "input": "My Hetzner CX22 costs €5.25 per month.",
+      "expected": [
+        { "kind": "claim", "statement": "My Hetzner CX22 costs €5.25 per month", "subject": "Hetzner CX22" }
+      ]
+    },
+    {
+      "name": "temporal-event",
+      "input": "On 2026-04-01 I migrated the database to pgvector.",
+      "expected": [
+        { "kind": "event", "statement": "On 2026-04-01 I migrated the database to pgvector", "subject": null }
+      ]
+    },
+    {
+      "name": "definition",
+      "input": "pgvector means Postgres with vector similarity search.",
+      "expected": [
+        { "kind": "fact", "statement": "pgvector means Postgres with vector similarity search", "subject": "pgvector" }
+      ]
+    },
+    {
+      "name": "negated-fact",
+      "input": "I no longer use MySQL for anything.",
+      "expected": [
+        { "kind": "fact", "statement": "I no longer use MySQL for anything", "subject": "Me" }
+      ]
+    },
+    {
+      "name": "noise-greetings-and-questions",
+      "input": "Hey, how are you doing today? Can you help me with something? Thanks so much!",
+      "expected": []
+    },
+    {
+      "name": "pronoun-numeric-correctly-skipped",
+      "input": "It costs $5 anyway.",
+      "expected": []
+    },
+    {
+      "name": "adversarial-vacuous-first-person",
+      "input": "I have no idea what to do next.",
+      "expected": []
+    },
+    {
+      "name": "adversarial-vacuous-decision",
+      "input": "We decided to think about it later.",
+      "expected": []
+    },
+    {
+      "name": "recall-miss-implicit-fact",
+      "input": "My favorite database is Postgres because of pgvector.",
+      "expected": [
+        { "kind": "fact", "statement": "My favorite database is Postgres because of pgvector", "subject": "Me" }
+      ]
+    },
+    {
+      "name": "recall-miss-third-person-fact",
+      "input": "The daemon binds to loopback and refuses outbound traffic.",
+      "expected": [
+        { "kind": "fact", "statement": "The daemon binds to loopback and refuses outbound traffic", "subject": "daemon" }
+      ]
+    },
+    {
+      "name": "mixed-paragraph",
+      "input": "I work at Anthropic on developer tools. The weather is nice. On 2025-12-01 we launched the beta. Our latency budget is 150 ms.",
+      "expected": [
+        { "kind": "fact", "statement": "I work at Anthropic on developer tools", "subject": "Me" },
+        { "kind": "event", "statement": "On 2025-12-01 we launched the beta", "subject": null },
+        { "kind": "claim", "statement": "Our latency budget is 150 ms", "subject": "latency budget" }
+      ]
+    }
+  ]
+}
