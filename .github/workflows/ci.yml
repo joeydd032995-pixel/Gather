@@ -298,6 +298,14 @@ jobs:
       - name: build daemon sidecar
         shell: bash
         run: |
+          # After the MSVC developer shell step, rustc calls `link.exe` from
+          # PATH, where Git Bash's /usr/bin/link (coreutils) comes first. Pin
+          # MSVC's linker for this and the later tauri build.
+          if [ -n "${VCToolsInstallDir:-}" ]; then
+            linker="${VCToolsInstallDir}bin\\Hostx64\\x64\\link.exe"
+            export CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER="$linker"
+            echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$linker" >> "$GITHUB_ENV"
+          fi
           cargo build --release --locked --manifest-path daemon/Cargo.toml
           triple=$(rustc -vV | sed -n 's/^host: //p')
           ext=""; [ "${{ matrix.platform }}" = windows ] && ext=".exe"
