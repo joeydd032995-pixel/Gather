@@ -1156,9 +1156,13 @@ variant. There is no telemetry, no update phone-home, no crash reporting.
   fixed corpus, not the real-data verdict: the complementary human check still runs over your own
   ingested data with `scripts/unit-quality-sample.sh sample` (the harness supplies the sampling and
   arithmetic, not the judgment). So the gate is no longer perpetually **unmeasured** — it is
-  CI-enforced on the corpus and human-confirmable on real data.
-- **Phase 2 — hardening**: gRPC server (✅ shipped: all five services — Ingest, Query,
-  Contradiction, Entity, Export — on `127.0.0.1:7602`, shared cores with REST), server-side query embeddings for semantic search (✅ shipped,
+  CI-enforced on the corpus and confirmable on real data. The autonomous pipeline (see
+  `docs/AUTONOMOUS-PIPELINE.md`) has since made the real-data half continuous: the rare
+  corrections a user makes anyway feed `gather_realdata_precision`, so the sampler becomes an
+  optional one-off audit rather than a batch-labelling chore.
+- **Phase 2 — hardening**: gRPC server (✅ shipped: all nine services — Ingest, Query,
+  Contradiction, Entity, Export, Feedback, Cluster, Tuning, Photo — on `127.0.0.1:7602`, shared
+  cores with REST), server-side query embeddings for semantic search (✅ shipped,
   Ollama opt-in), LLM-assisted extraction (✅ shipped, §5.3), scheduled encrypted export
   (✅ shipped: `scripts/gather-backup.{sh,ps1}` + per-OS scheduler installers — see §11),
   restore drills (✅ shipped: Tier-1 CI drill `scripts/ci-restore-drill.sh`; Tier-2 user

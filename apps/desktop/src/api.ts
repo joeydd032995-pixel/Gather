@@ -219,3 +219,167 @@ export async function uploadFiles(files: File[]): Promise<FilesResponse> {
   }
   return res.json();
 }
+
+// --- Autonomous pipeline: review tray, feedback, tuning --------------------
+
+async function postJson<T>(path: string, body: unknown = {}): Promise<T> {
+  const res = await fetch(`${DAEMON_URL}/api/v1${path}`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return jsonOrThrow<T>(res);
+}
+
+async function getJson<T>(path: string): Promise<T> {
+  const res = await fetch(`${DAEMON_URL}/api/v1${path}`, { headers: authHeaders() });
+  return jsonOrThrow<T>(res);
+}
+
+export type ReviewReason = "low-confidence" | "merge-band" | "oversized-component" | string;
+
+/** One item parked in the optional review tray, most informative first. */
+export interface ReviewItem {
+  id: string;
+  target_kind: "unit" | "entity" | "merge" | "cluster";
+  target_id: string;
+  reason: ReviewReason;
+  info_gain: number;
+  signals: Record<string, unknown>;
+  /** Unit statement, for unit items. */
+  statement: string | null;
+  /** Entity names, for held merge pairs. */
+  a_name: string | null;
+  b_name: string | null;
+  created_at: string;
+}
+
+export async function listReview(limit = 100): Promise<ReviewItem[]> {
+  const body = await getJson<{ items: ReviewItem[] }>(`/review?limit=${limit}`);
+  return body.items;
+}
+
+/** Agree: keep a held unit, or perform a held merge. Records a positive label. */
+export function acceptReview(id: string, note?: string): Promise<{ action: string }> {
+  return postJson(`/review/${id}/accept`, { note: note || null });
+}
+
+/** Disagree: retract a held unit, or dismiss a held merge pair. Negative label. */
+export function rejectReview(id: string, note?: string): Promise<{ action: string }> {
+  return postJson(`/review/${id}/reject`, { note: note || null });
+}
+
+/** Close a tray item without acting on it (no label). */
+export function dismissReview(id: string): Promise<unknown> {
+  return postJson(`/review/${id}/resolve`);
+}
+
+/** Undo a reject: reactivates a retracted unit. */
+export function restoreUnit(id: string): Promise<unknown> {
+  return postJson(`/units/${id}/restore`);
+}
+
+export async function editUnit(id: string, statement: string, note?: string): Promise<void> {
+  const res = await fetch(`${DAEMON_URL}/api/v1/units/${id}`, {
+    method: "PATCH",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ statement, note: note || null }),
+  });
+  await jsonOrThrow(res);
+}
+
+export type TuningKey = "admit.hold_below" | "merge.auto_single";
+
+export interface TunedThreshold {
+  key: TuningKey;
+  value: number;
+  default: number;
+  tuned: boolean;
+  bounds: { min: number; max: number };
+}
+
+export interface TuningChange {
+  key: TuningKey;
+  old_value: number | null;
+  new_value: number | null;
+  actor: string;
+  reason: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface TuningState {
+  enabled: boolean;
+  target_precision: number;
+  min_samples: number;
+  thresholds: TunedThreshold[];
+  history: TuningChange[];
+}
+
+export function getTuning(): Promise<TuningState> {
+  return getJson("/tuning");
+}
+
+export function resetTuning(key?: TuningKey): Promise<{ reset: string[] }> {
+  return postJson("/tuning/reset", key ? { key } : {});
+}
+
+// --- Clusters and photos ------------------------------------------------------
+
+export type ClusterKind = "topic" | "entity" | "photo_dup" | "album" | "photo_topic";
+
+export interface ClusterSummary {
+  id: string;
+  kind: ClusterKind;
+  label: string;
+  cohesion: number;
+  size: number;
+  representative_id: string | null;
+  updated_at: string;
+}
+
+export interface ClusterMember {
+  member_kind: "unit" | "entity" | "image";
+  member_id: string;
+  sim: number;
+  statement: string | null;
+  /** Entity members: the entity's name. */
+  name: string | null;
+  filename: string | null;
+  taken_at: string | null;
+  caption: string | null;
+}
+
+export interface ClusterDetail extends ClusterSummary {
+  created_at: string;
+  members: ClusterMember[];
+}
+
+/** One page of clusters of a kind, newest first. */
+export async function listClusters(
+  kind: ClusterKind,
+  limit: number,
+  offset: number,
+): Promise<ClusterSummary[]> {
+  const body = await getJson<{ items: ClusterSummary[] }>(
+    `/clusters?kind=${kind}&limit=${limit}&offset=${offset}`,
+  );
+  return body.items;
+}
+
+export function getCluster(id: string): Promise<ClusterDetail> {
+  return getJson(`/clusters/${id}`);
+}
+
+/**
+ * Fetch a thumbnail with the bearer token (an <img src> can't send it) and
+ * return an object URL. The caller must URL.revokeObjectURL it when done.
+ */
+export async function fetchThumbnailUrl(imageId: string): Promise<string> {
+  const res = await fetch(`${DAEMON_URL}/api/v1/images/${imageId}/thumbnail`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    throw new Error(`thumbnail unavailable (${res.status})`);
+  }
+  return URL.createObjectURL(await res.blob());
+}

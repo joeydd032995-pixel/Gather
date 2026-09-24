@@ -22,11 +22,15 @@ use gather_daemon::extract::ollama::OllamaClient;
 use gather_daemon::grpc::{self, pb};
 use gather_daemon::{db, routes, AppState};
 
+use pb::cluster_service_client::ClusterServiceClient;
 use pb::contradiction_service_client::ContradictionServiceClient;
 use pb::entity_service_client::EntityServiceClient;
 use pb::export_service_client::ExportServiceClient;
+use pb::feedback_service_client::FeedbackServiceClient;
 use pb::ingest_service_client::IngestServiceClient;
+use pb::photo_service_client::PhotoServiceClient;
 use pb::query_service_client::QueryServiceClient;
+use pb::tuning_service_client::TuningServiceClient;
 
 async fn test_state(api_token: Option<&str>) -> Option<AppState> {
     let Ok(database_url) = std::env::var("DATABASE_URL") else {
@@ -821,4 +825,158 @@ async fn entity_service_lists_merges_and_adds_aliases() {
         .expect("get loser")
         .into_inner();
     assert_eq!(loser.merged_into_entity_id, winner_id.to_string());
+}
+
+#[tokio::test]
+async fn pipeline_services_mirror_rest() {
+    let Some(state) = test_state(None).await else {
+        return;
+    };
+    let salt = Uuid::new_v4();
+    let unit: Uuid = sqlx::query_scalar(
+        "INSERT INTO atomic_units (kind, statement, statement_hash, confidence, extraction_method) \
+         VALUES ('fact', $1, $2, 0.4, 'rule_based') RETURNING id",
+    )
+    .bind(format!("grpc pipeline fact {salt}"))
+    .bind(format!("grpc-pipeline-{salt}"))
+    .fetch_one(&state.pool)
+    .await
+    .expect("seed unit");
+
+    let url = spawn_grpc(state.clone()).await;
+    let channel = connect(&url).await;
+    let mut feedback = FeedbackServiceClient::new(channel.clone());
+
+    // Reject -> retracted, restore -> active: the same reversible feedback
+    // loop as REST.
+    let rejected = feedback
+        .reject_unit(pb::UnitActionRequest {
+            unit_id: unit.to_string(),
+            note: String::new(),
+        })
+        .await
+        .expect("reject")
+        .into_inner();
+    assert_eq!(rejected.status, "retracted");
+    let restored = feedback
+        .restore_unit(pb::UnitActionRequest {
+            unit_id: unit.to_string(),
+            note: "false alarm".to_string(),
+        })
+        .await
+        .expect("restore")
+        .into_inner();
+    assert_eq!(restored.status, "active");
+    let edited = feedback
+        .edit_unit(pb::EditUnitRequest {
+            unit_id: unit.to_string(),
+            statement: format!("  grpc corrected fact {salt}  "),
+            note: String::new(),
+        })
+        .await
+        .expect("edit")
+        .into_inner();
+    assert_eq!(edited.statement, format!("grpc corrected fact {salt}"));
+    // The edit reports the unit's real status, not an assumed one.
+    assert_eq!(edited.status, "active");
+
+    // Park the unit in the tray, see it listed, accept it.
+    let review_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO review_queue (target_kind, target_id, reason, signals, info_gain) \
+         VALUES ('unit', $1, 'low-confidence', '{\"confidence\": 0.4}', 1000) RETURNING id",
+    )
+    .bind(unit)
+    .fetch_one(&state.pool)
+    .await
+    .expect("park unit");
+    let tray = feedback
+        .list_review(pb::ListReviewRequest { limit: 500 })
+        .await
+        .expect("list review")
+        .into_inner();
+    let entry = tray
+        .items
+        .iter()
+        .find(|e| e.id == review_id.to_string())
+        .expect("parked item listed");
+    assert_eq!(entry.statement, format!("grpc corrected fact {salt}"));
+    assert!(entry.signals.is_some());
+    let accepted = feedback
+        .accept_review(pb::ReviewActionRequest {
+            id: review_id.to_string(),
+            note: String::new(),
+        })
+        .await
+        .expect("accept")
+        .into_inner();
+    assert_eq!(accepted.action, "confirmed");
+    assert_eq!(accepted.unit_id, unit.to_string());
+
+    // Clusters: a topic with the unit as member.
+    let cluster: Uuid = sqlx::query_scalar(
+        "INSERT INTO clusters (kind, label, cohesion, size) VALUES ('topic', $1, 0.9, 1) \
+         RETURNING id",
+    )
+    .bind(format!("grpc-topic-{salt}"))
+    .fetch_one(&state.pool)
+    .await
+    .expect("seed cluster");
+    sqlx::query(
+        "INSERT INTO cluster_members (cluster_id, member_kind, member_id, sim) \
+         VALUES ($1, 'unit', $2, 0.9)",
+    )
+    .bind(cluster)
+    .bind(unit)
+    .execute(&state.pool)
+    .await
+    .expect("seed member");
+    let mut clusters = ClusterServiceClient::new(channel.clone());
+    let listed = clusters
+        .list_clusters(pb::ListClustersRequest {
+            kind: "topic".to_string(),
+            limit: 500,
+            offset: 0,
+        })
+        .await
+        .expect("list clusters")
+        .into_inner();
+    assert!(listed.items.iter().any(|c| c.id == cluster.to_string()));
+    let detail = clusters
+        .get_cluster(pb::GetClusterRequest {
+            id: cluster.to_string(),
+        })
+        .await
+        .expect("get cluster")
+        .into_inner();
+    assert_eq!(detail.members.len(), 1);
+    assert_eq!(
+        detail.members[0].statement,
+        format!("grpc corrected fact {salt}")
+    );
+
+    // Tuning: the two tunable thresholds; unknown keys are rejected.
+    let mut tuning = TuningServiceClient::new(channel.clone());
+    let current = tuning
+        .get_tuning(pb::GetTuningRequest {})
+        .await
+        .expect("get tuning")
+        .into_inner();
+    assert_eq!(current.thresholds.len(), 2);
+    let err = tuning
+        .reset_tuning(pb::ResetTuningRequest {
+            key: "no.such.key".to_string(),
+        })
+        .await
+        .expect_err("unknown key");
+    assert_eq!(err.code(), Code::InvalidArgument);
+
+    // Photos: unknown image -> NotFound.
+    let mut photos = PhotoServiceClient::new(channel);
+    let err = photos
+        .get_thumbnail(pb::GetThumbnailRequest {
+            image_id: Uuid::new_v4().to_string(),
+        })
+        .await
+        .expect_err("unknown image");
+    assert_eq!(err.code(), Code::NotFound);
 }

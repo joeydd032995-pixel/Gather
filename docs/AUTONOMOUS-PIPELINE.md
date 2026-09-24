@@ -241,7 +241,19 @@ deleted**. A background worker (`GATHER_PHOTO_*`) runs three steps:
 Browse with `GET /clusters?kind=photo_dup|album|photo_topic` and render previews with
 `GET /images/{id}/thumbnail`.
 
+## Using it day to day
+
+The desktop app surfaces everything above:
+
+- **Review**: the optional tray, most informative first. Keys: `j`/`k` move, `a` accept, `r`
+  reject, `d` dismiss, `e` edit, `u` undo. Rejecting a fact can be undone straight from the toast.
+- **Groups**: topics and merged duplicates.
+- **Photos**: albums, duplicate groups (the sharpest copy is marked *best*) and visual topics.
+- **Tuning**: the thresholds in force, what the tuner learned and why, with per-key reset.
+
+The same operations are available over REST and gRPC (`FeedbackService`, `ClusterService`,
+`TuningService`, `PhotoService`).
+
 ## What's next
 
-- **Desktop review tray** and gRPC parity for the feedback, tuning, cluster and photo endpoints.
 - **Entity unmerge**, so auto-merges become reversible and labelable.

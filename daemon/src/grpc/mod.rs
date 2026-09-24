@@ -14,6 +14,7 @@ pub mod convert;
 pub mod entities;
 pub mod export;
 pub mod ingest;
+pub mod pipeline;
 pub mod query;
 
 /// Generated protobuf/tonic types for `package gather.v1`.
@@ -26,11 +27,15 @@ use tonic::transport::Server;
 use crate::error::ApiError;
 use crate::AppState;
 
+use pb::cluster_service_server::ClusterServiceServer;
 use pb::contradiction_service_server::ContradictionServiceServer;
 use pb::entity_service_server::EntityServiceServer;
 use pb::export_service_server::ExportServiceServer;
+use pb::feedback_service_server::FeedbackServiceServer;
 use pb::ingest_service_server::IngestServiceServer;
+use pb::photo_service_server::PhotoServiceServer;
 use pb::query_service_server::QueryServiceServer;
+use pb::tuning_service_server::TuningServiceServer;
 
 /// Map the shared ApiError onto gRPC status codes.
 pub(crate) fn status_from(error: ApiError) -> tonic::Status {
@@ -93,6 +98,30 @@ pub async fn serve_on(state: AppState, listener: tokio::net::TcpListener) -> any
         ))
         .add_service(EntityServiceServer::with_interceptor(
             entities::EntityApi {
+                state: state.clone(),
+            },
+            interceptor.clone(),
+        ))
+        .add_service(FeedbackServiceServer::with_interceptor(
+            pipeline::FeedbackApi {
+                state: state.clone(),
+            },
+            interceptor.clone(),
+        ))
+        .add_service(ClusterServiceServer::with_interceptor(
+            pipeline::ClusterApi {
+                state: state.clone(),
+            },
+            interceptor.clone(),
+        ))
+        .add_service(TuningServiceServer::with_interceptor(
+            pipeline::TuningApi {
+                state: state.clone(),
+            },
+            interceptor.clone(),
+        ))
+        .add_service(PhotoServiceServer::with_interceptor(
+            pipeline::PhotoApi {
                 state: state.clone(),
             },
             interceptor.clone(),

@@ -449,3 +449,188 @@ message AddAliasRequest {
 message AddAliasResponse {
   bool added = 1;                                  // false when the alias already existed
 }
+
+// ---------------------------------------------------------------------------
+// FeedbackService — mirrors /api/v1/units/… and /api/v1/review/…
+//
+// The feedback loop and the optional review tray (autonomous pipeline). Every
+// RPC calls the same core as its REST route, so labels, reversibility and
+// tray semantics cannot diverge between the two API surfaces.
+// ---------------------------------------------------------------------------
+
+service FeedbackService {
+  rpc RejectUnit(UnitActionRequest) returns (UnitActionResponse);
+  rpc RestoreUnit(UnitActionRequest) returns (UnitActionResponse);
+  rpc ConfirmUnit(UnitActionRequest) returns (UnitActionResponse);
+  rpc EditUnit(EditUnitRequest) returns (UnitActionResponse);
+  rpc ListReview(ListReviewRequest) returns (ListReviewResponse);
+  rpc AcceptReview(ReviewActionRequest) returns (ReviewOutcome);
+  rpc RejectReview(ReviewActionRequest) returns (ReviewOutcome);
+  rpc ResolveReview(ReviewActionRequest) returns (ReviewOutcome);
+}
+
+message UnitActionRequest {
+  string unit_id = 1;
+  string note = 2;
+}
+
+message EditUnitRequest {
+  string unit_id = 1;
+  string statement = 2;
+  string note = 3;
+}
+
+message UnitActionResponse {
+  string unit_id = 1;
+  string status = 2;                               // atomic_units.status after the action
+  string statement = 3;                            // set by EditUnit
+}
+
+message ListReviewRequest {
+  int32 limit = 1;                                 // 0 = 100
+}
+
+message ReviewEntry {
+  string id = 1;                                   // review_queue.id
+  string target_kind = 2;                          // unit | entity | merge | cluster
+  string target_id = 3;
+  string reason = 4;                               // low-confidence | merge-band | oversized-component
+  float info_gain = 5;                             // tray priority, higher first
+  google.protobuf.Struct signals = 6;              // the scores behind the hold
+  string statement = 7;                            // unit items: the statement
+  google.protobuf.Timestamp created_at = 8;
+  string a_name = 9;                               // merge-band items: entity names
+  string b_name = 10;
+}
+
+message ListReviewResponse {
+  repeated ReviewEntry items = 1;
+}
+
+message ReviewActionRequest {
+  string id = 1;                                   // review_queue.id
+  string note = 2;
+}
+
+message ReviewOutcome {
+  string id = 1;
+  string action = 2;                               // confirmed | retracted | merged | dismissed | resolved
+  string unit_id = 3;
+  string winner_id = 4;                            // merged: the surviving entity
+  string loser_id = 5;
+  repeated string pair = 6;                        // dismissed merge pair
+}
+
+// ---------------------------------------------------------------------------
+// ClusterService — mirrors GET /api/v1/clusters…
+// ---------------------------------------------------------------------------
+
+service ClusterService {
+  rpc ListClusters(ListClustersRequest) returns (ListClustersResponse);
+  rpc GetCluster(GetClusterRequest) returns (ClusterDetail);
+}
+
+message ListClustersRequest {
+  string kind = 1;                                 // "" = all; entity | topic | photo_dup | album | photo_topic
+  int32 limit = 2;                                 // 0 = 100
+  int32 offset = 3;                                // for paging
+}
+
+message ClusterSummary {
+  string id = 1;
+  string kind = 2;
+  string label = 3;
+  float cohesion = 4;
+  int32 size = 5;
+  string representative_id = 6;                    // "" when the kind has none
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+message ListClustersResponse {
+  repeated ClusterSummary items = 1;
+}
+
+message GetClusterRequest {
+  string id = 1;
+}
+
+message ClusterMember {
+  string member_kind = 1;                          // entity | unit | image
+  string member_id = 2;
+  float sim = 3;
+  string statement = 4;                            // unit members
+  string filename = 5;                             // image members
+  google.protobuf.Timestamp taken_at = 6;          // image members
+  string caption = 7;                              // image members (opt-in captions)
+  string name = 8;                                 // entity members
+}
+
+message ClusterDetail {
+  ClusterSummary summary = 1;
+  google.protobuf.Timestamp created_at = 2;
+  repeated ClusterMember members = 3;
+}
+
+// ---------------------------------------------------------------------------
+// TuningService — mirrors /api/v1/tuning…
+// ---------------------------------------------------------------------------
+
+service TuningService {
+  rpc GetTuning(GetTuningRequest) returns (TuningState);
+  rpc ResetTuning(ResetTuningRequest) returns (ResetTuningResponse);
+}
+
+message GetTuningRequest {}
+
+message TunedThreshold {
+  string key = 1;                                  // admit.hold_below | merge.auto_single
+  float value = 2;                                 // in force now
+  float default_value = 3;                         // env default
+  bool tuned = 4;                                  // learned from feedback
+  float bound_min = 5;
+  float bound_max = 6;
+}
+
+message TuningChange {
+  string key = 1;
+  optional double old_value = 2;
+  optional double new_value = 3;                   // unset = reset to the env default
+  string actor = 4;                                // auto-tuner | local-user
+  google.protobuf.Struct reason = 5;               // evidence behind the move
+  google.protobuf.Timestamp created_at = 6;
+}
+
+message TuningState {
+  bool enabled = 1;
+  float target_precision = 2;
+  uint32 min_samples = 3;
+  repeated TunedThreshold thresholds = 4;
+  repeated TuningChange history = 5;
+}
+
+message ResetTuningRequest {
+  string key = 1;                                  // "" = all keys
+}
+
+message ResetTuningResponse {
+  repeated string reset = 1;
+}
+
+// ---------------------------------------------------------------------------
+// PhotoService — mirrors GET /api/v1/images/{id}/thumbnail
+//
+// Duplicate groups, albums and visual topics are clusters (ClusterService).
+// ---------------------------------------------------------------------------
+
+service PhotoService {
+  rpc GetThumbnail(GetThumbnailRequest) returns (Thumbnail);
+}
+
+message GetThumbnailRequest {
+  string image_id = 1;
+}
+
+message Thumbnail {
+  bytes data = 1;                                  // JPEG, <= 256 px on the long side
+  string content_type = 2;                         // image/jpeg
+}
