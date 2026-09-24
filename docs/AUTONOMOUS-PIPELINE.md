@@ -17,8 +17,8 @@ questions. Gather inverts this:
 1. **High-confidence work is applied automatically.** Units are admitted, duplicates are
    merged and topics are formed without asking.
 2. **Every automatic action is reversible and audited.** Nothing is destroyed: a retracted
-   unit keeps its row, a merged entity keeps its record with `merged_into_entity_id`, and every
-   decision leaves an audit row.
+   unit keeps its row, a merged entity keeps its record with `merged_into_entity_id` and can be split
+   back out exactly, and every decision leaves an audit row.
 3. **Only the thin, genuinely ambiguous middle is parked**, in an *optional* review tray that
    never blocks anything. Parked items are still live in the brain.
 4. **Your occasional correction is the training signal.** It's recorded, it's reversible, and
@@ -195,9 +195,15 @@ threshold for every lowering. `POST /tuning/reset` returns to the env defaults *
 verdicts given after the reset count toward tuning that key again.
 `GATHER_TUNE_ENABLED=false` freezes the thresholds.
 
-**Known gap:** there is no entity *unmerge* yet, so an auto-merge can't be undone and can't
-produce a negative label. The merge tuner therefore effectively only loosens on accepted tray
-merges, which is why its floor (0.85) is high.
+**Undoing a merge.** Every merge journals exactly what it changed: moved units and edges, the
+edges it had to delete, aliases moved or added, and flattened descendants. `POST
+/entities/{id}/unmerge` (or **Undo merge** in the Groups view) replays that journal in
+reverse and restores the entity as it was. The pair is then dismissed so it is never merged
+again. If the merge was automatic or accepted from the tray, the undo is recorded as a
+negative merge label at the merge's similarity, so wrong auto-merges now push
+`merge.auto_single` *up*, and the merge tuner learns in both directions. Its 0.85 floor stays
+as a safety margin. An undo is refused when it can't be exact: when the surviving entity has
+since been merged elsewhere (undo that first), or for merges made before journaling existed.
 
 ## Tuning by hand
 
@@ -256,4 +262,4 @@ The same operations are available over REST and gRPC (`FeedbackService`, `Cluste
 
 ## What's next
 
-- **Entity unmerge**, so auto-merges become reversible and labelable.
+- **Multi-user support**: separate brains, feedback and thresholds per local user.

@@ -40,8 +40,10 @@ pub struct ClusterMember {
     pub sim: f32,
     /// Unit members: the statement.
     pub statement: Option<String>,
-    /// Entity members: the entity's name.
+    /// Entity members: the entity's name, and the entity it was merged
+    /// into (None for the survivor), so a UI can offer to undo the merge.
     pub name: Option<String>,
+    pub merged_into: Option<Uuid>,
     /// Image members: file name, capture time and caption.
     pub filename: Option<String>,
     pub taken_at: Option<DateTime<Utc>>,
@@ -118,7 +120,7 @@ pub async fn get_cluster_core(pool: &PgPool, id: Uuid) -> Result<ClusterDetail, 
 
     let members = sqlx::query(
         "SELECT m.member_kind, m.member_id, m.sim, u.statement AS unit_statement, \
-                en.name AS entity_name, a.original_filename, i.taken_at, i.caption \
+                en.name AS entity_name, en.merged_into_entity_id, a.original_filename, i.taken_at, i.caption \
          FROM cluster_members m \
          LEFT JOIN atomic_units u ON m.member_kind = 'unit' AND u.id = m.member_id \
          LEFT JOIN entities en ON m.member_kind = 'entity' AND en.id = m.member_id \
@@ -136,6 +138,7 @@ pub async fn get_cluster_core(pool: &PgPool, id: Uuid) -> Result<ClusterDetail, 
         sim: r.get("sim"),
         statement: r.get("unit_statement"),
         name: r.get("entity_name"),
+        merged_into: r.get("merged_into_entity_id"),
         filename: r.get("original_filename"),
         taken_at: r.get("taken_at"),
         caption: r.get("caption"),

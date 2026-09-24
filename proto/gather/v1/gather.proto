@@ -346,6 +346,8 @@ service EntityService {
   rpc MergeEntities(MergeEntitiesRequest) returns (MergeOutcome);
   rpc DismissMergeSuggestion(DismissMergeSuggestionRequest) returns (DismissMergeSuggestionResponse);
   rpc AddAlias(AddAliasRequest) returns (AddAliasResponse);
+  // Undo the merge that folded entity_id away (journaled merges only).
+  rpc UnmergeEntity(UnmergeEntityRequest) returns (UnmergeOutcome);
 }
 
 message EntitySummary {
@@ -448,6 +450,21 @@ message AddAliasRequest {
 
 message AddAliasResponse {
   bool added = 1;                                  // false when the alias already existed
+}
+
+message UnmergeEntityRequest {
+  string entity_id = 1;                            // the merged-away entity to split back out
+  string note = 2;
+  string actor = 3;                                // "" -> local-user
+}
+
+message UnmergeOutcome {
+  string winner_id = 1;                            // the entity it had been merged into
+  string loser_id = 2;                             // the restored entity
+  uint64 units_restored = 3;
+  uint64 relationships_restored = 4;
+  uint64 aliases_restored = 5;
+  uint64 descendants_restored = 6;
 }
 
 // ---------------------------------------------------------------------------
@@ -563,6 +580,7 @@ message ClusterMember {
   google.protobuf.Timestamp taken_at = 6;          // image members
   string caption = 7;                              // image members (opt-in captions)
   string name = 8;                                 // entity members
+  string merged_into = 9;                          // entity members: "" for the survivor
 }
 
 message ClusterDetail {

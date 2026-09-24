@@ -517,6 +517,7 @@ pub async fn accept_review_core(
                         .unwrap_or_else(|| "accepted from review tray".to_string()),
                 ),
                 Some("local-user".to_string()),
+                score,
             )
             .await?;
             record_merge_verdict(&mut tx, id, &item, "confirm", score, note.as_deref()).await?;

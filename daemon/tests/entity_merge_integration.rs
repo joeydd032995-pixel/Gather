@@ -717,3 +717,201 @@ async fn a_merge_waits_for_in_flight_ingestion_rather_than_deadlocking() {
         "a unit written while the merge waited must be repointed with the rest"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Unmerge
+
+async fn subject_of(pool: &sqlx::PgPool, unit: Uuid) -> Option<Uuid> {
+    sqlx::query_scalar("SELECT subject_entity_id FROM atomic_units WHERE id = $1")
+        .bind(unit)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn edge_ends(pool: &sqlx::PgPool, edge: Uuid) -> Option<(Uuid, Uuid)> {
+    sqlx::query_as("SELECT source_entity_id, target_entity_id FROM relationships WHERE id = $1")
+        .bind(edge)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+}
+
+async fn aliases_of(pool: &sqlx::PgPool, entity: Uuid) -> Vec<String> {
+    sqlx::query_scalar("SELECT alias FROM entity_aliases WHERE entity_id = $1 ORDER BY alias")
+        .bind(entity)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn unmerge_restores_everything_the_merge_changed() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let pool = &state.pool;
+    let t = tag();
+    let winner = new_entity(pool, &format!("Acme-{t}")).await;
+    let loser = new_entity(pool, &format!("Acme Corp-{t}")).await;
+    let third = new_entity(pool, &format!("Berlin-{t}")).await;
+    let descendant = new_entity(pool, &format!("ACME Inc-{t}")).await;
+
+    // The loser has an alias, a unit, an outgoing edge, an edge to the winner
+    // (deleted by the merge as a self-loop), an edge duplicating one the
+    // winner already has (deleted as a duplicate), and a descendant.
+    entities::add_alias(pool, loser, &format!("AC-{t}"))
+        .await
+        .unwrap();
+    let unit: Uuid = sqlx::query_scalar(
+        "INSERT INTO atomic_units \
+             (kind, statement, statement_hash, subject_entity_id, extraction_method) \
+         VALUES ('fact', $1, encode(digest($1,'sha256'),'hex'), $2, 'manual') RETURNING id",
+    )
+    .bind(format!("unmerge fact {t}"))
+    .bind(loser)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let outgoing = new_edge(pool, loser, third, "located_in").await;
+    let self_loop = new_edge(pool, loser, winner, "same_as").await;
+    new_edge(pool, winner, third, "competes_with").await;
+    let duplicate = new_edge(pool, loser, third, "competes_with").await;
+    sqlx::query("UPDATE entities SET merged_into_entity_id = $1 WHERE id = $2")
+        .bind(loser)
+        .bind(descendant)
+        .execute(pool)
+        .await
+        .unwrap();
+
+    // An automatic merge (carries its score).
+    let mut tx = pool.begin().await.unwrap();
+    entities::merge_entities_in(
+        &mut tx,
+        winner,
+        loser,
+        None,
+        Some("auto".into()),
+        Some(0.93),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(subject_of(pool, unit).await, Some(winner));
+    assert_eq!(edge_ends(pool, self_loop).await, None, "self-loop dropped");
+    assert_eq!(edge_ends(pool, duplicate).await, None, "duplicate dropped");
+
+    // Undo it.
+    let outcome = entities::unmerge_entity(pool, loser, Some("not the same".into()), None)
+        .await
+        .unwrap();
+    assert_eq!(outcome.winner_id, winner);
+    assert_eq!(outcome.units_restored, 1);
+    assert_eq!(outcome.descendants_restored, 1);
+
+    let merged: Option<Uuid> =
+        sqlx::query_scalar("SELECT merged_into_entity_id FROM entities WHERE id = $1")
+            .bind(loser)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(merged, None, "loser is live again");
+    let desc_head: Option<Uuid> =
+        sqlx::query_scalar("SELECT merged_into_entity_id FROM entities WHERE id = $1")
+            .bind(descendant)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        desc_head,
+        Some(loser),
+        "descendant points at the loser again"
+    );
+    assert_eq!(subject_of(pool, unit).await, Some(loser));
+    assert_eq!(edge_ends(pool, outgoing).await, Some((loser, third)));
+    assert_eq!(edge_ends(pool, self_loop).await, Some((loser, winner)));
+    assert_eq!(edge_ends(pool, duplicate).await, Some((loser, third)));
+    assert_eq!(aliases_of(pool, loser).await, vec![format!("AC-{t}")]);
+    assert!(
+        aliases_of(pool, winner).await.is_empty(),
+        "aliases the merge gave the winner are taken back"
+    );
+
+    // Never suggested (or auto-merged) again, and the tuner got a label.
+    let dismissed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM entity_merge_audit \
+         WHERE winner_entity_id = $1 AND loser_entity_id = $2 AND action = 'dismiss'",
+    )
+    .bind(winner)
+    .bind(loser)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(dismissed, 1);
+    let label: (String, Option<f32>) = sqlx::query_as(
+        "SELECT action, score FROM unit_feedback WHERE target_kind = 'merge' AND target_id = $1",
+    )
+    .bind(gather_daemon::cluster::pair_key(winner, loser))
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(label.0, "reject");
+    assert!((label.1.unwrap() - 0.93).abs() < 1e-6);
+
+    // A second undo has nothing to undo.
+    let again = entities::unmerge_entity(pool, loser, None, None).await;
+    assert!(matches!(
+        again,
+        Err(gather_daemon::error::ApiError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn unmerge_refuses_when_it_cannot_be_exact() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let pool = &state.pool;
+    let t = tag();
+
+    // Never merged.
+    let lone = new_entity(pool, &format!("Lone-{t}")).await;
+    assert!(matches!(
+        entities::unmerge_entity(pool, lone, None, None).await,
+        Err(gather_daemon::error::ApiError::NotFound(_))
+    ));
+
+    // The winner was itself merged away later: undo that first.
+    let a = new_entity(pool, &format!("A-{t}")).await;
+    let b = new_entity(pool, &format!("B-{t}")).await;
+    let c = new_entity(pool, &format!("C-{t}")).await;
+    entities::merge_entities(pool, b, a, None, None)
+        .await
+        .unwrap();
+    entities::merge_entities(pool, c, b, None, None)
+        .await
+        .unwrap();
+    assert!(matches!(
+        entities::unmerge_entity(pool, a, None, None).await,
+        Err(gather_daemon::error::ApiError::BadRequest(_))
+    ));
+    // Undoing in reverse order works and restores the chain.
+    entities::unmerge_entity(pool, b, None, None).await.unwrap();
+    entities::unmerge_entity(pool, a, None, None).await.unwrap();
+
+    // A merge made before journaling can't be reversed automatically.
+    let old_w = new_entity(pool, &format!("OldW-{t}")).await;
+    let old_l = new_entity(pool, &format!("OldL-{t}")).await;
+    entities::merge_entities(pool, old_w, old_l, None, None)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE entity_merge_audit SET undo = NULL WHERE loser_entity_id = $1")
+        .bind(old_l)
+        .execute(pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        entities::unmerge_entity(pool, old_l, None, None).await,
+        Err(gather_daemon::error::ApiError::BadRequest(_))
+    ));
+}

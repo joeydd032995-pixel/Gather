@@ -51,7 +51,7 @@ pub async fn merge_entities(
     actor: Option<String>,
 ) -> Result<MergeOutcome, ApiError> {
     let mut tx = pool.begin().await?;
-    let outcome = merge_entities_in(&mut tx, winner_id, loser_id, note, actor).await?;
+    let outcome = merge_entities_in(&mut tx, winner_id, loser_id, note, actor, None).await?;
     tx.commit().await?;
     metrics::counter!("gather_entity_merges_total").increment(1);
     Ok(outcome)
@@ -59,13 +59,18 @@ pub async fn merge_entities(
 
 /// [`merge_entities`] inside a caller's transaction, so a merge can commit
 /// atomically with other writes (e.g. the review tray's tuning label). The
-/// caller commits.
+/// caller commits. `score` is the similarity that justified the merge (None
+/// for a manual merge); it is kept so undoing the merge can teach the tuner.
+///
+/// Every change is journaled in the audit row's `undo` column, which is what
+/// makes [`unmerge_entity_in`] exact.
 pub async fn merge_entities_in(
     tx: &mut Transaction<'_, Postgres>,
     winner_id: Uuid,
     loser_id: Uuid,
     note: Option<String>,
     actor: Option<String>,
+    score: Option<f32>,
 ) -> Result<MergeOutcome, ApiError> {
     if winner_id == loser_id {
         return Err(ApiError::BadRequest(
@@ -124,7 +129,12 @@ pub async fn merge_entities_in(
     // 1. The loser's name becomes an alias of the winner — this is what makes
     //    a later re-sighting of that name resolve to the winner instead of
     //    creating a fresh node. Its existing aliases come along too.
-    let aliases_added = sqlx::query(
+    let loser_aliases: Vec<String> =
+        sqlx::query_scalar("SELECT alias FROM entity_aliases WHERE entity_id = $1")
+            .bind(loser_id)
+            .fetch_all(&mut **tx)
+            .await?;
+    let aliases_added_to_winner: Vec<String> = sqlx::query_scalar(
         r#"
         INSERT INTO entity_aliases (entity_id, alias)
         SELECT $1, alias FROM (
@@ -133,14 +143,15 @@ pub async fn merge_entities_in(
             SELECT a.alias FROM entity_aliases a WHERE a.entity_id = $2
         ) src
         ON CONFLICT DO NOTHING
+        RETURNING alias
         "#,
     )
     .bind(winner_id)
     .bind(loser_id)
     .bind(&loser_name)
-    .execute(&mut **tx)
-    .await?
-    .rows_affected();
+    .fetch_all(&mut **tx)
+    .await?;
+    let aliases_added = aliases_added_to_winner.len() as u64;
 
     // The loser's own alias rows are now redundant; ON DELETE CASCADE would
     // only fire on a hard delete, and the merge is a soft one.
@@ -157,15 +168,15 @@ pub async fn merge_entities_in(
     // picks up units whose cursor is NULL (0003), so without this reset the
     // merge would repoint the rows but never surface the conflicts that the
     // split entity was suppressing — the whole point of resolving entities.
-    let units_repointed = sqlx::query(
+    let moved_units: Vec<Uuid> = sqlx::query_scalar(
         "UPDATE atomic_units SET subject_entity_id = $1, contradiction_scanned_at = NULL \
-         WHERE subject_entity_id = $2",
+         WHERE subject_entity_id = $2 RETURNING id",
     )
     .bind(winner_id)
     .bind(loser_id)
-    .execute(&mut **tx)
-    .await?
-    .rows_affected();
+    .fetch_all(&mut **tx)
+    .await?;
+    let units_repointed = moved_units.len() as u64;
 
     // The winner's own units need re-pairing too: a unit is scanned once, so
     // those already stamped would otherwise never see the newly-arrived ones.
@@ -181,23 +192,25 @@ pub async fn merge_entities_in(
 
     // 3a. An edge directly between the two entities becomes a self-loop once
     //     repointed, which `relationships_no_self_loop` rejects. Drop those.
-    let self_loops = sqlx::query(
+    // Deleted edges are journaled whole so an undo can put them back.
+    let mut deleted_edges: Vec<serde_json::Value> = sqlx::query_scalar(
         r#"
-        DELETE FROM relationships
+        DELETE FROM relationships r
         WHERE (source_entity_id = $1 AND target_entity_id = $2)
            OR (source_entity_id = $2 AND target_entity_id = $1)
+        RETURNING to_jsonb(r)
         "#,
     )
     .bind(winner_id)
     .bind(loser_id)
-    .execute(&mut **tx)
-    .await?
-    .rows_affected();
+    .fetch_all(&mut **tx)
+    .await?;
+    let self_loops = deleted_edges.len() as u64;
 
     // 3b. Repointing can collide with an edge the winner already has, which
     //     `relationships_edge_uq` rejects. Drop the loser's duplicate rather
     //     than letting the whole transaction abort.
-    let duplicates = sqlx::query(
+    let duplicate_edges: Vec<serde_json::Value> = sqlx::query_scalar(
         r#"
         DELETE FROM relationships loser_edge
         WHERE (loser_edge.source_entity_id = $2 OR loser_edge.target_entity_id = $2)
@@ -214,29 +227,33 @@ pub async fn merge_entities_in(
                   = CASE WHEN loser_edge.target_entity_id = $2 THEN $1
                          ELSE loser_edge.target_entity_id END
           )
+        RETURNING to_jsonb(loser_edge)
         "#,
     )
     .bind(winner_id)
     .bind(loser_id)
-    .execute(&mut **tx)
-    .await?
-    .rows_affected();
+    .fetch_all(&mut **tx)
+    .await?;
+    let duplicates = duplicate_edges.len() as u64;
+    deleted_edges.extend(duplicate_edges);
 
     // 3c. Whatever survives can now be repointed safely.
-    let sources =
-        sqlx::query("UPDATE relationships SET source_entity_id = $1 WHERE source_entity_id = $2")
-            .bind(winner_id)
-            .bind(loser_id)
-            .execute(&mut **tx)
-            .await?
-            .rows_affected();
-    let targets =
-        sqlx::query("UPDATE relationships SET target_entity_id = $1 WHERE target_entity_id = $2")
-            .bind(winner_id)
-            .bind(loser_id)
-            .execute(&mut **tx)
-            .await?
-            .rows_affected();
+    let source_edges: Vec<Uuid> = sqlx::query_scalar(
+        "UPDATE relationships SET source_entity_id = $1 WHERE source_entity_id = $2 RETURNING id",
+    )
+    .bind(winner_id)
+    .bind(loser_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let target_edges: Vec<Uuid> = sqlx::query_scalar(
+        "UPDATE relationships SET target_entity_id = $1 WHERE target_entity_id = $2 RETURNING id",
+    )
+    .bind(winner_id)
+    .bind(loser_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let sources = source_edges.len() as u64;
+    let targets = target_edges.len() as u64;
 
     // 4. Soft-delete the loser. This also frees its name under the partial
     //    unique index entities_name_kind_uq, which only covers live rows.
@@ -252,24 +269,38 @@ pub async fn merge_entities_in(
     //     others is a legal loser, so C→B followed by B→A would leave C→B→A.
     //     Keeping depth at exactly one means resolve_head is always one hop
     //     and never lands on an intermediate whose data has moved on.
-    let descendants_flattened = sqlx::query(
-        "UPDATE entities SET merged_into_entity_id = $1 WHERE merged_into_entity_id = $2",
+    let descendants: Vec<Uuid> = sqlx::query_scalar(
+        "UPDATE entities SET merged_into_entity_id = $1 WHERE merged_into_entity_id = $2 \
+         RETURNING id",
     )
     .bind(winner_id)
     .bind(loser_id)
-    .execute(&mut **tx)
-    .await?
-    .rows_affected();
+    .fetch_all(&mut **tx)
+    .await?;
+    let descendants_flattened = descendants.len() as u64;
 
     // 5. Audit trail, same intent as contradiction_audit.
+    //    The journal records exactly what moved, so unmerge can reverse it.
+    let journal = MergeJournal {
+        units: moved_units,
+        source_edges,
+        target_edges,
+        deleted_edges,
+        aliases_added_to_winner,
+        loser_aliases,
+        descendants,
+    };
     sqlx::query(
-        "INSERT INTO entity_merge_audit (winner_entity_id, loser_entity_id, action, actor, note) \
-         VALUES ($1, $2, 'merge', $3, $4)",
+        "INSERT INTO entity_merge_audit \
+           (winner_entity_id, loser_entity_id, action, actor, note, undo, score) \
+         VALUES ($1, $2, 'merge', $3, $4, $5, $6)",
     )
     .bind(winner_id)
     .bind(loser_id)
     .bind(&actor)
     .bind(&note)
+    .bind(serde_json::to_value(&journal).map_err(anyhow::Error::from)?)
+    .bind(score)
     .execute(&mut **tx)
     .await?;
 
@@ -284,6 +315,277 @@ pub async fn merge_entities_in(
         relationships_repointed: sources + targets,
         relationships_dropped: self_loops + duplicates,
         descendants_flattened,
+    })
+}
+
+/// Everything a merge changed, stored with its audit row so the merge can be
+/// reversed exactly.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct MergeJournal {
+    /// Units whose subject moved from the loser to the winner.
+    units: Vec<Uuid>,
+    /// Edges repointed on their source / target side.
+    source_edges: Vec<Uuid>,
+    target_edges: Vec<Uuid>,
+    /// Edges deleted (self-loops and duplicates), as whole rows.
+    deleted_edges: Vec<serde_json::Value>,
+    /// Aliases the merge added to the winner (the loser's name among them).
+    aliases_added_to_winner: Vec<String>,
+    /// The loser's own aliases, deleted from it by the merge.
+    loser_aliases: Vec<String>,
+    /// Entities previously merged into the loser, flattened onto the winner.
+    descendants: Vec<Uuid>,
+}
+
+/// What an unmerge restored.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UnmergeOutcome {
+    pub winner_id: Uuid,
+    pub loser_id: Uuid,
+    pub units_restored: u64,
+    pub relationships_restored: u64,
+    pub aliases_restored: u64,
+    pub descendants_restored: u64,
+}
+
+/// Undo the merge that folded `loser_id` away. See [`unmerge_entity_in`].
+pub async fn unmerge_entity(
+    pool: &PgPool,
+    loser_id: Uuid,
+    note: Option<String>,
+    actor: Option<String>,
+) -> Result<UnmergeOutcome, ApiError> {
+    let mut tx = pool.begin().await?;
+    let outcome = unmerge_entity_in(&mut tx, loser_id, note, actor).await?;
+    tx.commit().await?;
+    metrics::counter!("gather_entity_unmerges_total").increment(1);
+    Ok(outcome)
+}
+
+/// Reverse the most recent live merge of `loser_id` from its journal: the
+/// entity comes back with its name, aliases, units, edges and descendants.
+///
+/// The pair is then dismissed so the clustering worker never re-merges it,
+/// and — when the merge carried a similarity score — the undo is recorded as
+/// a negative merge label, which is what lets the tuner raise the auto-merge
+/// bar after wrong merges. Refused when the winner has itself been merged
+/// away since (undo that merge first), or for merges made before journaling.
+pub async fn unmerge_entity_in(
+    tx: &mut Transaction<'_, Postgres>,
+    loser_id: Uuid,
+    note: Option<String>,
+    actor: Option<String>,
+) -> Result<UnmergeOutcome, ApiError> {
+    let actor = actor.unwrap_or_else(|| "local-user".to_string());
+    let merge = sqlx::query(
+        "SELECT id, winner_entity_id, undo, score FROM entity_merge_audit \
+         WHERE loser_entity_id = $1 AND action = 'merge' AND undone_at IS NULL \
+         ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
+    )
+    .bind(loser_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("no reversible merge for entity {loser_id}")))?;
+    let merge_id: Uuid = merge.get("id");
+    let winner_id: Uuid = merge.get("winner_entity_id");
+    let score: Option<f32> = merge.get("score");
+    let journal: MergeJournal = match merge.get::<Option<serde_json::Value>, _>("undo") {
+        Some(v) => serde_json::from_value(v).map_err(anyhow::Error::from)?,
+        None => {
+            return Err(ApiError::BadRequest(format!(
+                "entity {loser_id} was merged before merges were journaled; it cannot be \
+                 split automatically"
+            )))
+        }
+    };
+
+    // Lock both rows (stable order, like merge) and check the merge is still
+    // the live state: the loser points at this winner, the winner is live.
+    let (first, second) = if winner_id < loser_id {
+        (winner_id, loser_id)
+    } else {
+        (loser_id, winner_id)
+    };
+    let rows = sqlx::query(
+        "SELECT id, name, kind::text AS kind, merged_into_entity_id FROM entities \
+         WHERE id IN ($1, $2) ORDER BY id FOR UPDATE",
+    )
+    .bind(first)
+    .bind(second)
+    .fetch_all(&mut **tx)
+    .await?;
+    let row = |id: Uuid| {
+        rows.iter()
+            .find(|r| r.get::<Uuid, _>("id") == id)
+            .ok_or_else(|| ApiError::NotFound(format!("entity {id}")))
+    };
+    let winner = row(winner_id)?;
+    let loser = row(loser_id)?;
+    if let Some(head) = winner.get::<Option<Uuid>, _>("merged_into_entity_id") {
+        return Err(ApiError::BadRequest(format!(
+            "entity {winner_id} has since been merged into {head}; undo that merge first"
+        )));
+    }
+    if loser.get::<Option<Uuid>, _>("merged_into_entity_id") != Some(winner_id) {
+        return Err(ApiError::BadRequest(format!(
+            "entity {loser_id} is no longer merged into {winner_id}"
+        )));
+    }
+    let loser_name: String = loser.get("name");
+    let loser_kind: String = loser.get("kind");
+    // The loser's name must still be free among live entities of its kind
+    // (entities_name_kind_uq), or bringing it back would collide.
+    let clash: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM entities WHERE lower(name) = lower($1) AND kind::text = $2 \
+         AND merged_into_entity_id IS NULL AND id <> $3 LIMIT 1",
+    )
+    .bind(&loser_name)
+    .bind(&loser_kind)
+    .bind(loser_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(other) = clash {
+        return Err(ApiError::BadRequest(format!(
+            "another live entity ({other}) now has the name '{loser_name}'; merge or rename it first"
+        )));
+    }
+
+    // 1. Bring the loser (and whatever had been merged into it) back.
+    sqlx::query("UPDATE entities SET merged_into_entity_id = NULL WHERE id = $1")
+        .bind(loser_id)
+        .execute(&mut **tx)
+        .await?;
+    let descendants_restored = sqlx::query(
+        "UPDATE entities SET merged_into_entity_id = $2 \
+         WHERE id = ANY($1) AND merged_into_entity_id = $3",
+    )
+    .bind(&journal.descendants)
+    .bind(loser_id)
+    .bind(winner_id)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+
+    // 2. Aliases: take back what the merge gave the winner, return the loser's own.
+    sqlx::query("DELETE FROM entity_aliases WHERE entity_id = $1 AND alias = ANY($2)")
+        .bind(winner_id)
+        .bind(&journal.aliases_added_to_winner)
+        .execute(&mut **tx)
+        .await?;
+    let aliases_restored = sqlx::query(
+        "INSERT INTO entity_aliases (entity_id, alias) SELECT $1, a FROM UNNEST($2::text[]) a \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(loser_id)
+    .bind(&journal.loser_aliases)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+
+    // 3. Units go back to describing the loser, and are rescanned apart.
+    let units_restored = sqlx::query(
+        "UPDATE atomic_units SET subject_entity_id = $2, contradiction_scanned_at = NULL \
+         WHERE id = ANY($1) AND subject_entity_id = $3",
+    )
+    .bind(&journal.units)
+    .bind(loser_id)
+    .bind(winner_id)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+
+    // 4. Edges: repoint the moved ones back, re-insert the deleted ones.
+    let sources = sqlx::query(
+        "UPDATE relationships SET source_entity_id = $2 \
+         WHERE id = ANY($1) AND source_entity_id = $3",
+    )
+    .bind(&journal.source_edges)
+    .bind(loser_id)
+    .bind(winner_id)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    let targets = sqlx::query(
+        "UPDATE relationships SET target_entity_id = $2 \
+         WHERE id = ANY($1) AND target_entity_id = $3",
+    )
+    .bind(&journal.target_edges)
+    .bind(loser_id)
+    .bind(winner_id)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    let reinserted = sqlx::query(
+        "INSERT INTO relationships \
+         SELECT * FROM jsonb_populate_recordset(NULL::relationships, $1::jsonb) \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(serde_json::Value::Array(journal.deleted_edges))
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+
+    // 5. The loser leaves any auto-merge group it was counted in.
+    let groups: Vec<Uuid> = sqlx::query_scalar(
+        "DELETE FROM cluster_members WHERE member_kind = 'entity' AND member_id = $1 \
+         RETURNING cluster_id",
+    )
+    .bind(loser_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    if !groups.is_empty() {
+        sqlx::query(
+            "UPDATE clusters c SET size = \
+               (SELECT count(*) FROM cluster_members m WHERE m.cluster_id = c.id), \
+               updated_at = now() WHERE c.id = ANY($1)",
+        )
+        .bind(&groups)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query("DELETE FROM clusters WHERE id = ANY($1) AND size < 2")
+            .bind(&groups)
+            .execute(&mut **tx)
+            .await?;
+    }
+
+    // 6. Audit: close the merge, record the unmerge, and dismiss the pair so
+    //    the clustering worker never merges it again.
+    sqlx::query("UPDATE entity_merge_audit SET undone_at = now() WHERE id = $1")
+        .bind(merge_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO entity_merge_audit (winner_entity_id, loser_entity_id, action, actor, note) \
+         VALUES ($1, $2, 'unmerge', $3, $4), ($1, $2, 'dismiss', $3, 'merge undone')",
+    )
+    .bind(winner_id)
+    .bind(loser_id)
+    .bind(&actor)
+    .bind(&note)
+    .execute(&mut **tx)
+    .await?;
+
+    // 7. A wrong merge the pipeline made is the tuner's negative label.
+    if let Some(score) = score {
+        sqlx::query(
+            "INSERT INTO unit_feedback (target_kind, target_id, action, corrected, note, score) \
+             VALUES ('merge', $1, 'reject', $2, $3, $4)",
+        )
+        .bind(crate::cluster::pair_key(winner_id, loser_id))
+        .bind(serde_json::json!({ "a": winner_id, "b": loser_id, "undone_merge": merge_id }))
+        .bind(&note)
+        .bind(score)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    Ok(UnmergeOutcome {
+        winner_id,
+        loser_id,
+        units_restored,
+        relationships_restored: sources + targets + reinserted,
+        aliases_restored,
+        descendants_restored,
     })
 }
 

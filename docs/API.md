@@ -146,9 +146,12 @@ Response: `{ "scope": "...", "hits": [ { "id": "...", "score": 0.83, ... } ] }`.
 | POST | `/entities/{id}/merge` | Merge another entity into this one: `{ "loser_id": "…", "note": "…", "actor": "…" }` |
 | POST | `/entities/{id}/merge-suggestions/dismiss` | Suppress a suggestion: `{ "other_id": "…", "note": "…" }` |
 | POST | `/entities/{id}/aliases` | Add an alias: `{ "alias": "PG" }` |
+| POST | `/entities/{id}/unmerge` | Split a merged-away entity back out: its units, edges, aliases and descendants are restored from the merge's journal, and the pair is never suggested or auto-merged again. Optional body `{ "note": "…", "actor": "…" }`. `404` if there is no merge to undo; `400` if it can't be undone exactly (the survivor has since been merged elsewhere, or the merge predates journaling) |
 
-Merges are reversible in the data model: the losing entity is kept with
-`merged_into_entity_id` set, and every merge or dismissal is recorded in `entity_merge_audit`.
+Merges are reversible: the losing entity is kept with `merged_into_entity_id` set, every merge
+journals what it changed, and `unmerge` replays that journal in reverse. Every merge, unmerge
+and dismissal is recorded in `entity_merge_audit`. Undoing an automatic or tray-accepted merge
+also records a negative tuning label, so the auto-merge threshold learns from wrong merges.
 Entity kinds: `person`, `organization`, `project`, `tool`, `concept`, `location`, `event`,
 `other`.
 
@@ -246,7 +249,7 @@ calls the same core function as its REST route:
 | `IngestService` | `IngestChatExport`, `IngestAgentLog`, `IngestFile` (client streaming) |
 | `QueryService` | `ListArtifacts`, `GetArtifact`, `ListAtomicUnits`, `GetEntityGraph`, `SemanticSearch` |
 | `ContradictionService` | `ListContradictions`, `GetContradiction`, `ResolveContradiction`, `AnnotateContradiction` |
-| `EntityService` | `ListEntities`, `ListMergeSuggestions`, `GetEntity`, `MergeEntities`, `DismissMergeSuggestion`, `AddAlias` |
+| `EntityService` | `ListEntities`, `ListMergeSuggestions`, `GetEntity`, `MergeEntities`, `UnmergeEntity`, `DismissMergeSuggestion`, `AddAlias` |
 | `ExportService` | `ExportBundle` (server streaming), `ImportBundle` (client streaming) |
 | `FeedbackService` | `RejectUnit`, `RestoreUnit`, `ConfirmUnit`, `EditUnit`, `ListReview`, `AcceptReview`, `RejectReview`, `ResolveReview` |
 | `ClusterService` | `ListClusters`, `GetCluster` |

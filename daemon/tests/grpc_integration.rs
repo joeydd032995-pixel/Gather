@@ -825,6 +825,34 @@ async fn entity_service_lists_merges_and_adds_aliases() {
         .expect("get loser")
         .into_inner();
     assert_eq!(loser.merged_into_entity_id, winner_id.to_string());
+
+    // unmerge_entity splits it back out; a second undo has nothing to undo.
+    let undone = client
+        .unmerge_entity(pb::UnmergeEntityRequest {
+            entity_id: loser_id.to_string(),
+            note: "grpc unmerge".into(),
+            actor: "test".into(),
+        })
+        .await
+        .expect("unmerge entity")
+        .into_inner();
+    assert_eq!(undone.winner_id, winner_id.to_string());
+    let loser = client
+        .get_entity(pb::GetEntityRequest {
+            id: loser_id.to_string(),
+        })
+        .await
+        .expect("get restored loser")
+        .into_inner();
+    assert_eq!(loser.merged_into_entity_id, "");
+    let err = client
+        .unmerge_entity(pb::UnmergeEntityRequest {
+            entity_id: loser_id.to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("nothing left to undo");
+    assert_eq!(err.code(), Code::NotFound);
 }
 
 #[tokio::test]

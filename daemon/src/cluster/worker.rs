@@ -20,22 +20,15 @@ use serde_json::json;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use super::{cohesion, components, grouped, label_from_texts, mutual_knn, survivor_key, Edge};
+use super::{
+    cohesion, components, grouped, label_from_texts, mutual_knn, pair_key, survivor_key, Edge,
+};
 use crate::config::Config;
 use crate::decide::live::LiveThresholds;
 use crate::decide::{best_score, merge_decision, Band, MergeSignals};
 use crate::entities::similarity::name_similarity;
-use crate::entities::{merge_entities, merge_suggestions};
+use crate::entities::{merge_entities_in, merge_suggestions};
 use crate::scan::score::{all_tokens, jaccard};
-
-/// A stable id for an unordered entity pair, so a held merge review is keyed by
-/// the pair (not one endpoint). Without this, two held suggestions sharing an
-/// entity collide on `review_queue`'s (target_kind, target_id) unique index and
-/// the second is silently dropped.
-fn pair_key(a: Uuid, b: Uuid) -> Uuid {
-    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-    Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("{lo}:{hi}").as_bytes())
-}
 
 #[derive(Debug, Default)]
 pub struct ClusterStats {
@@ -137,7 +130,10 @@ async fn entity_resolution_pass(
                     s.b.id, &s.b.name, &s.b.kind, &mut ids, &mut names, &mut kinds,
                 );
                 let (a, b) = if ia < ib { (ia, ib) } else { (ib, ia) };
-                auto_edges.push(Edge { a, b, sim: s.score });
+                // Weighted by the strongest signal: the coordinate the
+                // single-signal gate and the tuner work on.
+                let sim = best_score(&signals).unwrap_or(s.score);
+                auto_edges.push(Edge { a, b, sim });
             }
             Band::Hold => {
                 let parked = sqlx::query(
@@ -227,14 +223,25 @@ async fn entity_resolution_pass(
             .await?;
             if member_id != winner_id {
                 merged_away.push(member_id);
-                merge_entities(
-                    pool,
+                // The strongest Auto edge that pulled this member in: kept
+                // with the merge so undoing it can teach the tuner.
+                let score = auto_edges
+                    .iter()
+                    .filter(|e| e.a == local || e.b == local)
+                    .map(|e| e.sim)
+                    .fold(f32::NAN, f32::max);
+                let mut tx = pool.begin().await?;
+                merge_entities_in(
+                    &mut tx,
                     winner_id,
                     member_id,
                     Some("auto-clustered duplicate".to_string()),
                     Some("auto".to_string()),
+                    score.is_finite().then_some(score),
                 )
                 .await?;
+                tx.commit().await?;
+                metrics::counter!("gather_entity_merges_total").increment(1);
                 stats.entities_merged += 1;
             }
         }

@@ -153,5 +153,6 @@ Exposed at `GET /metrics` (Prometheus format) and graphed in the provisioned Gra
 | `gather_realdata_precision` | Of the units you gave a verdict on, the fraction whose latest verdict is "keep" |
 | `gather_decision_threshold{key}` | Thresholds in force (tuned or default) |
 | `gather_tuning_changes_total{key,direction}` | Threshold moves made by the auto-tuner |
+| `gather_entity_merges_total` / `gather_entity_unmerges_total` | Entity merges made, and merges undone |
 | `gather_http_request_duration_seconds` | Per-route latency |
 | `gather_graph_query_duration_seconds` | Graph traversal latency |

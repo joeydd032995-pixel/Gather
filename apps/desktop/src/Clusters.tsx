@@ -1,5 +1,11 @@
 import { useState } from "react";
-import { getCluster, type ClusterKind, type ClusterMember, type ClusterSummary } from "./api";
+import {
+  getCluster,
+  unmergeEntity,
+  type ClusterKind,
+  type ClusterMember,
+  type ClusterSummary,
+} from "./api";
 import { useAsync } from "./hooks/useAsync";
 import { usePagedClusters } from "./hooks/usePagedClusters";
 
@@ -14,14 +20,54 @@ function memberLabel(m: ClusterMember): string {
 
 function ClusterMembers({ id }: { id: string }) {
   const detail = useAsync(() => getCluster(id), [id]);
-  if (detail.loading) return <p className="prov-empty">Loading…</p>;
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [undone, setUndone] = useState(false);
+
+  const undoMerge = async (member: ClusterMember) => {
+    setBusyId(member.member_id);
+    setError(null);
+    try {
+      await unmergeEntity(member.member_id, "undone from the Groups view");
+      setUndone(true);
+      detail.reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  if (detail.loading && !detail.data) return <p className="prov-empty">Loading…</p>;
+  // Undoing the last merge in a pair dissolves the group itself.
+  if (detail.error && undone) {
+    return <p className="all-clear">Merge undone; this group no longer exists.</p>;
+  }
   if (detail.error) return <p className="error">{detail.error}</p>;
   return (
-    <ul className="prov-list">
-      {(detail.data?.members ?? []).map((m) => (
-        <li key={m.member_id}>{memberLabel(m)}</li>
-      ))}
-    </ul>
+    <>
+      {error && <p className="error">{error}</p>}
+      <ul className="prov-list">
+        {(detail.data?.members ?? []).map((m) => (
+          <li key={m.member_id}>
+            {memberLabel(m)}
+            {m.member_kind === "entity" && m.merged_into && (
+              <>
+                {" "}
+                <button
+                  className="link-button"
+                  onClick={() => undoMerge(m)}
+                  disabled={busyId !== null}
+                  title="Split this entity back out; the pair will never be merged again"
+                >
+                  {busyId === m.member_id ? "Undoing…" : "Undo merge"}
+                </button>
+              </>
+            )}
+          </li>
+        ))}
+      </ul>
+    </>
   );
 }
 

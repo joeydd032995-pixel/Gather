@@ -239,6 +239,7 @@ impl pb::cluster_service_server::ClusterService for ClusterApi {
                     taken_at: timestamp(m.taken_at),
                     caption: m.caption.unwrap_or_default(),
                     name: m.name.unwrap_or_default(),
+                    merged_into: opt_uuid(m.merged_into),
                 })
                 .collect(),
         }))
