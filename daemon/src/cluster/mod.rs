@@ -75,27 +75,28 @@ where
     edges
 }
 
-/// Union-find (path compression + union by size).
-struct UnionFind {
+/// Union-find (path compression + union by size). Shared with the photo
+/// pipeline's near-duplicate grouping.
+pub struct UnionFind {
     parent: Vec<usize>,
     size: Vec<usize>,
 }
 
 impl UnionFind {
-    fn new(n: usize) -> Self {
+    pub fn new(n: usize) -> Self {
         Self {
             parent: (0..n).collect(),
             size: vec![1; n],
         }
     }
-    fn find(&mut self, mut x: usize) -> usize {
+    pub fn find(&mut self, mut x: usize) -> usize {
         while self.parent[x] != x {
             self.parent[x] = self.parent[self.parent[x]];
             x = self.parent[x];
         }
         x
     }
-    fn union(&mut self, a: usize, b: usize) {
+    pub fn union(&mut self, a: usize, b: usize) {
         let (ra, rb) = (self.find(a), self.find(b));
         if ra == rb {
             return;

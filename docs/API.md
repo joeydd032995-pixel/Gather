@@ -206,8 +206,20 @@ Keys: `admit.hold_below` (unit admission) and `merge.auto_single` (single-signal
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/clusters` | List. Query: `kind` (`topic` or `entity`), `limit` |
-| GET | `/clusters/{id}` | Cluster with members (unit members include their statement) |
+| GET | `/clusters` | List. Query: `kind` (`topic`, `entity`, `photo_dup`, `album` or `photo_topic`), `limit`. Each item carries its `representative_id` when it has one |
+| GET | `/clusters/{id}` | Cluster with members. Unit members include their statement; image members their file name, capture time and caption |
+
+---
+
+## Photos
+
+Near-duplicate groups (`photo_dup`), albums (`album`) and visual topics (`photo_topic`) are
+clusters, browsed with the endpoints above. The representative of a duplicate group is its
+sharpest (then earliest) copy; of an album, its first shot.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/images/{id}/thumbnail` | JPEG, at most 256 px on its long side, rendered locally. `415` when the format can't be decoded locally (e.g. HEIC) |
 
 ---
 

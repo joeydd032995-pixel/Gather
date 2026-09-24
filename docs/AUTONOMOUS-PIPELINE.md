@@ -138,9 +138,11 @@ These run offline in CI and fail the build on regressions:
 | `tests/extraction_quality.rs` | Rule extractor precision ≥ 70% on a labelled golden corpus (baseline 83.3%). Subjects must match, and producing nothing fails |
 | `tests/decision_policy.rs` | The merge gate never auto-merges without agreement or a near-certain signal. Admission defaults never drop data |
 | `tests/clustering.rs` | Real name similarity groups duplicates and keeps distinct names apart |
+| `tests/photo_pipeline.rs` | Re-encoded and resized copies of a scene hash within the duplicate distance, different scenes hash far apart, a mixed library groups exactly by scene, and albums split on time gaps and travel |
 | `tests/tuning.rs` | The tuner converges to a known boundary, never leaves its bounds, never moves on thin evidence, never oscillates, and never loosens on reject-only feedback; the tray ranks boundary hubs first |
 
-Integration tests (`feedback_integration.rs`, `cluster_integration.rs`, `tune_integration.rs`) exercise the feedback
+Integration tests (`feedback_integration.rs`, `cluster_integration.rs`, `tune_integration.rs`,
+`photo_integration.rs`, which uses a mock loopback Ollama) exercise the feedback
 endpoints and the clustering worker end to end against pgvector.
 
 ## Active learning and auto-tuning
@@ -202,9 +204,36 @@ merges, which is why its floor (0.85) is high.
   `GATHER_CLUSTER_K`.
 - Stricter automation overall: raise `GATHER_TUNE_TARGET_PRECISION`.
 
+## Photos
+
+(`daemon/src/photo/`.) Photos follow the same rule as everything else: **grouped, never
+deleted**. A background worker (`GATHER_PHOTO_*`) runs three steps:
+
+1. **Prepare.** Each new photo gets a 64-bit perceptual hash (DCT pHash: an area-filtered
+   32×32 luma downscale, keeping the 8×8 lowest frequencies) and its EXIF GPS position. Decoding
+   is pure Rust (JPEG, PNG, WebP, TIFF, GIF, BMP) with size and allocation limits. Formats it
+   can't decode, such as HEIC, get no hash and are simply left out of duplicate grouping.
+2. **Regroup** (whenever new photos have been prepared) over the whole library:
+   - **Near-duplicates**: photos within `GATHER_PHOTO_DUP_MAX_DISTANCE` bits, transitively.
+     Candidates come from banding the hash into `distance + 1` chunks: two hashes that close
+     must match exactly on at least one chunk, so only photos sharing a chunk are compared. The
+     sharpest copy (then the earliest) becomes the group's representative.
+   - **Albums**: shots sorted by EXIF capture time, cut when the gap exceeds
+     `GATHER_PHOTO_ALBUM_GAP_HOURS` or two located shots are more than
+     `GATHER_PHOTO_ALBUM_SPLIT_KM` apart. A GPS-less shot in between doesn't hide the jump.
+     Labels are dates; there is no reverse geocoding, so nothing leaves the machine.
+   - Results are reconciled with the stored clusters. A group keeps its cluster id when most of
+     its members already had it, so ids stay stable as photos arrive, and emptied groups are
+     removed.
+3. **Caption** (opt-in, only with `GATHER_OLLAMA_VISION_MODEL`): a local vision model captions
+   the photo, the caption is embedded with the existing 768-dimension model, and the photo
+   joins the topic of its nearest visual neighbour (pgvector HNSW) when they are at least
+   `GATHER_PHOTO_TOPIC_THRESHOLD` similar.
+
+Browse with `GET /clusters?kind=photo_dup|album|photo_topic` and render previews with
+`GET /images/{id}/thumbnail`.
+
 ## What's next
 
-- **Photo pipeline:** perceptual-hash near-duplicate grouping, EXIF time/place albums, optional
-  local vision captions for visual topics.
-- **Desktop review tray** and gRPC parity for the feedback, tuning and cluster endpoints.
+- **Desktop review tray** and gRPC parity for the feedback, tuning, cluster and photo endpoints.
 - **Entity unmerge**, so auto-merges become reversible and labelable.

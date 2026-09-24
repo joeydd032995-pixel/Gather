@@ -46,6 +46,9 @@ pub struct Config {
     pub ollama_model: String,
     /// Embedding model (must produce 768-dim vectors to match the schema).
     pub ollama_embed_model: String,
+    /// Local vision model for photo captions (e.g. `moondream`, `llava`).
+    /// None disables captions and photo topics; requires `ollama_url`.
+    pub ollama_vision_model: Option<String>,
     /// Run the background contradiction scanner.
     pub scan_enabled: bool,
     /// Seconds between scan passes.
@@ -89,6 +92,22 @@ pub struct Config {
     /// Precision the auto-accepted band must hold; the tuner raises a
     /// threshold below it and lowers one only when a 95% bound clears it.
     pub tune_target_precision: f32,
+    /// Run the photo worker (hashing, duplicate groups, albums, captions).
+    pub photo_enabled: bool,
+    /// Seconds between photo passes.
+    pub photo_interval_secs: u64,
+    /// Images hashed (and, with a vision model, captioned) per pass.
+    pub photo_batch: i64,
+    /// Max differing pHash bits for two photos to count as near-duplicates.
+    pub photo_dup_max_distance: u32,
+    /// A gap longer than this between shots starts a new album.
+    pub photo_album_gap_hours: i64,
+    /// Consecutive located shots further apart than this start a new album.
+    pub photo_album_split_km: f64,
+    /// Smallest group of photos that becomes an album.
+    pub photo_album_min_size: usize,
+    /// Minimum caption-embedding cosine for two photos to share a topic.
+    pub photo_topic_threshold: f32,
     /// Enable the gRPC server (default true).
     pub grpc_enabled: bool,
     /// Address to bind the gRPC listener. Same loopback policy as bind_addr.
@@ -264,6 +283,10 @@ impl Config {
                 .unwrap_or_else(|_| "llama3.2:3b".to_string()),
             ollama_embed_model: std::env::var("GATHER_OLLAMA_EMBED_MODEL")
                 .unwrap_or_else(|_| "nomic-embed-text".to_string()),
+            ollama_vision_model: std::env::var("GATHER_OLLAMA_VISION_MODEL")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
             scan_enabled: env_bool("GATHER_SCAN_ENABLED", true),
             scan_interval_secs: std::env::var("GATHER_SCAN_INTERVAL_SECS")
                 .ok()
@@ -325,6 +348,39 @@ impl Config {
             // Validated: a NaN target would make every comparison false and
             // silently freeze (or, worse, loosen) the tuner.
             tune_target_precision: parse_unit_float("GATHER_TUNE_TARGET_PRECISION", 0.90)?,
+            photo_enabled: env_bool("GATHER_PHOTO_ENABLED", true),
+            photo_interval_secs: std::env::var("GATHER_PHOTO_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|v: u64| v.max(1))
+                .unwrap_or(600),
+            photo_batch: std::env::var("GATHER_PHOTO_BATCH")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|v: i64| v.clamp(1, 1_000))
+                .unwrap_or(32),
+            photo_dup_max_distance: std::env::var("GATHER_PHOTO_DUP_MAX_DISTANCE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|v: u32| v.min(16))
+                .unwrap_or(6),
+            photo_album_gap_hours: std::env::var("GATHER_PHOTO_ALBUM_GAP_HOURS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|v: i64| v.clamp(1, 24 * 30))
+                .unwrap_or(3),
+            photo_album_split_km: std::env::var("GATHER_PHOTO_ALBUM_SPLIT_KM")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|v: &f64| v.is_finite())
+                .map(|v: f64| v.clamp(0.1, 20_000.0))
+                .unwrap_or(10.0),
+            photo_album_min_size: std::env::var("GATHER_PHOTO_ALBUM_MIN_SIZE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|v: usize| v.clamp(1, 1_000))
+                .unwrap_or(2),
+            photo_topic_threshold: parse_unit_float("GATHER_PHOTO_TOPIC_THRESHOLD", 0.8)?,
             grpc_enabled,
             grpc_bind_addr,
         })
@@ -351,6 +407,7 @@ impl Config {
             ollama_url: None,
             ollama_model: "llama3.2:3b".to_string(),
             ollama_embed_model: "nomic-embed-text".to_string(),
+            ollama_vision_model: None,
             scan_enabled: true,
             scan_interval_secs: 600,
             scan_batch: 32,
@@ -368,6 +425,14 @@ impl Config {
             tune_interval_secs: 600,
             tune_min_samples: 20,
             tune_target_precision: 0.90,
+            photo_enabled: true,
+            photo_interval_secs: 600,
+            photo_batch: 32,
+            photo_dup_max_distance: 6,
+            photo_album_gap_hours: 3,
+            photo_album_split_km: 10.0,
+            photo_album_min_size: 2,
+            photo_topic_threshold: 0.8,
             grpc_enabled: false,
             grpc_bind_addr: "127.0.0.1:0".parse().expect("static addr"),
         }

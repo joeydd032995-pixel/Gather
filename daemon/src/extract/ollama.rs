@@ -19,7 +19,12 @@ pub struct OllamaClient {
     http: reqwest::Client,
     pub model: String,
     pub embed_model: String,
+    /// Vision model for photo captions; None when not configured.
+    pub vision_model: Option<String>,
 }
+
+const CAPTION_PROMPT: &str = "Describe this photo in one factual sentence: the main subject, \
+the setting, and any visible text. No speculation.";
 
 const EXTRACTION_SYSTEM_PROMPT: &str = "You extract atomic factual statements from text. \
 Respond with JSON only: {\"units\": [{\"kind\": \"fact|claim|decision|preference|event\", \
@@ -61,6 +66,7 @@ impl OllamaClient {
             http,
             model: config.ollama_model.clone(),
             embed_model: config.ollama_embed_model.clone(),
+            vision_model: config.ollama_vision_model.clone(),
         }))
     }
 
@@ -91,6 +97,42 @@ impl OllamaClient {
             ));
         }
         Ok(parsed.embeddings)
+    }
+
+    /// One-sentence caption of a photo from the local vision model. Errors when
+    /// no vision model is configured.
+    pub async fn caption(&self, image_bytes: &[u8]) -> Result<String, String> {
+        use base64::Engine;
+        let model = self
+            .vision_model
+            .as_deref()
+            .ok_or("no vision model configured")?;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(image_bytes);
+        let response = self
+            .http
+            .post(format!("{}/api/generate", self.base))
+            .json(&json!({
+                "model": model,
+                "prompt": CAPTION_PROMPT,
+                "images": [encoded],
+                "stream": false,
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("ollama caption request: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("ollama caption status: {e}"))?;
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| format!("ollama caption decode: {e}"))?;
+        let caption = body
+            .get("response")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .ok_or("ollama caption response missing text")?;
+        Ok(caption.to_string())
     }
 
     /// LLM-assisted extraction over one chunk. Anti-hallucination gate: a
