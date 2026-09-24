@@ -78,6 +78,17 @@ pub struct Config {
     /// Components larger than this are treated as too diffuse to auto-label and
     /// are skipped (chaining guard).
     pub cluster_max_component: usize,
+    /// Let the tuner move decision thresholds from user feedback. The tune
+    /// worker always runs (it also re-ranks the review tray); this gates only
+    /// the threshold changes.
+    pub tune_enabled: bool,
+    /// Seconds between tray re-ranking / tuning passes.
+    pub tune_interval_secs: u64,
+    /// Labels needed at/above a threshold before the tuner may move it.
+    pub tune_min_samples: usize,
+    /// Precision the auto-accepted band must hold; the tuner raises a
+    /// threshold below it and lowers one only when a 95% bound clears it.
+    pub tune_target_precision: f32,
     /// Enable the gRPC server (default true).
     pub grpc_enabled: bool,
     /// Address to bind the gRPC listener. Same loopback policy as bind_addr.
@@ -300,6 +311,20 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .map(|v: usize| v.clamp(2, 10_000))
                 .unwrap_or(50),
+            tune_enabled: env_bool("GATHER_TUNE_ENABLED", true),
+            tune_interval_secs: std::env::var("GATHER_TUNE_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|v: u64| v.max(1))
+                .unwrap_or(600),
+            tune_min_samples: std::env::var("GATHER_TUNE_MIN_SAMPLES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|v: usize| v.clamp(5, 100_000))
+                .unwrap_or(20),
+            // Validated: a NaN target would make every comparison false and
+            // silently freeze (or, worse, loosen) the tuner.
+            tune_target_precision: parse_unit_float("GATHER_TUNE_TARGET_PRECISION", 0.90)?,
             grpc_enabled,
             grpc_bind_addr,
         })
@@ -339,6 +364,10 @@ impl Config {
             cluster_k: 6,
             cluster_threshold: 0.5,
             cluster_max_component: 50,
+            tune_enabled: true,
+            tune_interval_secs: 600,
+            tune_min_samples: 20,
+            tune_target_precision: 0.90,
             grpc_enabled: false,
             grpc_bind_addr: "127.0.0.1:0".parse().expect("static addr"),
         }

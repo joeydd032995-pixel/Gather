@@ -23,6 +23,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::config::Config;
+use crate::decide::live::LiveThresholds;
 use ollama::OllamaClient;
 use persist::{Chunk, ChunkAnchor};
 
@@ -419,6 +420,9 @@ async fn process_unit_chunks(
         });
     }
 
+    // Admission thresholds for this pass: tuned values from feedback when
+    // present, env config otherwise.
+    let live = LiveThresholds::load(pool, config).await?;
     let mut processed = 0usize;
     let mut created = 0usize;
     for chunk in &chunks {
@@ -446,8 +450,8 @@ async fn process_unit_chunks(
             pool,
             chunk,
             &units,
-            config.admit_hold_below,
-            config.admit_drop_below,
+            live.admit_hold_below,
+            live.admit_drop_below,
         )
         .await?
         {

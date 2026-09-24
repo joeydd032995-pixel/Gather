@@ -11,6 +11,7 @@ pub mod extract;
 pub mod grpc;
 pub mod routes;
 pub mod scan;
+pub mod tune;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -118,6 +119,14 @@ pub fn describe_metrics() {
     metrics::describe_gauge!(
         "gather_realdata_precision",
         "Auto-admitted units kept vs rejected by the user (confirms / (confirms + rejects))"
+    );
+    metrics::describe_gauge!(
+        "gather_decision_threshold",
+        "Decision thresholds in force (tuned from feedback or env default), by key"
+    );
+    metrics::describe_counter!(
+        "gather_tuning_changes_total",
+        "Threshold changes made by the auto-tuner, by key and direction"
     );
     metrics::describe_histogram!(
         "gather_graph_query_duration_seconds",

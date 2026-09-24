@@ -20,9 +20,10 @@ use serde_json::json;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use super::{cohesion, components, grouped, label_from_texts, mutual_knn, Edge};
+use super::{cohesion, components, grouped, label_from_texts, mutual_knn, survivor_key, Edge};
 use crate::config::Config;
-use crate::decide::{merge_decision, Band, MergeSignals, MergeThresholds};
+use crate::decide::live::LiveThresholds;
+use crate::decide::{merge_decision, Band, MergeSignals};
 use crate::entities::similarity::name_similarity;
 use crate::entities::{merge_entities, merge_suggestions};
 use crate::scan::score::{all_tokens, jaccard};
@@ -86,7 +87,8 @@ async fn entity_resolution_pass(
     if suggestions.is_empty() {
         return Ok(());
     }
-    let thresholds = MergeThresholds::conservative();
+    // Tuned merge thresholds (env/conservative defaults when untuned).
+    let thresholds = LiveThresholds::load(pool, config).await?.merge;
 
     // Index entities appearing in suggestions; keep their names for canonical
     // selection.
@@ -183,11 +185,8 @@ async fn entity_resolution_pass(
         let winner_local = *group
             .iter()
             .max_by(|&&x, &&y| {
-                let typed_x = (kinds[x] != "other") as u8;
-                let typed_y = (kinds[y] != "other") as u8;
-                typed_x
-                    .cmp(&typed_y)
-                    .then(names[x].chars().count().cmp(&names[y].chars().count()))
+                survivor_key(&kinds[x], &names[x])
+                    .cmp(&survivor_key(&kinds[y], &names[y]))
                     .then(y.cmp(&x))
             })
             .expect("non-empty group");

@@ -142,6 +142,15 @@ async fn main() -> anyhow::Result<()> {
     } else {
         tracing::info!("clustering worker disabled via GATHER_CLUSTER_ENABLED=false");
     }
+    // Always runs: it re-ranks the review tray. GATHER_TUNE_ENABLED gates only
+    // whether it may move thresholds.
+    tokio::spawn(gather_daemon::tune::worker::worker_loop(
+        pool.clone(),
+        config.clone(),
+    ));
+    if !config.tune_enabled {
+        tracing::info!("threshold auto-tuning disabled via GATHER_TUNE_ENABLED=false");
+    }
 
     if config.grpc_enabled {
         let grpc_state = state.clone();

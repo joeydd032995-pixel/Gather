@@ -6,6 +6,7 @@ pub mod feedback;
 pub mod health;
 pub mod ingest;
 pub mod query;
+pub mod tuning;
 
 use axum::extract::{DefaultBodyLimit, MatchedPath, Request, State};
 use axum::http::{HeaderValue, Method};
@@ -79,6 +80,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/units/{id}/restore", post(feedback::restore_unit))
         .route("/review", get(feedback::list_review))
         .route("/review/{id}/resolve", post(feedback::resolve_review))
+        .route("/review/{id}/accept", post(feedback::accept_review))
+        .route("/review/{id}/reject", post(feedback::reject_review))
+        // active learning — learned thresholds, their history, and reset
+        .route("/tuning", get(tuning::get_tuning))
+        .route("/tuning/reset", post(tuning::reset_tuning))
         // clustering — the entity/topic "arrangement" surface
         .route("/clusters", get(clusters::list_clusters))
         .route("/clusters/{id}", get(clusters::get_cluster))
