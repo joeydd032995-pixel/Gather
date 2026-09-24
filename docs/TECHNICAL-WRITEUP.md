@@ -1251,7 +1251,7 @@ See `docs/BENCHMARK-RUNBOOK.md`.
 ## 10. What to run first (quickstart)
 
 ```bash
-# 0. prerequisites: Docker + Docker Compose v2; (for the desktop app) Rust + Node 22
+# 0. prerequisites: Docker + Docker Compose v2; (for the desktop app) Rust + Node 22.12+ (or 20.19+)
 git clone <this repo> && cd Gather
 
 # 1. configure — one required secret
