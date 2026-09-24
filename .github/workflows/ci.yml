@@ -290,7 +290,7 @@ jobs:
           chmod +x dist/gather-daemon-linux-x86_64/gather-daemon
           tar -C dist/gather-daemon-linux-x86_64 -czf \
             dist/gather-daemon-linux-x86_64.tar.gz gather-daemon
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/gather-daemon-linux-x86_64.tar.gz
