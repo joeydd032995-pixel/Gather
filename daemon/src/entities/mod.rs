@@ -15,7 +15,7 @@ use crate::extract::ollama::OllamaClient;
 
 pub use merge::{
     dismiss_suggestion, dismiss_suggestion_in, merge_entities, merge_entities_in, resolve_head,
-    MergeOutcome,
+    unmerge_entity, unmerge_entity_in, MergeOutcome, UnmergeOutcome,
 };
 pub use similarity::DEFAULT_THRESHOLD;
 

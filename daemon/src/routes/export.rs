@@ -101,7 +101,8 @@ const TABLES: &[(&str, &str)] = &[
     // After "entities", whose rows it references on both sides.
     (
         "entity_merge_audit",
-        "id, winner_entity_id, loser_entity_id, action, actor, note, created_at",
+        "id, winner_entity_id, loser_entity_id, action, actor, note, created_at, undo, score, \
+         undone_at",
     ),
     // Feedback loop (autonomous pipeline). No FK dependencies among these
     // tables, so ordering among them is free; they round-trip the correction

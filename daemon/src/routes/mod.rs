@@ -52,6 +52,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/entities/{id}", get(entities::get_entity))
         .route("/entities/{id}/merge", post(entities::merge_entity))
+        .route("/entities/{id}/unmerge", post(entities::unmerge_entity))
         .route(
             "/entities/{id}/merge-suggestions/dismiss",
             post(entities::dismiss_merge_suggestion),

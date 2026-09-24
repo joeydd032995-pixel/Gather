@@ -232,6 +232,31 @@ impl pb::entity_service_server::EntityService for EntityApi {
         }))
     }
 
+    async fn unmerge_entity(
+        &self,
+        request: Request<pb::UnmergeEntityRequest>,
+    ) -> Result<Response<pb::UnmergeOutcome>, Status> {
+        let req = request.into_inner();
+        let id = parse_uuid(&req.entity_id, "entity_id")?;
+        let outcome = entities::unmerge_entity(
+            &self.state.pool,
+            id,
+            Some(req.note).filter(|n| !n.is_empty()),
+            Some(req.actor).filter(|a| !a.is_empty()),
+        )
+        .await
+        .map_err(status_from)?;
+        Ok(Response::new(pb::UnmergeOutcome {
+            winner_id: outcome.winner_id.to_string(),
+            loser_id: outcome.loser_id.to_string(),
+            units_restored: outcome.units_restored,
+            relationships_restored: outcome.relationships_restored,
+            aliases_restored: outcome.aliases_restored,
+            descendants_restored: outcome.descendants_restored,
+            contradictions_withdrawn: outcome.contradictions_withdrawn,
+        }))
+    }
+
     async fn dismiss_merge_suggestion(
         &self,
         request: Request<pb::DismissMergeSuggestionRequest>,

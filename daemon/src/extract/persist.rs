@@ -279,11 +279,11 @@ pub async fn persist_chunk_units(
 /// Public because it is the read counterpart to the merge write path in
 /// `crate::entities` — after a merge, the loser's name must resolve here to
 /// the winner, and the integration suite asserts exactly that.
-pub async fn resolve_or_create_entity(
+/// Find a live entity by name, or by an alias (followed to its survivor).
+async fn lookup_entity(
     tx: &mut Transaction<'_, Postgres>,
     name: &str,
-) -> Result<Uuid, ApiError> {
-    let name = name.trim();
+) -> Result<Option<Uuid>, ApiError> {
     let existing: Option<(Uuid,)> = sqlx::query_as(
         r#"
         SELECT e.id FROM entities e
@@ -302,32 +302,60 @@ pub async fn resolve_or_create_entity(
     .bind(name)
     .fetch_optional(&mut **tx)
     .await?;
-    if let Some((id,)) = existing {
+    Ok(existing.map(|(id,)| id))
+}
+
+/// Upper bound on lock-then-recheck rounds; a name only moves when a merge
+/// or unmerge commits, so a second round is already rare.
+const RESOLVE_ATTEMPTS: usize = 3;
+
+pub async fn resolve_or_create_entity(
+    tx: &mut Transaction<'_, Postgres>,
+    name: &str,
+) -> Result<Uuid, ApiError> {
+    let name = name.trim();
+    let mut candidate = lookup_entity(tx, name).await?;
+    for _ in 0..RESOLVE_ATTEMPTS {
+        let Some(id) = candidate else {
+            break;
+        };
         // Re-read the resolved row under a shared lock before handing it back.
-        // A merge holds FOR UPDATE on both operands while it repoints units and
-        // relationships, and soft-deletes rather than removes the loser — so
-        // without this, an ingest that read the row just before the merge
-        // committed would still insert onto the retired node, after the
-        // repointing had already run, stranding the new data there.
+        // A merge (or unmerge) holds FOR UPDATE on both operands while it
+        // repoints units and relationships, and soft-deletes rather than
+        // removes the loser — so without this, an ingest that read the row
+        // just before the merge committed would still insert onto the retired
+        // node, after the repointing had already run, stranding the new data.
         //
         // FOR SHARE makes both interleavings safe: if ingestion gets here
         // first, the merge waits and repoints this unit along with the rest;
-        // if the merge got there first, this blocks until it commits and then
-        // observes merged_into_entity_id and follows it to the survivor.
-        // Only one row is ever locked here, so no cycle with the merge's
-        // ordered two-row lock is possible.
+        // if the merge got there first, this blocks until it commits.
         let merged_into: Option<Option<Uuid>> = sqlx::query_scalar(
             "SELECT merged_into_entity_id FROM entities WHERE id = $1 FOR SHARE",
         )
         .bind(id)
         .fetch_optional(&mut **tx)
         .await?;
+        // What we waited on may have moved the NAME, not just the row: an
+        // unmerge hands the loser's name and aliases back to the loser. So
+        // look the name up again now that the change is committed; if it now
+        // resolves to a different entity, lock and settle on that one. (A
+        // lookup that finds nothing means the row was retired without an
+        // alias; its merge pointer, below, is still the right answer.)
+        if let Some(other) = lookup_entity(tx, name).await?.filter(|&o| o != id) {
+            candidate = Some(other);
+            continue;
+        }
         return match merged_into {
             // Merges flatten descendants, so this is one hop; resolve_head_tx
             // still walks defensively in case of rows from an older build.
             Some(Some(head)) => crate::entities::merge::resolve_head_tx(tx, head).await,
             _ => Ok(id),
         };
+    }
+    if let Some(id) = candidate {
+        // Still moving after several rounds: keep the latest answer, following
+        // any merge pointer, rather than creating a duplicate entity.
+        return crate::entities::merge::resolve_head_tx(tx, id).await;
     }
     let created: Option<(Uuid,)> = sqlx::query_as(
         r#"

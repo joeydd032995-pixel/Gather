@@ -288,7 +288,7 @@ export async function editUnit(id: string, statement: string, note?: string): Pr
   await jsonOrThrow(res);
 }
 
-export type TuningKey = "admit.hold_below" | "merge.auto_single";
+export type TuningKey = "admit.hold_below" | "merge.auto_single" | "merge.agree";
 
 export interface TunedThreshold {
   key: TuningKey;
@@ -344,6 +344,8 @@ export interface ClusterMember {
   statement: string | null;
   /** Entity members: the entity's name. */
   name: string | null;
+  /** Entity members: the entity it was merged into (null for the survivor). */
+  merged_into: string | null;
   filename: string | null;
   taken_at: string | null;
   caption: string | null;
@@ -382,4 +384,18 @@ export async function fetchThumbnailUrl(imageId: string): Promise<string> {
     throw new Error(`thumbnail unavailable (${res.status})`);
   }
   return URL.createObjectURL(await res.blob());
+}
+
+export interface UnmergeOutcome {
+  winner_id: string;
+  loser_id: string;
+  units_restored: number;
+  relationships_restored: number;
+  aliases_restored: number;
+  descendants_restored: number;
+}
+
+/** Split a merged-away entity back out; the pair is never merged again. */
+export function unmergeEntity(id: string, note?: string): Promise<UnmergeOutcome> {
+  return postJson(`/entities/${id}/unmerge`, { note: note || null });
 }

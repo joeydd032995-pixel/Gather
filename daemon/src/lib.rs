@@ -66,6 +66,11 @@ pub fn init_tracing(json: bool) {
 
 pub fn describe_metrics() {
     metrics::describe_counter!(
+        "gather_entity_merges_total",
+        "Entity merges performed (manual, tray-accepted or automatic)"
+    );
+    metrics::describe_counter!("gather_entity_unmerges_total", "Entity merges undone");
+    metrics::describe_counter!(
         "gather_ingest_files_total",
         "Uploaded files by artifact kind and outcome (accepted/deduplicated/rejected)"
     );

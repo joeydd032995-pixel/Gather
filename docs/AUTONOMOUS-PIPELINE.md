@@ -17,8 +17,8 @@ questions. Gather inverts this:
 1. **High-confidence work is applied automatically.** Units are admitted, duplicates are
    merged and topics are formed without asking.
 2. **Every automatic action is reversible and audited.** Nothing is destroyed: a retracted
-   unit keeps its row, a merged entity keeps its record with `merged_into_entity_id`, and every
-   decision leaves an audit row.
+   unit keeps its row, a merged entity keeps its record with `merged_into_entity_id` and can be split
+   back out exactly, and every decision leaves an audit row.
 3. **Only the thin, genuinely ambiguous middle is parked**, in an *optional* review tray that
    never blocks anything. Parked items are still live in the brain.
 4. **Your occasional correction is the training signal.** It's recorded, it's reversible, and
@@ -164,12 +164,13 @@ Each open tray item gets `info_gain = uncertainty × (1 + ln(1 + degree))`:
 ### Tuning the thresholds from your verdicts
 
 The tuner reads your **latest** verdict per item (confirm/accept = keep, reject = not), with
-the score the item had when you judged it, and may move two thresholds:
+the score the item had when you judged it, and may move three thresholds:
 
 | Key | Moves | Hard bounds |
 |---|---|---|
 | `admit.hold_below` | unit admission bar | 0.30–0.90, never below the drop floor |
 | `merge.auto_single` | single-signal auto-merge bar | 0.85–0.99 |
+| `merge.agree` | two-signal agreement bar (name *and* embedding) | 0.80–0.95 |
 
 Your labels are biased, and the rules lean into that. People mostly reject wrong things they
 happen to notice among auto-accepted items, so measured precision reads *low*, which pushes a
@@ -182,8 +183,9 @@ threshold *up*: the cautious direction. So the rules are asymmetric:
   region has its own evidence. Three kept out of three is not enough.
 - The gap between the two rules is hysteresis: the tuner settles instead of oscillating.
 
-Neither the drop floor (the tuner can never auto-discard data) nor the two-signal agreement
-bars nor the review floor are ever tuned. A threshold you set in the environment *outside* the
+Each merge label is kept to the gate that admitted the merge: an undone agreement merge moves
+`merge.agree`, never the single-signal bar, and vice versa. Neither the drop floor (the tuner
+can never auto-discard data) nor the review floor is ever tuned. A threshold you set in the environment *outside* the
 tuner's bounds (e.g. `GATHER_ADMIT_HOLD_BELOW=0.1`) is treated as a deliberate choice and left
 alone.
 
@@ -195,9 +197,17 @@ threshold for every lowering. `POST /tuning/reset` returns to the env defaults *
 verdicts given after the reset count toward tuning that key again.
 `GATHER_TUNE_ENABLED=false` freezes the thresholds.
 
-**Known gap:** there is no entity *unmerge* yet, so an auto-merge can't be undone and can't
-produce a negative label. The merge tuner therefore effectively only loosens on accepted tray
-merges, which is why its floor (0.85) is high.
+**Undoing a merge.** Every merge journals exactly what it changed: moved units and edges, the
+edges it had to delete, aliases moved or added, and flattened descendants. `POST
+/entities/{id}/unmerge` (or **Undo merge** in the Groups view) replays that journal in
+reverse and restores the entity as it was. The pair is then dismissed so it is never merged
+again. If the merge was automatic or accepted from the tray, the undo is recorded as a
+negative merge label at the merge's similarity, tagged with the gate that admitted it, so
+wrong auto-merges push `merge.auto_single` or `merge.agree` *up*, and the merge tuner learns in
+both directions. Contradictions the scanner found between the two entities' units after the
+merge are withdrawn with it. An undo is refused when it can't be exact: when the surviving
+entity has since been merged elsewhere, when a later merge into the same survivor is still
+live (undo merges newest first), or for merges made before journaling existed.
 
 ## Tuning by hand
 
@@ -256,4 +266,4 @@ The same operations are available over REST and gRPC (`FeedbackService`, `Cluste
 
 ## What's next
 
-- **Entity unmerge**, so auto-merges become reversible and labelable.
+- **One-download distribution**: each person installs their own private, offline copy; the pipeline runs per install with no shared state.

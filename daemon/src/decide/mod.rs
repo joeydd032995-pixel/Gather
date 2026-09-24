@@ -105,6 +105,51 @@ pub fn merge_decision(signals: &MergeSignals, t: &MergeThresholds) -> Band {
     }
 }
 
+/// Which rule of the conservative gate let an automatic merge through. Each
+/// is tuned on its own coordinate, so an undone merge must say which it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeGate {
+    /// One signal reached `auto_single`; coordinate: the strongest signal.
+    Single,
+    /// Both signals reached their agreement bars; coordinate: the weaker one.
+    Agreement,
+}
+
+impl MergeGate {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MergeGate::Single => "single",
+            MergeGate::Agreement => "agreement",
+        }
+    }
+}
+
+/// Why a merge happened: the gate and the score on that gate's coordinate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MergeBasis {
+    pub gate: MergeGate,
+    pub score: f32,
+}
+
+/// For a pair [`merge_decision`] puts in `Band::Auto`, the gate that admitted
+/// it. A near-certain single signal wins; otherwise the agreement rule did,
+/// scored by the weaker signal (both bars being met is `min >= bar`).
+pub fn auto_basis(signals: &MergeSignals, t: &MergeThresholds) -> Option<MergeBasis> {
+    if let Some(best) = best_score(signals).filter(|&b| b >= t.auto_single) {
+        return Some(MergeBasis {
+            gate: MergeGate::Single,
+            score: best,
+        });
+    }
+    match (signals.cosine, signals.text) {
+        (Some(c), Some(x)) if c >= t.agree_cosine && x >= t.agree_text => Some(MergeBasis {
+            gate: MergeGate::Agreement,
+            score: c.min(x),
+        }),
+        _ => None,
+    }
+}
+
 /// The stronger of the two signals, if any is present.
 pub fn best_score(signals: &MergeSignals) -> Option<f32> {
     match (signals.cosine, signals.text) {
@@ -191,6 +236,38 @@ mod tests {
             text: Some(0.55),
         };
         assert_eq!(merge_decision(&s, &t), Band::Drop);
+    }
+
+    #[test]
+    fn auto_basis_names_the_gate_that_admitted_the_merge() {
+        let t = MergeThresholds::conservative();
+        let single = MergeSignals {
+            cosine: None,
+            text: Some(0.95),
+        };
+        assert_eq!(
+            auto_basis(&single, &t),
+            Some(MergeBasis {
+                gate: MergeGate::Single,
+                score: 0.95
+            })
+        );
+        let agree = MergeSignals {
+            cosine: Some(0.85),
+            text: Some(0.82),
+        };
+        assert_eq!(
+            auto_basis(&agree, &t),
+            Some(MergeBasis {
+                gate: MergeGate::Agreement,
+                score: 0.82
+            })
+        );
+        let held = MergeSignals {
+            cosine: Some(0.85),
+            text: Some(0.62),
+        };
+        assert_eq!(auto_basis(&held, &t), None);
     }
 
     #[test]

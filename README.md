@@ -58,7 +58,7 @@ photo out") rather than reviewing thousands of suggestions.
 - Deterministic, offline **rule-based extractor** (always on) plus an opt-in **local LLM**
   (Ollama) extractor and embeddings
 - **Knowledge graph** of entities and typed relationships, with bounded, cycle-safe traversal
-- **Entity resolution** — aliases, merge suggestions and reversible merges
+- **Entity resolution** — aliases, merge suggestions, and merges that can be undone exactly
 
 **Autonomous organization** (see [docs/AUTONOMOUS-PIPELINE.md](docs/AUTONOMOUS-PIPELINE.md))
 - **Act, then allow undo**: high-confidence work is applied automatically; only the thin,
@@ -311,8 +311,10 @@ See §7 of the [technical write-up](docs/TECHNICAL-WRITEUP.md) for the full thre
   foundation (auto-act + feedback loop), clustering, and active learning (information-gain
   tray ordering + feedback-driven threshold auto-tuning), and the photo pipeline
   (perceptual-hash duplicate groups, EXIF albums, optional local vision captions), with a
-  desktop review tray, group/photo browsers and a tuning view, and gRPC parity for all of it.
-- **Next:** entity unmerge; multi-user support.
+  desktop review tray, group/photo browsers and a tuning view, gRPC parity for all of it, and
+  exact entity unmerge (wrong auto-merges become tuning signal).
+- **Next:** one-download distribution. Gather stays a single-user, fully offline app; the goal
+  is that anyone can install their own private copy (bundled daemon and database, no Docker).
 
 ## License
 

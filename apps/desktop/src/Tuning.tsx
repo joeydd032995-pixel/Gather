@@ -5,6 +5,7 @@ import { useAsync } from "./hooks/useAsync";
 const KEY_LABELS: Record<TuningKey, string> = {
   "admit.hold_below": "Facts below this confidence go to the review tray",
   "merge.auto_single": "Duplicates at or above this similarity merge automatically",
+  "merge.agree": "…or when name and meaning both agree at least this much",
 };
 
 /** What the pipeline learned from your answers, why, and how to undo it. */

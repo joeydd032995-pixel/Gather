@@ -16,6 +16,8 @@
 
 pub mod worker;
 
+use uuid::Uuid;
+
 /// An undirected similarity edge between two node indices, `a < b`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Edge {
@@ -191,6 +193,15 @@ pub fn label_from_texts(texts: &[&str]) -> String {
 /// specific kind), then the longer name wins. Compare keys; higher survives.
 pub fn survivor_key(kind: &str, name: &str) -> (u8, usize) {
     ((kind != "other") as u8, name.chars().count())
+}
+
+/// A stable id for an unordered entity pair, so a held merge review is keyed by
+/// the pair (not one endpoint). Without this, two held suggestions sharing an
+/// entity collide on `review_queue`'s (target_kind, target_id) unique index and
+/// the second is silently dropped.
+pub fn pair_key(a: Uuid, b: Uuid) -> Uuid {
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("{lo}:{hi}").as_bytes())
 }
 
 #[cfg(test)]

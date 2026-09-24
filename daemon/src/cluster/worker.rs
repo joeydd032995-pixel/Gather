@@ -20,22 +20,17 @@ use serde_json::json;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use super::{cohesion, components, grouped, label_from_texts, mutual_knn, survivor_key, Edge};
+use super::{
+    cohesion, components, grouped, label_from_texts, mutual_knn, pair_key, survivor_key, Edge,
+};
 use crate::config::Config;
 use crate::decide::live::LiveThresholds;
-use crate::decide::{best_score, merge_decision, Band, MergeSignals};
+use crate::decide::{
+    auto_basis, best_score, merge_decision, Band, MergeBasis, MergeGate, MergeSignals,
+};
 use crate::entities::similarity::name_similarity;
-use crate::entities::{merge_entities, merge_suggestions};
+use crate::entities::{merge_entities_in, merge_suggestions};
 use crate::scan::score::{all_tokens, jaccard};
-
-/// A stable id for an unordered entity pair, so a held merge review is keyed by
-/// the pair (not one endpoint). Without this, two held suggestions sharing an
-/// entity collide on `review_queue`'s (target_kind, target_id) unique index and
-/// the second is silently dropped.
-fn pair_key(a: Uuid, b: Uuid) -> Uuid {
-    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-    Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("{lo}:{hi}").as_bytes())
-}
 
 #[derive(Debug, Default)]
 pub struct ClusterStats {
@@ -111,6 +106,9 @@ async fn entity_resolution_pass(
     };
 
     let mut auto_edges: Vec<Edge> = Vec::new();
+    // Why each Auto edge cleared the gate, parallel to auto_edges: kept with
+    // the merge so undoing it tunes the threshold that caused it.
+    let mut edge_basis: Vec<MergeBasis> = Vec::new();
     for s in &suggestions {
         // Supply BOTH signals when they exist. merge_suggestions emits only the
         // embedding row for a pair it scored both ways, so recompute the text
@@ -137,7 +135,15 @@ async fn entity_resolution_pass(
                     s.b.id, &s.b.name, &s.b.kind, &mut ids, &mut names, &mut kinds,
                 );
                 let (a, b) = if ia < ib { (ia, ib) } else { (ib, ia) };
-                auto_edges.push(Edge { a, b, sim: s.score });
+                // Weighted by the strongest signal (cohesion); the basis
+                // records which gate admitted it and on what coordinate.
+                let sim = best_score(&signals).unwrap_or(s.score);
+                let basis = auto_basis(&signals, &thresholds).unwrap_or(MergeBasis {
+                    gate: MergeGate::Single,
+                    score: sim,
+                });
+                auto_edges.push(Edge { a, b, sim });
+                edge_basis.push(basis);
             }
             Band::Hold => {
                 let parked = sqlx::query(
@@ -227,14 +233,26 @@ async fn entity_resolution_pass(
             .await?;
             if member_id != winner_id {
                 merged_away.push(member_id);
-                merge_entities(
-                    pool,
+                // The strongest Auto edge that pulled this member in: its
+                // basis is kept with the merge so an undo can teach the tuner.
+                let basis = auto_edges
+                    .iter()
+                    .zip(&edge_basis)
+                    .filter(|(e, _)| e.a == local || e.b == local)
+                    .max_by(|(x, _), (y, _)| x.sim.total_cmp(&y.sim))
+                    .map(|(_, b)| *b);
+                let mut tx = pool.begin().await?;
+                merge_entities_in(
+                    &mut tx,
                     winner_id,
                     member_id,
                     Some("auto-clustered duplicate".to_string()),
                     Some("auto".to_string()),
+                    basis,
                 )
                 .await?;
+                tx.commit().await?;
+                metrics::counter!("gather_entity_merges_total").increment(1);
                 stats.entities_merged += 1;
             }
         }

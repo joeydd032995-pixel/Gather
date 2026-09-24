@@ -276,6 +276,28 @@ async fn feedback_tunes_thresholds_drains_the_tray_and_is_reversible() {
         .unwrap();
     assert_eq!(tuned, 0);
 
+    // Undone agreement-gated merges tighten the agreement bar, and only it:
+    // a gate's corrections never move the other gate's threshold.
+    for _ in 0..25 {
+        sqlx::query(
+            "INSERT INTO unit_feedback (target_kind, target_id, action, corrected, score) \
+             VALUES ('merge', $1, 'reject', '{\"gate\": \"agreement\"}', 0.82)",
+        )
+        .bind(Uuid::new_v4())
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    }
+    let stats = run_one_pass(&state.pool, &state.config).await.unwrap();
+    let agree = stats
+        .changes
+        .iter()
+        .find(|c| c.key == "merge.agree")
+        .expect("agreement bar should move");
+    assert_eq!(agree.direction, Direction::Raise);
+    assert!((agree.to - 0.85).abs() < 1e-4, "raised to {}", agree.to);
+    assert!(stats.changes.iter().all(|c| c.key != "merge.auto_single"));
+
     // Leave no learned state behind for later suites.
     clear_learned_state(&state, false).await;
 }

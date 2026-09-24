@@ -175,6 +175,25 @@ pub async fn merge_entity(
     Ok(Json(json!(outcome)))
 }
 
+#[derive(Deserialize, Default)]
+pub struct UnmergeRequest {
+    pub note: Option<String>,
+    pub actor: Option<String>,
+}
+
+/// POST /entities/{id}/unmerge — split `{id}` back out of the entity it was
+/// merged into, restoring its units, edges and aliases, and never suggesting
+/// the pair again. An undone automatic merge teaches the tuner.
+pub async fn unmerge_entity(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    body: Option<Json<UnmergeRequest>>,
+) -> Result<Json<Value>, ApiError> {
+    let req = body.map(|b| b.0).unwrap_or_default();
+    let outcome = entities::unmerge_entity(&state.pool, id, req.note, req.actor).await?;
+    Ok(Json(json!(outcome)))
+}
+
 #[derive(Deserialize)]
 pub struct DismissRequest {
     pub other_id: Uuid,
