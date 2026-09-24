@@ -16,7 +16,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::cluster::survivor_key;
-use crate::entities::{dismiss_suggestion, merge_entities};
+use crate::entities::{dismiss_suggestion_in, merge_entities_in};
 use crate::error::ApiError;
 use crate::extract::persist::normalize_statement;
 use crate::AppState;
@@ -357,16 +357,16 @@ fn merge_pair(signals: &Value) -> Result<(Uuid, Uuid, Option<f32>), ApiError> {
     Ok((id("a")?, id("b")?, score))
 }
 
-/// Label a merge pair (the tuner's training signal) and close its tray entry.
+/// Label a merge pair (the tuner's training signal) and close its tray entry,
+/// inside the caller's transaction so the label commits with the action.
 async fn record_merge_verdict(
-    pool: &PgPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     review_id: Uuid,
     item: &ReviewItem,
     action: &str,
     score: Option<f32>,
     note: Option<&str>,
 ) -> Result<(), ApiError> {
-    let mut tx = pool.begin().await?;
     sqlx::query(
         "INSERT INTO unit_feedback (target_kind, target_id, action, corrected, note, score) \
          VALUES ('merge', $1, $2, $3, $4, $5)",
@@ -376,13 +376,12 @@ async fn record_merge_verdict(
     .bind(&item.signals)
     .bind(note)
     .bind(score)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     sqlx::query("UPDATE review_queue SET state = 'resolved' WHERE id = $1")
         .bind(review_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    tx.commit().await?;
     Ok(())
 }
 
@@ -427,8 +426,11 @@ pub async fn accept_review(
         ("entity", "merge-band") => {
             let (a, b, score) = merge_pair(&item.signals)?;
             let (winner, loser) = survivor_and_loser(&state.pool, a, b).await?;
-            merge_entities(
-                &state.pool,
+            // Merge and label in one transaction: a merge without its label
+            // would leave the tray entry open and un-retryable.
+            let mut tx = state.pool.begin().await?;
+            merge_entities_in(
+                &mut tx,
                 winner,
                 loser,
                 Some(
@@ -438,7 +440,9 @@ pub async fn accept_review(
                 Some("local-user".to_string()),
             )
             .await?;
-            record_merge_verdict(&state.pool, id, &item, "confirm", score, note.as_deref()).await?;
+            record_merge_verdict(&mut tx, id, &item, "confirm", score, note.as_deref()).await?;
+            tx.commit().await?;
+            metrics::counter!("gather_entity_merges_total").increment(1);
             Ok(Json(
                 json!({ "id": id, "action": "merged", "winner": winner, "loser": loser }),
             ))
@@ -469,15 +473,11 @@ pub async fn reject_review(
         }
         ("entity", "merge-band") => {
             let (a, b, score) = merge_pair(&item.signals)?;
-            dismiss_suggestion(
-                &state.pool,
-                a,
-                b,
-                note.clone(),
-                Some("local-user".to_string()),
-            )
-            .await?;
-            record_merge_verdict(&state.pool, id, &item, "reject", score, note.as_deref()).await?;
+            let mut tx = state.pool.begin().await?;
+            dismiss_suggestion_in(&mut tx, a, b, note.clone(), Some("local-user".to_string()))
+                .await?;
+            record_merge_verdict(&mut tx, id, &item, "reject", score, note.as_deref()).await?;
+            tx.commit().await?;
             Ok(Json(
                 json!({ "id": id, "action": "dismissed", "pair": [a, b] }),
             ))

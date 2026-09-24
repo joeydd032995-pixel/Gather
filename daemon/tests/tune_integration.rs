@@ -165,6 +165,16 @@ async fn feedback_tunes_thresholds_drains_the_tray_and_is_reversible() {
     .await
     .unwrap();
     assert_eq!(audited, 1);
+    // A lowering is audited with the evidence at the NEW threshold.
+    let reason: Value = sqlx::query_scalar(
+        "SELECT reason FROM decision_tuning_audit WHERE key = $1 AND actor = 'auto-tuner'",
+    )
+    .bind(KEY_ADMIT_HOLD_BELOW)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(reason["lowering"]["support"], json!(42));
+    assert_eq!(reason["lowering"]["region_support"], json!(12));
 
     // The tray drained itself, and the survivor was re-ranked.
     assert_eq!(stats.drained, 1);
@@ -238,6 +248,16 @@ async fn feedback_tunes_thresholds_drains_the_tray_and_is_reversible() {
     let tuning: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(tuning["thresholds"][0]["tuned"], json!(false));
     assert!((tuning["thresholds"][0]["value"].as_f64().unwrap() - 0.5).abs() < 1e-6);
+
+    // The reset is durable: the same pre-reset labels don't re-create the
+    // learned value on the next pass.
+    let stats = run_one_pass(&state.pool, &state.config).await.unwrap();
+    assert!(stats.changes.is_empty(), "{:?}", stats.changes);
+    let tuned: i64 = sqlx::query_scalar("SELECT count(*) FROM decision_tuning")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    assert_eq!(tuned, 0);
 
     // Leave no learned state behind for later suites.
     clear_learned_state(&state, false).await;

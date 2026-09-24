@@ -183,12 +183,17 @@ threshold *up*: the cautious direction. So the rules are asymmetric:
 - The gap between the two rules is hysteresis: the tuner settles instead of oscillating.
 
 Neither the drop floor (the tuner can never auto-discard data) nor the two-signal agreement
-bars nor the review floor are ever tuned.
+bars nor the review floor are ever tuned. A threshold you set in the environment *outside* the
+tuner's bounds (e.g. `GATHER_ADMIT_HOLD_BELOW=0.1`) is treated as a deliberate choice and left
+alone.
 
 Every move is written to `decision_tuning_audit` with the evidence behind it. When the admission
 bar comes down, low-confidence tray entries that now clear it are dismissed automatically, so
-the tray drains itself. `GET /tuning` shows the current values and history,
-`POST /tuning/reset` returns to the env defaults, and `GATHER_TUNE_ENABLED=false` freezes them.
+the tray drains itself (and a held merge pair that a later pass auto-merges is closed too).
+`GET /tuning` shows the current values and history, including the evidence at the new
+threshold for every lowering. `POST /tuning/reset` returns to the env defaults *durably*: only
+verdicts given after the reset count toward tuning that key again.
+`GATHER_TUNE_ENABLED=false` freezes the thresholds.
 
 **Known gap:** there is no entity *unmerge* yet, so an auto-merge can't be undone and can't
 produce a negative label. The merge tuner therefore effectively only loosens on accepted tray
