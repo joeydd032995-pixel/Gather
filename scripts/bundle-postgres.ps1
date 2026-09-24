@@ -113,8 +113,10 @@ try {
   Write-Host '==> smoke test: initdb, start, CREATE EXTENSION vector + pgcrypto'
   $data = Join-Path $Work 'data'
   Invoke-Checked 'initdb' { & "$Out/bin/initdb.exe" -D $data -U gather --auth=trust | Out-Null }
+  # Not piped: the server pg_ctl launches inherits its output handles, so a
+  # pipe (| Out-Null) would never close and the script would hang.
   Invoke-Checked 'pg_ctl start' {
-    & "$Out/bin/pg_ctl.exe" -D $data -o '-p 7699 -c listen_addresses=127.0.0.1' -l "$Work/pg.log" -w start | Out-Null
+    & "$Out/bin/pg_ctl.exe" -D $data -o '-p 7699 -c listen_addresses=127.0.0.1' -l "$Work/pg.log" -w start
   }
   try {
     Invoke-Checked 'psql' {

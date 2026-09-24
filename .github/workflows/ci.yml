@@ -230,6 +230,9 @@ jobs:
   build-desktop:
     name: build desktop (${{ matrix.platform }})
     needs: [lint, test, restore-drill, graph-benchmark]
+    # A cold build compiles PostgreSQL too (~20 min on Windows); anything far
+    # beyond that is a hang, and should fail rather than hold a runner for 6 h.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:

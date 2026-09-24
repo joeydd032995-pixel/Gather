@@ -426,16 +426,36 @@ fn start_postgres(
     }
     let log = logs.join("postgres.log");
     trim_log(&log);
-    let mut cmd = pg_command(bin, lib, "pg_ctl");
-    cmd.arg("start")
+    // pg_ctl's own output goes to a file, never a pipe: on Windows the server
+    // it launches inherits these handles, so a pipe would never reach EOF and
+    // reading it (as `Command::output` does) would wait forever.
+    let ctl_log_path = logs.join("pg_ctl.log");
+    let ctl_log = File::create(&ctl_log_path)
+        .map_err(|e| format!("opening {}: {e}", ctl_log_path.display()))?;
+    let ctl_err = ctl_log
+        .try_clone()
+        .map_err(|e| format!("opening {}: {e}", ctl_log_path.display()))?;
+    let status = pg_command(bin, lib, "pg_ctl")
+        .arg("start")
         .arg("-D")
         .arg(pg_data)
         .arg("-l")
         .arg(&log)
         .args(["-w", "-t", "60", "-o"])
-        .arg(format!("-p {port}"));
-    run(cmd, "starting the database")
-        .map_err(|e| format!("{e}\nIf port {port} is taken, set GATHER_PG_PORT to a free port."))
+        .arg(format!("-p {port}"))
+        .stdout(ctl_log)
+        .stderr(ctl_err)
+        .status()
+        .map_err(|e| format!("starting the database: {e}"))?;
+    if status.success() {
+        return Ok(());
+    }
+    let detail = fs::read_to_string(&ctl_log_path).unwrap_or_default();
+    Err(format!(
+        "starting the database failed ({status}): {}\n\
+         If port {port} is taken, set GATHER_PG_PORT to a free port.",
+        detail.trim()
+    ))
 }
 
 /// initdb creates only the `postgres` database; the daemon uses its own.
