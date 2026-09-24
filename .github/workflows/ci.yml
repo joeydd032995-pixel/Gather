@@ -20,7 +20,7 @@ jobs:
     name: lint (fmt + clippy)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -45,7 +45,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
         with:
@@ -82,7 +82,7 @@ jobs:
     env:
       DATABASE_URL: postgres://gather:gather-ci@localhost:5432/gather
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -123,7 +123,7 @@ jobs:
       GATHER_RESTORE_DRILL_ALLOW_DESTRUCTIVE: "1"
       GATHER_DAEMON_BIN: daemon/target/debug/gather-daemon
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -175,7 +175,7 @@ jobs:
       # Reporting only: a CI-runner p95 is not evidence about the 150 ms gate.
       GATHER_BENCH_ENFORCE: "0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -196,7 +196,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs: [lint, test, restore-drill, graph-benchmark]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -236,7 +236,7 @@ jobs:
             os: macos-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
