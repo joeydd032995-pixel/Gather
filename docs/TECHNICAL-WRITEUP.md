@@ -1170,7 +1170,9 @@ variant. There is no telemetry, no update phone-home, no crash reporting.
   are already in place from day one.
 - **Phase 3 — scale (only if measured)**: VPS live replication to the user's *own* server.
   Gather is single-user by design and never shares data: "more users" means more people each
-  running their own private install, not accounts or namespaces within one.
+  running their own private install, not accounts or namespaces within one. That install is
+  one download (✅ shipped: the desktop app bundles the daemon and a PostgreSQL + pgvector
+  runtime and supervises both; see `docs/INSTALL.md`).
   **Neo4j is explicitly deferred**: adopt only if recursive-CTE traversal p95 exceeds 150 ms at
   >1M relationship rows after index tuning — the `entity_neighborhood()` function is the single
   seam where a graph-store swap would land. **The trigger is not met on the evidence in §9.1**;

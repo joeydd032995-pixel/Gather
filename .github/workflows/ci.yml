@@ -221,9 +221,18 @@ jobs:
           if-no-files-found: error
 
   # ------------------------------------------------------- build desktop ----
+  # One-download installers: each bundles the daemon (sidecar) and a
+  # PostgreSQL + pgvector runtime compiled here from pinned sources
+  # (scripts/bundle-postgres.*). Installers are unsigned unless the signing
+  # secrets exist; see docs/RELEASING.md. Every signing step below is a no-op
+  # without its secret, and signing secrets are only handed to builds of
+  # release tags (v*): branch and PR builds never see them.
   build-desktop:
     name: build desktop (${{ matrix.platform }})
     needs: [lint, test, restore-drill, graph-benchmark]
+    # A cold build compiles PostgreSQL too (~20 min on Windows); anything far
+    # beyond that is a hang, and should fail rather than hold a runner for 6 h.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -235,12 +244,18 @@ jobs:
           - platform: macos
             os: macos-latest
     runs-on: ${{ matrix.os }}
+    env:
+      HAS_UPDATER_KEY: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.TAURI_SIGNING_PRIVATE_KEY != '' && vars.TAURI_UPDATER_PUBKEY != '' }}
+      HAS_APPLE_CERT: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.APPLE_CERTIFICATE != '' }}
+      HAS_WINDOWS_CERT: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.WINDOWS_CERTIFICATE != '' }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: apps/desktop/src-tauri
+          workspaces: |
+            daemon
+            apps/desktop/src-tauri
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -253,6 +268,106 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
             librsvg2-dev patchelf libssl-dev
+
+      # --- bundled PostgreSQL + pgvector (cached per OS and script version) --
+      - name: cache bundled PostgreSQL
+        id: pg-cache
+        uses: actions/cache@v4
+        with:
+          path: apps/desktop/src-tauri/resources/postgres
+          key: pg-bundle-${{ matrix.platform }}-${{ hashFiles('scripts/bundle-postgres.sh', 'scripts/bundle-postgres.ps1') }}
+      - name: build PostgreSQL + pgvector (linux/macos)
+        if: steps.pg-cache.outputs.cache-hit != 'true' && matrix.platform != 'windows'
+        run: |
+          if [ "${{ matrix.platform }}" = macos ]; then brew list openssl@3 >/dev/null || brew install openssl@3; fi
+          scripts/bundle-postgres.sh
+      - name: MSVC developer shell (windows)
+        if: steps.pg-cache.outputs.cache-hit != 'true' && matrix.platform == 'windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: build PostgreSQL + pgvector (windows)
+        if: steps.pg-cache.outputs.cache-hit != 'true' && matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          pip install --quiet meson ninja
+          choco install -y --no-progress winflexbison3 pkgconfiglite
+          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg" install openssl:x64-windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          scripts/bundle-postgres.ps1
+
+      # --- daemon sidecar ----------------------------------------------------
+      - name: build daemon sidecar
+        shell: bash
+        run: |
+          # After the MSVC developer shell step, rustc calls `link.exe` from
+          # PATH, where Git Bash's /usr/bin/link (coreutils) comes first. Pin
+          # MSVC's linker for this and the later tauri build.
+          if [ -n "${VCToolsInstallDir:-}" ]; then
+            linker="${VCToolsInstallDir}bin\\Hostx64\\x64\\link.exe"
+            export CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER="$linker"
+            echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$linker" >> "$GITHUB_ENV"
+          fi
+          cargo build --release --locked --manifest-path daemon/Cargo.toml
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          ext=""; [ "${{ matrix.platform }}" = windows ] && ext=".exe"
+          mkdir -p apps/desktop/src-tauri/binaries dist-daemon
+          cp "daemon/target/release/gather-daemon$ext" "apps/desktop/src-tauri/binaries/gather-daemon-$triple$ext"
+          cp "daemon/target/release/gather-daemon$ext" "dist-daemon/gather-daemon$ext"
+
+      # --- signing hooks (inactive until the secrets exist) -----------------
+      - name: updater signing config
+        if: env.HAS_UPDATER_KEY == 'true'
+        shell: bash
+        env:
+          PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
+        run: |
+          python3 - <<'PY' > apps/desktop/src-tauri/tauri.updater.conf.json
+          import json, os
+          print(json.dumps({
+            "bundle": {"createUpdaterArtifacts": True},
+            "plugins": {"updater": {
+              "pubkey": os.environ["PUBKEY"],
+              "endpoints": ["https://github.com/${{ github.repository }}/releases/latest/download/latest.json"],
+              "windows": {"installMode": "passive"},
+            }},
+          }))
+          PY
+          echo "TAURI_EXTRA_CONFIG=$TAURI_EXTRA_CONFIG --config src-tauri/tauri.updater.conf.json" >> "$GITHUB_ENV"
+      - name: macOS code signing + notarization
+        if: matrix.platform == 'macos' && env.HAS_APPLE_CERT == 'true'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        # Tauri imports the certificate, signs and notarizes when these are set.
+        run: |
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+                   APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            [ -n "${!v}" ] && { echo "$v<<__EOF__"; echo "${!v}"; echo "__EOF__"; } >> "$GITHUB_ENV"
+          done
+      - name: Windows code signing
+        if: matrix.platform == 'windows' && env.HAS_WINDOWS_CERT == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'cert.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item $pfx
+          @{ bundle = @{ windows = @{
+              certificateThumbprint = $cert.Thumbprint
+              digestAlgorithm = 'sha256'
+              timestampUrl = 'http://timestamp.digicert.com'
+          } } } | ConvertTo-Json -Depth 5 | Set-Content apps/desktop/src-tauri/tauri.windows-sign.conf.json
+          "TAURI_EXTRA_CONFIG=$env:TAURI_EXTRA_CONFIG --config src-tauri/tauri.windows-sign.conf.json" >> $env:GITHUB_ENV
+
+      # --- build -------------------------------------------------------------
       - name: npm install
         working-directory: apps/desktop
         run: npm ci
@@ -261,19 +376,32 @@ jobs:
         run: npm run build
       - name: tauri build
         working-directory: apps/desktop
-        run: npm run tauri -- build
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ env.HAS_UPDATER_KEY == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ env.HAS_UPDATER_KEY == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        # TAURI_EXTRA_CONFIG is intentionally unquoted: zero or more --config pairs.
+        run: npm run tauri -- build --config src-tauri/tauri.bundle.conf.json $TAURI_EXTRA_CONFIG
       - uses: actions/upload-artifact@v7
         with:
           name: gather-desktop-${{ matrix.platform }}
           path: |
             apps/desktop/src-tauri/target/release/bundle/deb/*.deb
             apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+            apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage.sig
             apps/desktop/src-tauri/target/release/bundle/rpm/*.rpm
             apps/desktop/src-tauri/target/release/bundle/msi/*.msi
             apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
+            apps/desktop/src-tauri/target/release/bundle/nsis/*.exe.sig
             apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg
             apps/desktop/src-tauri/target/release/bundle/macos/*.app.tar.gz
-          if-no-files-found: warn
+            apps/desktop/src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gather-daemon-${{ matrix.platform }}
+          path: dist-daemon/*
+          if-no-files-found: error
 
   # ------------------------------------------------------------- release ----
   release:
@@ -282,19 +410,32 @@ jobs:
     needs: [build-daemon, build-desktop]
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v7
+      - name: tag matches the app version
+        run: |
+          app=$(python3 -c "import json; print(json.load(open('apps/desktop/src-tauri/tauri.conf.json'))['version'])")
+          [ "v$app" = "$GITHUB_REF_NAME" ] || {
+            echo "tag $GITHUB_REF_NAME does not match tauri.conf.json version $app (see docs/RELEASING.md)"; exit 1; }
       - uses: actions/download-artifact@v8
         with:
-          path: dist
-      - name: package daemon binary
+          path: artifacts
+      - name: package standalone daemons
         run: |
-          chmod +x dist/gather-daemon-linux-x86_64/gather-daemon
-          tar -C dist/gather-daemon-linux-x86_64 -czf \
-            dist/gather-daemon-linux-x86_64.tar.gz gather-daemon
+          mkdir -p release
+          for os in linux windows macos; do
+            dir=artifacts/gather-daemon-$os
+            if [ "$os" = windows ]; then
+              (cd "$dir" && zip -q "$GITHUB_WORKSPACE/release/gather-daemon-$os-x86_64.zip" gather-daemon.exe)
+            else
+              arch=x86_64; [ "$os" = macos ] && arch=aarch64
+              chmod +x "$dir/gather-daemon"
+              tar -C "$dir" -czf "release/gather-daemon-$os-$arch.tar.gz" gather-daemon
+            fi
+          done
+          find artifacts/gather-desktop-* -type f -exec cp {} release/ \;
+      - name: checksums + updater manifest
+        run: python3 scripts/release-manifest.py release "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY" release
       - uses: softprops/action-gh-release@v3
         with:
-          files: |
-            dist/gather-daemon-linux-x86_64.tar.gz
-            dist/gather-desktop-linux/**/*
-            dist/gather-desktop-windows/**/*
-            dist/gather-desktop-macos/**/*
+          files: release/*
           generate_release_notes: true

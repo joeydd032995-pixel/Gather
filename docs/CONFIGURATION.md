@@ -12,6 +12,10 @@ Rules the daemon applies at startup:
   `GATHER_ADMIT_HOLD_BELOW`.
 - Other numeric variables are **clamped** to their range.
 
+The packaged desktop app starts the daemon itself and sets `DATABASE_URL` (its bundled
+database) and `GATHER_AUTH_MODE=keychain` unless you set `GATHER_AUTH_MODE` yourself. Any other
+variable in the app's environment reaches the daemon unchanged. See [Desktop app](#desktop-app).
+
 ## Docker Compose / Postgres
 
 These are read by `docker-compose.yml`, not by the daemon itself.
@@ -38,6 +42,14 @@ These are read by `docker-compose.yml`, not by the daemon itself.
 | `GATHER_RATE_LIMIT_RPS` | `50` | Global requests/second shared by REST and gRPC; `0` disables. **Validated** |
 | `RUST_LOG` | `info,sqlx=warn,tower_http=info` | Log filter (tracing `EnvFilter` syntax) |
 | `GATHER_LOG_JSON` | `false` | Emit JSON logs |
+
+## Desktop app
+
+Read by the packaged app's supervisor, not the daemon ([INSTALL.md](INSTALL.md)).
+
+| Variable | Default | Description |
+|---|---|---|
+| `GATHER_PG_PORT` | `7603` | Loopback port of the bundled PostgreSQL. Change it only if another program uses 7603 |
 
 ## Authentication
 

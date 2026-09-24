@@ -10,10 +10,21 @@ import Clusters from "./Clusters";
 import Contradictions from "./Contradictions";
 import Entities from "./Entities";
 import Photos from "./Photos";
+import { useRuntime } from "./hooks/useRuntime";
+import { checkForUpdate, getApiToken, getUpdateSettings, isTauri } from "./native";
 import ReviewTray from "./ReviewTray";
+import Settings from "./Settings";
 import Tuning from "./Tuning";
 
-type Tab = "upload" | "review" | "clusters" | "photos" | "contradictions" | "entities" | "tuning";
+type Tab =
+  | "upload"
+  | "review"
+  | "clusters"
+  | "photos"
+  | "contradictions"
+  | "entities"
+  | "tuning"
+  | "settings";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "upload", label: "Upload" },
@@ -23,11 +34,11 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "contradictions", label: "Contradictions" },
   { id: "entities", label: "Entities" },
   { id: "tuning", label: "Tuning" },
+  { id: "settings", label: "Settings" },
 ];
 
 // Native file picker (Tauri dialog plugin). In a plain browser (vite dev
 // outside Tauri) we fall back to a hidden <input type="file">.
-const isTauri = "__TAURI_INTERNALS__" in window;
 
 async function pickWithNativeDialog(): Promise<File[]> {
   const { open } = await import("@tauri-apps/plugin-dialog");
@@ -54,7 +65,10 @@ async function pickWithNativeDialog(): Promise<File[]> {
 }
 
 export default function App() {
+  const runtime = useRuntime();
+  const settled = runtime.state === "ready" || runtime.state === "unmanaged";
   const [tab, setTab] = useState<Tab>("upload");
+  const [updateVersion, setUpdateVersion] = useState<string | null>(null);
   const [health, setHealth] = useState<HealthState>({ reachable: false, ready: false });
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -63,18 +77,31 @@ export default function App() {
   const fallbackInput = useRef<HTMLInputElement>(null);
 
   // In the packaged app, pick up the daemon's bearer token from the OS
-  // keychain (written by the daemon in GATHER_AUTH_MODE=keychain).
+  // keychain (written by the daemon in GATHER_AUTH_MODE=keychain). Waits for
+  // start-up: on first run the daemon creates the token as it starts.
   useEffect(() => {
-    if (!isTauri) return;
-    import("@tauri-apps/api/core")
-      .then(({ invoke }) => invoke<string | null>("get_api_token"))
+    if (!isTauri || !settled) return;
+    getApiToken()
       .then((token) => {
         if (token) setApiToken(token);
       })
       .catch(() => {
         /* keychain empty or unavailable: dev daemons run open on loopback */
       });
-  }, []);
+  }, [settled]);
+
+  // The opt-in update check: only when the user turned it on in Settings.
+  useEffect(() => {
+    if (!isTauri || !settled) return;
+    getUpdateSettings()
+      .then((s) => (s.check_on_start ? checkForUpdate() : null))
+      .then((result) => {
+        if (result?.available) setUpdateVersion(result.version);
+      })
+      .catch(() => {
+        /* offline or unreachable: say nothing, try again next start */
+      });
+  }, [settled]);
 
   useEffect(() => {
     let cancelled = false;
@@ -121,6 +148,24 @@ export default function App() {
     }
   }, [ingest]);
 
+  if (runtime.state === "starting" || runtime.state === "failed") {
+    return (
+      <main className="app">
+        <header>
+          <h1>Gather</h1>
+        </header>
+        {runtime.state === "starting" ? (
+          <p className="hint">{runtime.step}…</p>
+        ) : (
+          <>
+            <p className="error">{runtime.message}</p>
+            {runtime.log_dir && <p className="hint">Logs: {runtime.log_dir}</p>}
+          </>
+        )}
+      </main>
+    );
+  }
+
   return (
     <main className="app">
       <header>
@@ -132,6 +177,15 @@ export default function App() {
           {health.ready ? "● local daemon ready" : health.reachable ? "● database not ready" : "○ daemon offline"}
         </span>
       </header>
+
+      {updateVersion && (
+        <p className="hint">
+          Gather {updateVersion} is available.{" "}
+          <button className="link-button" onClick={() => setTab("settings")}>
+            Update in Settings
+          </button>
+        </p>
+      )}
 
       <nav className="tabs">
         {TABS.map((t) => (
@@ -152,6 +206,8 @@ export default function App() {
       {tab === "photos" && <Photos />}
 
       {tab === "tuning" && <Tuning />}
+
+      {tab === "settings" && <Settings />}
 
       {tab === "contradictions" && <Contradictions />}
 
