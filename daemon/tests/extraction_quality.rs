@@ -29,7 +29,6 @@ struct Case {
 struct ExpectedUnit {
     kind: String,
     statement: String,
-    #[allow(dead_code)]
     subject: Option<String>,
 }
 
@@ -42,6 +41,12 @@ fn normalize(s: &str) -> String {
         .to_lowercase()
         .trim_end_matches(['.', '!', '?'])
         .to_string()
+}
+
+/// Same normalization for the optional subject entity, so `None` only matches
+/// `None` and a named subject has to agree case-insensitively.
+fn normalize_subject(s: &Option<String>) -> Option<String> {
+    s.as_ref().map(|v| normalize(v))
 }
 
 fn load_golden() -> Golden {
@@ -73,10 +78,17 @@ fn rule_extractor_meets_precision_gate() {
 
         for unit in &produced {
             let stmt = normalize(&unit.statement);
-            if let Some(pos) = remaining
-                .iter()
-                .position(|e| e.kind == unit.kind && normalize(&e.statement) == stmt)
-            {
+            let subject = normalize_subject(&unit.subject);
+            // Match on (kind, statement, subject). Subject is part of the key
+            // because the persistence path resolves it into subject_entity_id
+            // and hangs graph edges off it — an extractor change that keeps the
+            // statement but assigns the wrong subject is a regression, not a
+            // usable unit, so it must not score as a true positive.
+            if let Some(pos) = remaining.iter().position(|e| {
+                e.kind == unit.kind
+                    && normalize(&e.statement) == stmt
+                    && normalize_subject(&e.subject) == subject
+            }) {
                 usable_produced += 1;
                 matched_expected += 1;
                 remaining.remove(pos);
@@ -84,8 +96,8 @@ fn rule_extractor_meets_precision_gate() {
                 // Extractor emitted a unit no reviewer labelled usable: a false
                 // positive that (correctly) costs precision.
                 failures.push(format!(
-                    "  [{}] spurious {} unit: {:?}",
-                    case.name, unit.kind, unit.statement
+                    "  [{}] spurious {} unit (subject {:?}): {:?}",
+                    case.name, unit.kind, unit.subject, unit.statement
                 ));
             }
         }
@@ -131,6 +143,17 @@ fn rule_extractor_meets_precision_gate() {
             eprintln!("{f}");
         }
     }
+
+    // Guard the degenerate case the precision ratio hides: if every rule stops
+    // matching (or extract_units returns empty for everything), produced_total
+    // is 0 and precision is vacuously 1.0. Since recall is informational, a
+    // total loss of extraction would otherwise sail through the gate. Any corpus
+    // with at least one labelled unit must produce at least one unit.
+    assert!(
+        expected_total == 0 || produced_total > 0,
+        "extractor produced zero units across {expected_total} labelled units — \
+         a total extraction loss that the precision ratio would score as 100%"
+    );
 
     assert!(
         precision >= golden.threshold_precision,

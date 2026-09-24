@@ -11,8 +11,10 @@
     "The gate asserts precision only. Inputs deliberately include noise (should",
     "produce nothing), adversarial over-matches (produce an UNUSABLE unit -> lowers",
     "precision), and facts the rules cannot catch (lower recall). Statements are the",
-    "full sentence as the extractor renders it (tidied, trailing . ! ? stripped);",
-    "matching normalizes case/whitespace so wording just has to agree."
+    "full sentence as the extractor renders it (tidied, trailing . ! ? stripped).",
+    "A unit matches a label on (kind, statement, subject): subject is part of the",
+    "key because persistence resolves it into subject_entity_id and hangs graph",
+    "edges off it. Matching normalizes case/whitespace so wording just has to agree."
   ],
   "threshold_precision": 0.70,
   "cases": [
