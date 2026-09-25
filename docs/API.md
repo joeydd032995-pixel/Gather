@@ -97,7 +97,7 @@ extraction worker.
 curl -X POST $API/ingest/files -F file=@report.pdf -F file=@photo.jpg
 ```
 
-Per-request size is capped by `GATHER_MAX_UPLOAD_MB`.
+Per-request size is capped by `GATHER_MAX_UPLOAD_MB`; larger requests get `413 payload_too_large`, refused from their declared `Content-Length` before the body is read. For large batches, send one file per request (as the desktop app does): memory then stays at one file, and one bad file doesn't fail the rest.
 
 ---
 

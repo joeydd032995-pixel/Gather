@@ -203,16 +203,31 @@ export async function dismissMergeSuggestion(
   await jsonOrThrow(res);
 }
 
+/** How many times an upload rate-limited by the daemon (429) is retried. */
+const UPLOAD_RETRIES = 8;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function uploadFiles(files: File[]): Promise<FilesResponse> {
   const form = new FormData();
   for (const file of files) {
     form.append("file", file, file.name);
   }
-  const res = await fetch(`${DAEMON_URL}/api/v1/ingest/files`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: form,
-  });
+  // Uploading a batch one file at a time can outpace the daemon's rate limit;
+  // a 429 means "slow down", not "this file is bad", so wait and retry.
+  let res: Response;
+  for (let attempt = 0; ; attempt++) {
+    res = await fetch(`${DAEMON_URL}/api/v1/ingest/files`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: form,
+    });
+    if (res.status !== 429 || attempt >= UPLOAD_RETRIES) break;
+    const retryAfter = Number(res.headers.get("Retry-After"));
+    await sleep(retryAfter > 0 ? retryAfter * 1000 : 250 * 2 ** attempt);
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => null);
     throw new Error(body?.error?.message ?? `upload failed (${res.status})`);

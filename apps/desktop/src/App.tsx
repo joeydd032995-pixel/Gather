@@ -40,7 +40,18 @@ const TABS: { id: Tab; label: string }[] = [
 // Native file picker (Tauri dialog plugin). In a plain browser (vite dev
 // outside Tauri) we fall back to a hidden <input type="file">.
 
-async function pickWithNativeDialog(): Promise<File[]> {
+/** A file to upload, read only when its turn comes so a large batch never
+ *  sits in memory all at once. */
+interface UploadSource {
+  name: string;
+  load: () => Promise<Blob>;
+}
+
+function fromFiles(files: File[]): UploadSource[] {
+  return files.map((file) => ({ name: file.name, load: async () => file }));
+}
+
+async function pickWithNativeDialog(): Promise<UploadSource[]> {
   const { open } = await import("@tauri-apps/plugin-dialog");
   const selection = await open({
     multiple: true,
@@ -55,13 +66,10 @@ async function pickWithNativeDialog(): Promise<File[]> {
   if (!selection) return [];
   const paths = Array.isArray(selection) ? selection : [selection];
   const { invoke } = await import("@tauri-apps/api/core");
-  const files: File[] = [];
-  for (const path of paths) {
-    const bytes = await invoke<number[]>("read_upload_file", { path });
-    const name = path.split(/[\\/]/).pop() ?? "unnamed";
-    files.push(new File([new Uint8Array(bytes)], name));
-  }
-  return files;
+  return paths.map((path) => ({
+    name: path.split(/[\\/]/).pop() ?? "unnamed",
+    load: async () => new Blob([await invoke<ArrayBuffer>("read_upload_file", { path })]),
+  }));
 }
 
 export default function App() {
@@ -72,6 +80,7 @@ export default function App() {
   const [health, setHealth] = useState<HealthState>({ reachable: false, ready: false });
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [results, setResults] = useState<FileResult[]>([]);
   const [error, setError] = useState<string | null>(null);
   const fallbackInput = useRef<HTMLInputElement>(null);
@@ -117,32 +126,58 @@ export default function App() {
     };
   }, []);
 
-  const ingest = useCallback(async (files: File[]) => {
-    if (files.length === 0) return;
+  // One file per request, one at a time: memory stays at one file however
+  // large the batch, and a file that fails doesn't stop the rest.
+  const ingest = useCallback(async (sources: UploadSource[]) => {
+    if (sources.length === 0) return;
     setBusy(true);
     setError(null);
-    try {
-      const response = await uploadFiles(files);
-      setResults((prev) => [...response.files, ...prev]);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
+    for (const [i, source] of sources.entries()) {
+      setProgress({ done: i, total: sources.length });
+      try {
+        const blob = await source.load();
+        // A browser File keeps its MIME type, which the daemon uses to
+        // classify files whose extension doesn't say what they are.
+        const file =
+          blob instanceof File ? blob : new File([blob], source.name, { type: blob.type });
+        const response = await uploadFiles([file]);
+        setResults((prev) => [...response.files, ...prev]);
+      } catch (e) {
+        const detail = e instanceof Error ? e.message : String(e);
+        setResults((prev) => [
+          {
+            filename: source.name,
+            kind: null,
+            artifact_id: null,
+            deduplicated: false,
+            status: "rejected",
+            detail,
+            segments: 0,
+          },
+          ...prev,
+        ]);
+      }
     }
+    setProgress(null);
+    setBusy(false);
   }, []);
 
   const onDrop = useCallback(
     (event: React.DragEvent) => {
       event.preventDefault();
       setDragging(false);
-      ingest(Array.from(event.dataTransfer.files));
+      ingest(fromFiles(Array.from(event.dataTransfer.files)));
     },
     [ingest],
   );
 
   const onPick = useCallback(async () => {
     if (isTauri) {
-      ingest(await pickWithNativeDialog());
+      try {
+        await ingest(await pickWithNativeDialog());
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } else {
       fallbackInput.current?.click();
     }
@@ -226,7 +261,11 @@ export default function App() {
       >
         <p>Drag &amp; drop PDFs, markdown, text files, photos or screenshots here</p>
         <button onClick={onPick} disabled={busy || !health.ready}>
-          {busy ? "Uploading…" : "Choose files…"}
+          {progress
+            ? `Uploading ${progress.done + 1} of ${progress.total}…`
+            : busy
+              ? "Uploading…"
+              : "Choose files…"}
         </button>
         <input
           ref={fallbackInput}
@@ -235,7 +274,7 @@ export default function App() {
           hidden
           accept=".pdf,.md,.markdown,.txt,.png,.jpg,.jpeg,.webp,.tiff,.heic"
           onChange={(e) => {
-            ingest(Array.from(e.target.files ?? []));
+            ingest(fromFiles(Array.from(e.target.files ?? [])));
             e.target.value = "";
           }}
         />

@@ -16,13 +16,17 @@ use updates::{InstallError, PendingUpdate, UpdateCheck, UpdateSettings};
 
 /// Read a file the user explicitly selected via the native dialog so the
 /// webview can upload it to the local daemon. Scope: only invoked with paths
-/// returned by the dialog plugin; rejects directories.
+/// returned by the dialog plugin; rejects directories. Returned as raw bytes
+/// (an ArrayBuffer in the webview): serialized as JSON it would be an array
+/// of numbers many times the file's size.
 #[tauri::command]
-fn read_upload_file(path: PathBuf) -> Result<Vec<u8>, String> {
+fn read_upload_file(path: PathBuf) -> Result<tauri::ipc::Response, String> {
     if path.is_dir() {
         return Err("directories cannot be uploaded".to_string());
     }
-    std::fs::read(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))
+    std::fs::read(&path)
+        .map(tauri::ipc::Response::new)
+        .map_err(|e| format!("failed to read {}: {e}", path.display()))
 }
 
 /// The daemon's API token. In GATHER_AUTH_MODE=env (chosen by the user,

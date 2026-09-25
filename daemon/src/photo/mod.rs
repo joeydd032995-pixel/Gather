@@ -11,5 +11,6 @@
 //! Everything but captions is pure Rust and runs fully offline.
 
 pub mod albums;
+pub mod decode;
 pub mod phash;
 pub mod worker;

@@ -17,6 +17,8 @@ pub enum ApiError {
     UnsupportedMedia(String),
     #[error("rate limit exceeded")]
     TooManyRequests,
+    #[error("{0}")]
+    PayloadTooLarge(String),
     #[error("database error")]
     Db(#[from] sqlx::Error),
     #[error("internal error")]
@@ -33,6 +35,7 @@ impl ApiError {
                 (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type")
             }
             ApiError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "too_many_requests"),
+            ApiError::PayloadTooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
             ApiError::Db(_) => (StatusCode::INTERNAL_SERVER_ERROR, "database_error"),
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
         }
