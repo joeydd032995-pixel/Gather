@@ -73,6 +73,8 @@ message Artifact {
   google.protobuf.Timestamp source_created_at = 11; // artifacts.source_created_at
   google.protobuf.Timestamp ingested_at = 12;      // artifacts.ingested_at
   google.protobuf.Struct metadata = 13;            // artifacts.metadata (jsonb)
+  int64 unit_count = 14;                           // live atomic units extracted from it
+  string status = 15;                              // processing | done | failed
 }
 
 message AtomicUnit {
@@ -197,6 +199,10 @@ service QueryService {
   rpc ListAtomicUnits(ListAtomicUnitsRequest) returns (ListAtomicUnitsResponse);
   rpc GetEntityGraph(GetEntityGraphRequest) returns (GetEntityGraphResponse);
   rpc SemanticSearch(SemanticSearchRequest) returns (SemanticSearchResponse);
+  // An artifact's readable text: document segments, chat messages, or OCR.
+  rpc GetArtifactContent(GetArtifactContentRequest) returns (ArtifactContent);
+  // The most connected entities, their relationships, and their source files.
+  rpc GetGraphOverview(GetGraphOverviewRequest) returns (GraphOverview);
 }
 
 message ListArtifactsRequest {
@@ -220,6 +226,8 @@ message ListAtomicUnitsRequest {
   string subject_entity_id = 3;
   int32 limit = 4;
   int32 offset = 5;
+  string artifact_id = 6;                          // only units extracted from this artifact
+  bool live_only = 7;                              // only active or disputed units
 }
 
 message ListAtomicUnitsResponse {
@@ -249,6 +257,64 @@ message SemanticSearchRequest {
   repeated float embedding = 2;                    // 768-dim vector, optional
   string scope = 3;                                // atomic_units | messages | document_segments
   int32 limit = 4;
+}
+
+message GetArtifactContentRequest {
+  string id = 1;                                   // artifacts.id
+  int32 limit = 2;                                 // 0 = server default (50); max 200
+  int32 offset = 3;
+}
+
+message ArtifactContent {
+  message Passage {
+    int64 seq = 1;                                 // position within the artifact
+    string heading = 2;                            // segment heading, chat title, or image caption
+    int32 page = 3;                                // PDF page, 0 when unknown
+    string role = 4;                               // chat role for messages
+    string text = 5;
+  }
+  string source = 1;                               // document | conversation | image | none
+  repeated Passage items = 2;
+  int64 total = 3;                                 // passages in the whole artifact
+}
+
+message GetGraphOverviewRequest {
+  int32 max_entities = 1;                          // 0 = server default (150); max 1000
+  int32 max_files = 2;                             // 0 = server default (100); max 1000
+  bool exclude_files = 3;                          // entities and relationships only
+}
+
+message GraphOverview {
+  message EntityNode {
+    string id = 1;
+    string name = 2;
+    string kind = 3;
+    int64 weight = 4;                              // relationships + units about it
+  }
+  message FileNode {
+    string id = 1;                                 // artifacts.id
+    string name = 2;
+    ArtifactKind kind = 3;
+    int64 mentions = 4;
+  }
+  message Relation {
+    string source_entity_id = 1;
+    string target_entity_id = 2;
+    string relation_type = 3;
+    int64 count = 4;
+    float confidence = 5;
+  }
+  message Mention {
+    string file_id = 1;
+    string entity_id = 2;
+    int64 count = 3;
+  }
+  repeated EntityNode entities = 1;
+  repeated FileNode files = 2;
+  repeated Relation relations = 3;
+  repeated Mention mentions = 4;
+  int64 entity_total = 5;                          // connected entities in the whole collection
+  bool truncated = 6;
 }
 
 message SemanticSearchResponse {

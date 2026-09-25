@@ -12,6 +12,7 @@ use super::convert::{
     unit_kind_to_pb, unit_status_from_pb, unit_status_to_pb,
 };
 use super::{pb, status_from};
+use crate::library;
 use crate::routes::query::{search_core, SemanticSearchRequest};
 use crate::AppState;
 
@@ -50,7 +51,31 @@ fn artifact_from_row(row: &sqlx::postgres::PgRow) -> pb::Artifact {
         source_created_at: timestamp(row.get("source_created_at")),
         ingested_at: timestamp(Some(row.get("ingested_at"))),
         metadata: prost_struct(&row.get::<serde_json::Value, _>("metadata")),
+        unit_count: 0,
+        status: String::new(),
     }
+}
+
+/// Artifacts with their extraction progress filled in.
+async fn artifacts_with_progress(
+    state: &AppState,
+    rows: &[sqlx::postgres::PgRow],
+) -> Result<Vec<pb::Artifact>, Status> {
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.get("id")).collect();
+    let progress = library::artifact_progress(&state.pool, &ids)
+        .await
+        .map_err(status_from)?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let mut artifact = artifact_from_row(r);
+            if let Some(p) = progress.get(&r.get::<Uuid, _>("id")) {
+                artifact.unit_count = p.unit_count;
+                artifact.status = p.status.to_string();
+            }
+            artifact
+        })
+        .collect())
 }
 
 const ARTIFACT_COLUMNS: &str = "id, kind::text AS kind, source_platform, source_format_version, \
@@ -89,7 +114,7 @@ impl pb::query_service_server::QueryService for QueryApi {
         .map_err(|e| status_from(e.into()))?;
 
         Ok(Response::new(pb::ListArtifactsResponse {
-            items: rows.iter().map(artifact_from_row).collect(),
+            items: artifacts_with_progress(&self.state, &rows).await?,
         }))
     }
 
@@ -106,7 +131,8 @@ impl pb::query_service_server::QueryService for QueryApi {
         .await
         .map_err(|e| status_from(e.into()))?
         .ok_or_else(|| Status::not_found(format!("artifact {id}")))?;
-        Ok(Response::new(artifact_from_row(&row)))
+        let mut items = artifacts_with_progress(&self.state, std::slice::from_ref(&row)).await?;
+        Ok(Response::new(items.remove(0)))
     }
 
     async fn list_atomic_units(
@@ -125,6 +151,11 @@ impl pb::query_service_server::QueryService for QueryApi {
         } else {
             Some(parse_uuid(&req.subject_entity_id, "subject_entity_id")?)
         };
+        let artifact = if req.artifact_id.is_empty() {
+            None
+        } else {
+            Some(parse_uuid(&req.artifact_id, "artifact_id")?)
+        };
         let limit = clamp_limit(req.limit, 50, 500);
         let offset = req.offset.max(0) as i64;
 
@@ -138,6 +169,10 @@ impl pb::query_service_server::QueryService for QueryApi {
             WHERE ($1::unit_kind IS NULL OR u.kind = $1::unit_kind)
               AND ($2::unit_status IS NULL OR u.status = $2::unit_status)
               AND ($3::uuid IS NULL OR u.subject_entity_id = $3)
+              AND ($6::uuid IS NULL OR EXISTS (
+                    SELECT 1 FROM atomic_unit_provenance p
+                    WHERE p.atomic_unit_id = u.id AND p.artifact_id = $6))
+              AND (NOT $7 OR u.status IN ('active', 'disputed'))
             ORDER BY u.created_at DESC
             LIMIT $4 OFFSET $5
             "#,
@@ -147,6 +182,8 @@ impl pb::query_service_server::QueryService for QueryApi {
         .bind(subject)
         .bind(limit)
         .bind(offset)
+        .bind(artifact)
+        .bind(req.live_only)
         .fetch_all(&self.state.pool)
         .await
         .map_err(|e| status_from(e.into()))?;
@@ -323,6 +360,101 @@ impl pb::query_service_server::QueryService for QueryApi {
                     artifact_id: h.artifact_id.map(|u| u.to_string()).unwrap_or_default(),
                 })
                 .collect(),
+        }))
+    }
+
+    async fn get_artifact_content(
+        &self,
+        request: Request<pb::GetArtifactContentRequest>,
+    ) -> Result<Response<pb::ArtifactContent>, Status> {
+        let req = request.into_inner();
+        let id = parse_uuid(&req.id, "id")?;
+        let content = library::artifact_content(
+            &self.state.pool,
+            id,
+            clamp_limit(req.limit, 50, 200),
+            req.offset.max(0) as i64,
+        )
+        .await
+        .map_err(status_from)?;
+        Ok(Response::new(pb::ArtifactContent {
+            source: content.source.to_string(),
+            total: content.total,
+            items: content
+                .items
+                .into_iter()
+                .map(|p| pb::artifact_content::Passage {
+                    seq: p.seq,
+                    heading: p.heading.unwrap_or_default(),
+                    page: p.page.unwrap_or_default(),
+                    role: p.role.unwrap_or_default(),
+                    text: p.text,
+                })
+                .collect(),
+        }))
+    }
+
+    async fn get_graph_overview(
+        &self,
+        request: Request<pb::GetGraphOverviewRequest>,
+    ) -> Result<Response<pb::GraphOverview>, Status> {
+        let req = request.into_inner();
+        let max_files = if req.exclude_files {
+            0
+        } else {
+            clamp_limit(req.max_files, 100, 1000)
+        };
+        let overview = library::graph_overview(
+            &self.state.pool,
+            clamp_limit(req.max_entities, 150, 1000),
+            max_files,
+        )
+        .await
+        .map_err(status_from)?;
+        use pb::graph_overview::{EntityNode, FileNode, Mention, Relation};
+        Ok(Response::new(pb::GraphOverview {
+            entities: overview
+                .entities
+                .into_iter()
+                .map(|e| EntityNode {
+                    id: e.id.to_string(),
+                    name: e.name,
+                    kind: e.kind,
+                    weight: e.weight,
+                })
+                .collect(),
+            files: overview
+                .files
+                .into_iter()
+                .map(|f| FileNode {
+                    id: f.id.to_string(),
+                    name: f.name,
+                    kind: artifact_kind_to_pb(&f.kind) as i32,
+                    mentions: f.mentions,
+                })
+                .collect(),
+            relations: overview
+                .relations
+                .into_iter()
+                .map(|r| Relation {
+                    source_entity_id: r.source.to_string(),
+                    target_entity_id: r.target.to_string(),
+                    relation_type: r.relation_type,
+                    count: r.count,
+                    confidence: r.confidence,
+                })
+                .collect(),
+            mentions: overview
+                .mentions
+                .into_iter()
+                .map(|m| Mention {
+                    file_id: m.file_id.to_string(),
+                    entity_id: m.entity_id.to_string(),
+                    count: m.count,
+                })
+                .collect(),
+            entity_total: overview.entity_total,
+            truncated: overview.truncated,
         }))
     }
 }

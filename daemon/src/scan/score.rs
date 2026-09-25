@@ -57,7 +57,22 @@ const NEGATORS: &[&str] = &["not", "never", "no", "stopped", "quit", "dropped"];
 pub fn score_pair(a: &UnitFacts, b: &UnitFacts, cosine_sim: Option<f32>) -> Option<Conflict> {
     let (base, method, explanation) = structural_signal(a, b)?;
 
-    let sim = cosine_sim.unwrap_or_else(|| jaccard(&content_tokens(a), &content_tokens(b)));
+    let sim = cosine_sim.unwrap_or_else(|| {
+        if method == "rule:numeric-mismatch" {
+            // The differing values are the conflict itself, so they must not
+            // also count against the statements' similarity: "Our rent is
+            // $1200 per month" vs "$1500 per month" is the same statement.
+            let words = |u: &UnitFacts| -> Vec<String> {
+                content_tokens(u)
+                    .into_iter()
+                    .filter(|t| !t.chars().any(|c| c.is_ascii_digit()))
+                    .collect()
+            };
+            jaccard(&words(a), &words(b))
+        } else {
+            jaccard(&content_tokens(a), &content_tokens(b))
+        }
+    });
     let temporal = if windows_disjoint(a, b) { 0.5 } else { 1.0 };
     let score = (base * (0.6 + 0.4 * sim) * temporal).clamp(0.0, 1.0);
 
@@ -283,6 +298,16 @@ mod tests {
         );
         let conflict = score_pair(&a, &b, None).expect("should conflict");
         assert_eq!(conflict.method, "rule:numeric-mismatch");
+        assert!(conflict.score >= 0.65, "score was {}", conflict.score);
+    }
+
+    #[test]
+    fn numeric_mismatch_is_not_diluted_by_the_differing_values() {
+        // Short statements share few words besides the values that differ.
+        let subject = Uuid::new_v4();
+        let a = numeric_unit("Our rent is $1200 per month", "$1200", "per month", subject);
+        let b = numeric_unit("Our rent is $1500 per month", "$1500", "per month", subject);
+        let conflict = score_pair(&a, &b, None).expect("should conflict");
         assert!(conflict.score >= 0.65, "score was {}", conflict.score);
     }
 

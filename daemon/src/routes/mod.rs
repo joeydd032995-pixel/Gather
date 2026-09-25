@@ -5,6 +5,7 @@ pub mod export;
 pub mod feedback;
 pub mod health;
 pub mod ingest;
+pub mod library;
 pub mod photos;
 pub mod query;
 pub mod tuning;
@@ -39,6 +40,8 @@ pub fn build_router(state: AppState) -> Router {
         // query
         .route("/artifacts", get(query::list_artifacts))
         .route("/artifacts/{id}", get(query::get_artifact))
+        .route("/artifacts/{id}/content", get(library::artifact_content))
+        .route("/graph", get(library::graph_overview))
         .route("/atomic-units", get(query::list_atomic_units))
         .route("/entities/{id}/graph", get(query::entity_graph))
         .route("/search/semantic", post(query::semantic_search))

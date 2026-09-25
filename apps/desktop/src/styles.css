@@ -119,3 +119,98 @@ kbd {
   cursor: pointer; font: inherit; text-decoration: underline;
 }
 .evidence { font-size: 0.75rem; margin: 0.3rem 0 0; white-space: pre-wrap; }
+
+/* wide layout for Library and Graph */
+.app.wide { max-width: 1180px; }
+
+/* library */
+.lib-search { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+.lib-search input {
+  flex: 1; font-size: 1rem; padding: 0.45rem 0.7rem;
+  border: 1px solid #8886; border-radius: 8px; background: transparent; color: inherit;
+}
+.lib-search button, .graph-toolbar button, .graph-panel > button {
+  padding: 0.4rem 0.9rem; border-radius: 8px; border: 1px solid #8886; cursor: pointer;
+}
+.lib-panes { display: grid; grid-template-columns: minmax(220px, 320px) 1fr; gap: 1.25rem; align-items: start; }
+.lib-files { list-style: none; margin: 0; padding: 0; max-height: 70vh; overflow-y: auto; }
+.lib-file {
+  display: grid; grid-template-columns: 1fr auto; gap: 0.1rem 0.5rem; width: 100%;
+  text-align: left; background: none; border: none; border-bottom: 1px solid #8882;
+  padding: 0.55rem 0.5rem; cursor: pointer; color: inherit; border-radius: 6px;
+}
+.lib-file:hover { background: #4a7dff10; }
+.lib-file.active { background: #4a7dff1f; }
+.lib-file-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lib-file-meta { grid-column: 1; font-size: 0.8rem; color: #888; }
+.lib-file .lib-badge { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
+.lib-badge {
+  font-size: 0.75rem; padding: 0.1rem 0.45rem; border-radius: 999px;
+  border: 1px solid #8884; color: #888; white-space: nowrap;
+}
+.lib-badge.found { color: #2e9e5b; border-color: #2e9e5b66; }
+.lib-badge.reading { color: #c99700; border-color: #c9970066; }
+.lib-badge.failed { color: #b3423a; border-color: #b3423a66; }
+.lib-detail h2 { font-size: 1.2rem; margin: 0 0 0.25rem; overflow-wrap: anywhere; }
+.lib-detail h3 { font-size: 0.95rem; margin: 1.25rem 0 0.5rem; }
+.lib-units { list-style: none; margin: 0; padding: 0; }
+.lib-units li { display: flex; gap: 0.6rem; align-items: baseline; padding: 0.35rem 0; border-bottom: 1px solid #8882; }
+.lib-kind {
+  font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.03em;
+  padding: 0.05rem 0.4rem; border-radius: 4px; background: #8882; flex-shrink: 0;
+}
+.kind-preference { background: #d4a01733; }
+.kind-decision { background: #4a7dff33; }
+.kind-fact { background: #3f9e4d33; }
+.kind-event { background: #d65a9c33; }
+.kind-claim { background: #9b59d033; }
+.lib-passages { display: flex; flex-direction: column; gap: 0.75rem; }
+.lib-passage { border-left: 3px solid #8884; padding-left: 0.75rem; }
+.lib-passage p { margin: 0; white-space: pre-wrap; font-size: 0.9rem; line-height: 1.45; }
+.lib-passage-head { font-size: 0.75rem; color: #888; margin-bottom: 0.2rem; }
+.lib-image { margin: 0.75rem 0; }
+.lib-search-results h3 { font-size: 0.95rem; margin: 1rem 0 0.4rem; }
+.lib-hits { list-style: none; margin: 0; padding: 0; }
+.lib-hit {
+  display: flex; flex-direction: column; gap: 0.2rem; width: 100%; text-align: left;
+  background: none; border: none; border-bottom: 1px solid #8882; padding: 0.55rem 0.4rem;
+  cursor: pointer; color: inherit; font-size: 0.9rem;
+}
+.lib-hit:hover:not(:disabled) { background: #4a7dff10; }
+.lib-hit:disabled { cursor: default; }
+.lib-hit-source { font-size: 0.8rem; color: #4a7dff; }
+mark { background: #d4a01755; color: inherit; border-radius: 2px; }
+
+/* graph */
+.graph-toolbar { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin-bottom: 0.5rem; font-size: 0.9rem; }
+.graph-toolbar input[type="search"] {
+  flex: 1; min-width: 160px; padding: 0.35rem 0.6rem; border: 1px solid #8886;
+  border-radius: 8px; background: transparent; color: inherit;
+}
+.graph-body { display: grid; grid-template-columns: 1fr 280px; gap: 1rem; align-items: start; }
+.graph-canvas {
+  width: 100%; border: 1px solid #8883; border-radius: 12px; touch-action: none;
+  cursor: grab; user-select: none; display: block;
+}
+.graph-canvas:active { cursor: grabbing; }
+.graph-link { stroke: #8888; }
+.graph-link.mention { stroke: #8886; stroke-dasharray: 3 3; }
+.graph-link.faded { stroke-opacity: 0.12; }
+.graph-node { cursor: pointer; }
+.graph-node circle, .graph-node rect { stroke: #fff9; stroke-width: 1.5; }
+.graph-node.file rect, .graph-file-swatch { fill: #9aa0a8; }
+.graph-node.selected circle, .graph-node.selected rect { stroke: #4a7dff; stroke-width: 3; }
+.graph-node.faded { opacity: 0.2; }
+.graph-node text { text-anchor: middle; fill: currentColor; paint-order: stroke; stroke: Canvas; stroke-width: 3px; pointer-events: none; }
+.graph-panel { font-size: 0.9rem; max-height: 560px; overflow-y: auto; }
+.graph-panel h3 { margin: 0 0 0.2rem; overflow-wrap: anywhere; }
+.graph-panel h4 { margin: 1rem 0 0.3rem; font-size: 0.85rem; color: #888; text-transform: uppercase; }
+.graph-list { list-style: none; margin: 0; padding: 0; }
+.graph-list li { padding: 0.2rem 0; }
+.graph-legend { list-style: none; padding: 0; margin: 0.5rem 0 0; display: grid; grid-template-columns: 1fr 1fr; gap: 0.3rem; font-size: 0.85rem; }
+.graph-empty { max-width: 40rem; }
+
+@media (max-width: 760px) {
+  .lib-panes, .graph-body { grid-template-columns: 1fr; }
+  .lib-files { max-height: 40vh; }
+}
