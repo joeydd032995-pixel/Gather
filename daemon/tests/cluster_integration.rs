@@ -6,8 +6,10 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
+use gather_daemon::cluster::pair_key;
 use gather_daemon::cluster::worker::run_one_pass;
 use gather_daemon::config::Config;
+use gather_daemon::entities::similarity::name_similarity;
 use gather_daemon::{db, AppState};
 
 async fn test_state() -> Option<AppState> {
@@ -75,6 +77,21 @@ async fn worker_auto_merges_duplicates_and_groups_topics() {
     let short = seed_entity(&state, &base).await;
     let long = seed_entity(&state, &format!("{base}.")).await;
 
+    // A chain: A~B and B~C each clear the Auto bar, A~C does not. Joined only
+    // through B, they must not all fold into one entity.
+    let token = &Uuid::new_v4().simple().to_string()[..8];
+    let chain_a_name = format!("Kestrel {token} Orchard Growers Guild");
+    let chain_b_name = format!("{chain_a_name}s");
+    let chain_c_name = format!("{chain_b_name} Co");
+    // Pin the fixture's shape, so a change to the scorer fails loudly here
+    // rather than silently testing something else.
+    assert!(name_similarity(&chain_a_name, &chain_b_name) >= 0.92);
+    assert!(name_similarity(&chain_b_name, &chain_c_name) >= 0.92);
+    assert!(name_similarity(&chain_a_name, &chain_c_name) < 0.92);
+    let chain_a = seed_entity(&state, &chain_a_name).await;
+    let chain_b = seed_entity(&state, &chain_b_name).await;
+    let chain_c = seed_entity(&state, &chain_c_name).await;
+
     let tag = Uuid::new_v4().simple().to_string();
     let ids = [
         seed_unit(&state, &format!("backup target hetzner cx22 {tag}")).await,
@@ -89,6 +106,30 @@ async fn worker_auto_merges_duplicates_and_groups_topics() {
     // The shorter name folds into the longer (more information) survivor.
     assert_eq!(merged_into(&state, short).await, Some(long));
     assert_eq!(merged_into(&state, long).await, None);
+
+    // The chain was not merged; each of its Auto pairs waits in the tray.
+    for id in [chain_a, chain_b, chain_c] {
+        assert_eq!(
+            merged_into(&state, id).await,
+            None,
+            "a chained entity was merged"
+        );
+    }
+    for (x, y) in [(chain_a, chain_b), (chain_b, chain_c)] {
+        let parked: Option<String> = sqlx::query_scalar(
+            "SELECT reason FROM review_queue \
+             WHERE target_kind = 'entity' AND target_id = $1 AND state = 'open'",
+        )
+        .bind(pair_key(x, y))
+        .fetch_optional(&state.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            parked.as_deref(),
+            Some("merge-band"),
+            "chained pair not parked"
+        );
+    }
 
     // An entity cluster was recorded.
     let entity_clusters: i64 =

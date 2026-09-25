@@ -21,7 +21,8 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use super::{
-    cohesion, components, grouped, label_from_texts, mutual_knn, pair_key, survivor_key, Edge,
+    cohesion, components, grouped, is_complete, label_from_texts, mutual_knn, pair_key,
+    survivor_key, Edge,
 };
 use crate::config::Config;
 use crate::decide::live::LiveThresholds;
@@ -109,6 +110,9 @@ async fn entity_resolution_pass(
     // Why each Auto edge cleared the gate, parallel to auto_edges: kept with
     // the merge so undoing it tunes the threshold that caused it.
     let mut edge_basis: Vec<MergeBasis> = Vec::new();
+    // Also parallel: the pair's review-tray signals, used if the edge's
+    // component turns out to be a chain and has to be reviewed instead.
+    let mut edge_signals: Vec<(Uuid, Uuid, serde_json::Value)> = Vec::new();
     for s in &suggestions {
         // Supply BOTH signals when they exist. merge_suggestions emits only the
         // embedding row for a pair it scored both ways, so recompute the text
@@ -144,6 +148,19 @@ async fn entity_resolution_pass(
                 });
                 auto_edges.push(Edge { a, b, sim });
                 edge_basis.push(basis);
+                edge_signals.push((
+                    s.a.id,
+                    s.b.id,
+                    json!({
+                        "a": s.a.id,
+                        "b": s.b.id,
+                        "score": best_score(&signals),
+                        "cosine": signals.cosine,
+                        "text": signals.text,
+                        "method": s.method,
+                        "chained": true,
+                    }),
+                ));
             }
             Band::Hold => {
                 let parked = sqlx::query(
@@ -194,6 +211,28 @@ async fn entity_resolution_pass(
             .await?
             .rows_affected();
             stats.entity_pairs_parked += parked as usize;
+            continue;
+        }
+        // Every member must match every other one directly. A chain (A~B,
+        // B~C, A≁C) would otherwise fold unrelated things together through
+        // one bridging entity, so its pairs go to the review tray one by one,
+        // where each can be merged or marked as different.
+        if !is_complete(&group, &auto_edges) {
+            for (edge, (a, b, signals)) in auto_edges.iter().zip(&edge_signals) {
+                if !group.contains(&edge.a) || !group.contains(&edge.b) {
+                    continue;
+                }
+                let parked = sqlx::query(
+                    "INSERT INTO review_queue (target_kind, target_id, reason, signals) \
+                     VALUES ('entity', $1, 'merge-band', $2) ON CONFLICT DO NOTHING",
+                )
+                .bind(pair_key(*a, *b))
+                .bind(signals)
+                .execute(pool)
+                .await?
+                .rows_affected();
+                stats.entity_pairs_parked += parked as usize;
+            }
             continue;
         }
         // Canonical survivor: prefer a specifically-typed entity over an

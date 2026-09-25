@@ -97,6 +97,12 @@ function ItemSummary({ item }: { item: ReviewItem }) {
             <Meter value={score} label="Similarity" tone="info" width={44} />
           </div>
         )}
+        {item.signals.chained === true && (
+          <div className="item-sub">
+            A close match, but part of a chain linking things that don't match each other, so it
+            wasn't merged on its own.
+          </div>
+        )}
       </>
     );
   }
