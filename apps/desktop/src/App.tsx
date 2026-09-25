@@ -136,7 +136,11 @@ export default function App() {
       setProgress({ done: i, total: sources.length });
       try {
         const blob = await source.load();
-        const response = await uploadFiles([new File([blob], source.name)]);
+        // A browser File keeps its MIME type, which the daemon uses to
+        // classify files whose extension doesn't say what they are.
+        const file =
+          blob instanceof File ? blob : new File([blob], source.name, { type: blob.type });
+        const response = await uploadFiles([file]);
         setResults((prev) => [...response.files, ...prev]);
       } catch (e) {
         const detail = e instanceof Error ? e.message : String(e);

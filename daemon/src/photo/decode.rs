@@ -52,6 +52,13 @@ pub fn render_jpeg(bytes: &[u8], max_side: u32, quality: u8) -> Option<Vec<u8>> 
 fn decode_jpeg_scaled(bytes: &[u8], min_side: u32) -> Option<DynamicImage> {
     let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(bytes));
     decoder.set_max_decoding_buffer_size(MAX_ALLOC as usize);
+    // Scaling bounds the output, but the decoder still walks every source
+    // block: refuse pathological dimensions from the header, before decoding.
+    decoder.read_info().ok()?;
+    let source = decoder.info()?;
+    if u32::from(source.width) > MAX_DIMENSION || u32::from(source.height) > MAX_DIMENSION {
+        return None;
+    }
     let side = u16::try_from(min_side).unwrap_or(u16::MAX);
     decoder.scale(side, side).ok()?;
     let pixels = decoder.decode().ok()?;
@@ -130,6 +137,12 @@ mod tests {
         let out = render_jpeg(&jpeg(4096, 3072), 256, 80).expect("renders");
         let img = image::load_from_memory(&out).unwrap();
         assert_eq!(img.width().max(img.height()), 256);
+    }
+
+    #[test]
+    fn oversized_jpegs_are_refused_from_the_header() {
+        assert!(decode_at_least(&jpeg(MAX_DIMENSION + 1, 8), 256).is_none());
+        assert!(decode_at_least(&jpeg(MAX_DIMENSION, 8), 256).is_some());
     }
 
     #[test]

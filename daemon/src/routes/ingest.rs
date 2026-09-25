@@ -456,6 +456,9 @@ pub async fn ingest_files(
         return Err(too_large(max_bytes));
     }
     let job_id = create_job(&state.pool, "rest").await?;
+    // The declared length is the whole request's, so it can only size the
+    // first part (exactly, for a one-file request); later parts grow as read.
+    let mut size_hint = declared_len;
     let mut results: Vec<FileResult> = Vec::new();
     let mut all_ok = true;
 
@@ -472,7 +475,7 @@ pub async fn ingest_files(
             .map(String::from)
             .unwrap_or_else(|| "unnamed".to_string());
         let declared_type = field.content_type().map(String::from);
-        let bytes = read_part(field, &part_name, max_bytes, declared_len).await?;
+        let bytes = read_part(field, &part_name, max_bytes, size_hint.take()).await?;
 
         match ingest_one_file(&state, job_id, &part_name, &filename, declared_type, &bytes).await {
             Ok(result) => {
@@ -584,16 +587,16 @@ fn too_large(max_bytes: usize) -> ApiError {
     ))
 }
 
-/// Read one multipart part into memory, at most `max_bytes`. The buffer is
-/// sized from the request's declared length when there is one, so a large
-/// file is held once rather than through a series of growing reallocations.
+/// Read one multipart part into memory, at most `max_bytes`. With a size
+/// hint (the first part of a request), the buffer is allocated once instead
+/// of through a series of growing reallocations.
 async fn read_part(
     mut field: Field<'_>,
     part_name: &str,
     max_bytes: usize,
-    declared_len: Option<usize>,
+    size_hint: Option<usize>,
 ) -> Result<Vec<u8>, ApiError> {
-    let mut bytes = Vec::with_capacity(declared_len.unwrap_or(0).min(max_bytes));
+    let mut bytes = Vec::with_capacity(size_hint.unwrap_or(0).min(max_bytes));
     while let Some(chunk) = field.chunk().await.map_err(|e| {
         // The request-wide body limit surfaces here as a read error.
         if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
