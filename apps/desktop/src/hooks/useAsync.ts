@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { errorText } from "../ui";
 
 export interface AsyncState<T> {
   data: T | null;
@@ -32,7 +33,7 @@ export function useAsync<T>(loader: () => Promise<T>, deps: unknown[]): AsyncSta
       })
       .catch((e: unknown) => {
         if (cancelled) return;
-        setError(e instanceof Error ? e.message : String(e));
+        setError(errorText(e));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Check, ChevronRight, CircleCheck, History, Info, Unlink } from "lucide-react";
 import {
   dismissMergeSuggestion,
   getEntity,
@@ -8,6 +9,24 @@ import {
   type EntityRef,
   type MergeSuggestion,
 } from "./api";
+import { plural } from "./kinds";
+import {
+  Badge,
+  Button,
+  Callout,
+  EmptyState,
+  KindTag,
+  Meter,
+  PageHeader,
+  Skeleton,
+  When,
+  errorText,
+} from "./ui";
+
+const METHOD_LABELS: Record<string, string> = {
+  "rule:name-similarity": "Similar names",
+  "embedding:cosine": "Similar meaning",
+};
 
 /** Aliases + merge history for one side of a suggested pair. */
 function EntityFacts({ id }: { id: string }) {
@@ -27,128 +46,138 @@ function EntityFacts({ id }: { id: string }) {
     };
   }, [id]);
 
-  if (!detail) return null;
+  if (!detail) return <Skeleton rows={1} />;
   return (
-    <ul className="prov-list">
-      <li>
-        <span className="prov-kind">{detail.kind}</span>
-        <span className="prov-time">
-          since {new Date(detail.created_at).toLocaleDateString()}
-        </span>
-      </li>
+    <div className="entity-facts">
+      <p className="hint">Known since {new Date(detail.created_at).toLocaleDateString()}</p>
+      {detail.description && <p className="entity-desc">{detail.description}</p>}
       {detail.aliases.length > 0 && (
-        <li>
+        <div className="aliases" aria-label="Also known as">
           {detail.aliases.map((a) => (
-            <span className="prov-badge" key={a}>
-              {a}
-            </span>
+            <Badge key={a}>{a}</Badge>
           ))}
-        </li>
+        </div>
       )}
-      {detail.description && <li>{detail.description}</li>}
       {detail.audit.length > 0 && (
-        <li>
-          {/* Prior merge decisions are context for this one, which is not
-              casually reversible — so surface them rather than just fetch them. */}
-          <details className="audit">
-            <summary>merge history ({detail.audit.length})</summary>
-            <ul>
-              {detail.audit.map((a, i) => (
-                <li key={i}>
-                  {new Date(a.created_at).toLocaleString()} — {a.actor}: {a.action}
+        // Prior merge decisions are context for this one, which is not
+        // casually reversible — so surface them rather than just fetch them.
+        <details className="history">
+          <summary>
+            <History aria-hidden /> Merge history{" "}
+            <span className="count num">{detail.audit.length}</span>
+          </summary>
+          <ol className="timeline">
+            {detail.audit.map((a, i) => (
+              <li key={i}>
+                <When iso={a.created_at} className="timeline-time" />
+                <span>
+                  <strong>{a.actor}</strong> {a.action}
                   {a.note ? ` — ${a.note}` : ""}
-                </li>
-              ))}
-            </ul>
-          </details>
-        </li>
+                </span>
+              </li>
+            ))}
+          </ol>
+        </details>
       )}
-    </ul>
+    </div>
   );
 }
 
-function Detail({
-  suggestion,
-  onDone,
-}: {
-  suggestion: MergeSuggestion;
-  onDone: () => void;
-}) {
+function Detail({ suggestion, onDone }: { suggestion: MergeSuggestion; onDone: () => void }) {
   const [note, setNote] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const run = async (fn: () => Promise<void>) => {
-    setBusy(true);
+  const run = async (which: string, fn: () => Promise<void>) => {
+    setBusy(which);
     setError(null);
     try {
       await fn();
       onDone();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
+      setError(errorText(e));
+      setBusy(null);
     }
   };
 
   const merge = (winner: EntityRef, loser: EntityRef) =>
-    run(() => mergeEntities(winner.id, loser.id, note.trim() || undefined));
+    run(winner.id, () => mergeEntities(winner.id, loser.id, note.trim() || undefined));
 
   return (
-    <div className="conflict-detail">
-      <div className="conflict-sides">
-        {[suggestion.a, suggestion.b].map((side, i) => (
-          <div className="conflict-side" key={side.id}>
-            <h4>{i === 0 ? "Entity A" : "Entity B"}</h4>
-            <p className="statement">{side.name}</p>
-            <EntityFacts id={side.id} />
-          </div>
-        ))}
+    <div className="item-body">
+      <div className="versus">
+        {[suggestion.a, suggestion.b].map((side, i) => {
+          const other = i === 0 ? suggestion.b : suggestion.a;
+          return (
+            <section
+              className="versus-side"
+              key={side.id}
+              aria-label={`Entity ${i === 0 ? "A" : "B"}`}
+            >
+              <div className="versus-head">
+                <span className="versus-letter" aria-hidden>
+                  {i === 0 ? "A" : "B"}
+                </span>
+                <KindTag kind={side.kind} />
+              </div>
+              <p className="versus-statement">{side.name}</p>
+              <EntityFacts id={side.id} />
+              <Button
+                variant="secondary"
+                size="sm"
+                icon={Check}
+                loading={busy === side.id}
+                disabled={busy !== null}
+                onClick={() => merge(side, other)}
+                title={`Keep “${side.name}” and fold “${other.name}” into it`}
+              >
+                Keep “{side.name}”
+              </Button>
+            </section>
+          );
+        })}
       </div>
 
-      <p className="explanation">
-        Merging keeps one entity and folds the other into it as an alias — its
-        units, relationships and provenance move across, and the name it was
-        known by keeps resolving to the survivor.
-      </p>
+      <Callout tone="neutral" icon={Info}>
+        Merging keeps one entity and folds the other into it as an alias: its statements,
+        connections and sources move across, and the old name keeps resolving to the one you kept.
+      </Callout>
 
-      <div className="conflict-actions">
+      <div className="resolve-bar">
         <input
+          className="input"
           type="text"
-          placeholder="optional note…"
+          aria-label="Note (optional)"
+          placeholder="Add a note (optional)…"
           value={note}
           onChange={(e) => setNote(e.target.value)}
-          disabled={busy}
+          disabled={busy !== null}
         />
-        <button disabled={busy} onClick={() => merge(suggestion.a, suggestion.b)}>
-          Keep A
-        </button>
-        <button disabled={busy} onClick={() => merge(suggestion.b, suggestion.a)}>
-          Keep B
-        </button>
-        <button
-          disabled={busy}
-          onClick={() =>
-            run(() =>
-              dismissMergeSuggestion(
-                suggestion.a.id,
-                suggestion.b.id,
-                note.trim() || undefined,
-              ),
-            )
-          }
-        >
-          Not duplicates
-        </button>
+        <div className="item-actions">
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={Unlink}
+            loading={busy === "dismiss"}
+            disabled={busy !== null}
+            onClick={() =>
+              run("dismiss", () =>
+                dismissMergeSuggestion(suggestion.a.id, suggestion.b.id, note.trim() || undefined),
+              )
+            }
+          >
+            Not duplicates
+          </Button>
+        </div>
       </div>
 
-      {error && <p className="error">{error}</p>}
+      {error && <Callout>{error}</Callout>}
     </div>
   );
 }
 
 export default function Entities() {
-  const [items, setItems] = useState<MergeSuggestion[]>([]);
+  const [items, setItems] = useState<MergeSuggestion[] | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -158,7 +187,7 @@ export default function Entities() {
         setItems(list);
         setError(null);
       })
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+      .catch((e) => setError(errorText(e)));
   }, []);
 
   useEffect(() => {
@@ -168,43 +197,68 @@ export default function Entities() {
   }, [refresh]);
 
   return (
-    <section className="entities">
-      {error && <p className="error">{error}</p>}
-      {items.length === 0 && !error && (
-        <p className="all-clear">
-          No duplicate entities suggested — your knowledge graph looks deduplicated.
-        </p>
-      )}
-      <ul className="conflict-list">
-        {items.map((s) => {
-          const key = `${s.a.id}:${s.b.id}`;
-          return (
-            <li key={key} className="conflict-item">
-              <button
-                className="conflict-row"
-                onClick={() => setExpanded(expanded === key ? null : key)}
+    <section>
+      <PageHeader
+        title="Entities"
+        description="Pairs that might be the same person, place or thing under different names. Clear matches merge on their own; these are the close calls."
+        eyebrow={items && items.length > 0 ? plural(items.length, "suggestion") : undefined}
+      />
+      {error && <Callout title="Couldn't load suggestions">{error}</Callout>}
+      {items === null && !error ? (
+        <Skeleton rows={3} variant="card" />
+      ) : items && items.length === 0 && !error ? (
+        <EmptyState icon={CircleCheck} tone="success" title="No duplicates to check">
+          Your knowledge graph looks deduplicated. New suggestions appear here as you add more.
+        </EmptyState>
+      ) : (
+        <ul className="stack">
+          {(items ?? []).map((s, i) => {
+            const key = `${s.a.id}:${s.b.id}`;
+            const open = expanded === key;
+            return (
+              <li
+                key={key}
+                className={open ? "item open" : "item"}
+                style={{ animationDelay: `${Math.min(i, 8) * 30}ms` }}
               >
-                <span className="score">{s.score.toFixed(2)}</span>
-                <span className="statements">
-                  <span>{s.a.name}</span>
-                  <span className="vs">vs</span>
-                  <span>{s.b.name}</span>
-                </span>
-                <span className="method">{s.method}</span>
-              </button>
-              {expanded === key && (
-                <Detail
-                  suggestion={s}
-                  onDone={() => {
-                    setExpanded(null);
-                    refresh();
-                  }}
-                />
-              )}
-            </li>
-          );
-        })}
-      </ul>
+                <button
+                  type="button"
+                  className="item-row"
+                  aria-expanded={open}
+                  onClick={() => setExpanded(open ? null : key)}
+                >
+                  <div className="item-main">
+                    <div className="pair-names">
+                      <span className="item-title">{s.a.name}</span>
+                      <span className="pair-sep" aria-label="and">
+                        ≈
+                      </span>
+                      <span className="item-title">{s.b.name}</span>
+                    </div>
+                    <div className="item-sub">
+                      <KindTag kind={s.a.kind} />
+                      <span>{METHOD_LABELS[s.method] ?? s.method}</span>
+                    </div>
+                  </div>
+                  <div className="item-aside">
+                    <Meter value={s.score} label="Similarity" />
+                    <ChevronRight className="chevron" aria-hidden />
+                  </div>
+                </button>
+                {open && (
+                  <Detail
+                    suggestion={s}
+                    onDone={() => {
+                      setExpanded(null);
+                      refresh();
+                    }}
+                  />
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </section>
   );
 }

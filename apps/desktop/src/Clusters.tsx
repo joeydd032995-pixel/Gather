@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ChevronRight, CircleCheck, Layers, Undo2 } from "lucide-react";
 import {
   getCluster,
   unmergeEntity,
@@ -8,10 +9,23 @@ import {
 } from "./api";
 import { useAsync } from "./hooks/useAsync";
 import { usePagedClusters } from "./hooks/usePagedClusters";
+import { plural } from "./kinds";
+import {
+  Badge,
+  Button,
+  Callout,
+  EmptyState,
+  KindTag,
+  Meter,
+  PageHeader,
+  Segmented,
+  Skeleton,
+  errorText,
+} from "./ui";
 
-const KINDS: { kind: ClusterKind; label: string }[] = [
-  { kind: "topic", label: "Topics" },
-  { kind: "entity", label: "Merged duplicates" },
+const KINDS: { value: ClusterKind; label: string }[] = [
+  { value: "topic", label: "Topics" },
+  { value: "entity", label: "Merged duplicates" },
 ];
 
 function memberLabel(m: ClusterMember): string {
@@ -32,37 +46,52 @@ function ClusterMembers({ id }: { id: string }) {
       setUndone(true);
       detail.reload();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
     } finally {
       setBusyId(null);
     }
   };
 
-  if (detail.loading && !detail.data) return <p className="prov-empty">Loading…</p>;
+  if (detail.loading && !detail.data) return <Skeleton rows={3} />;
   // Undoing the last merge in a pair dissolves the group itself.
   if (detail.error && undone) {
-    return <p className="all-clear">Merge undone; this group no longer exists.</p>;
+    return (
+      <Callout tone="success" icon={CircleCheck}>
+        Merge undone; this group no longer exists.
+      </Callout>
+    );
   }
-  if (detail.error) return <p className="error">{detail.error}</p>;
+  if (detail.error) return <Callout>{detail.error}</Callout>;
   return (
     <>
-      {error && <p className="error">{error}</p>}
-      <ul className="prov-list">
+      {error && <Callout>{error}</Callout>}
+      <ul className="members">
         {(detail.data?.members ?? []).map((m) => (
-          <li key={m.member_id}>
-            {memberLabel(m)}
+          <li key={m.member_id} className="member">
+            {m.member_kind === "entity" ? (
+              <span className="member-text">
+                <span className="item-title">{memberLabel(m)}</span>
+                {!m.merged_into && (
+                  <Badge tone="accent" className="member-badge">
+                    kept
+                  </Badge>
+                )}
+              </span>
+            ) : (
+              <span className="member-text">{memberLabel(m)}</span>
+            )}
             {m.member_kind === "entity" && m.merged_into && (
-              <>
-                {" "}
-                <button
-                  className="link-button"
-                  onClick={() => undoMerge(m)}
-                  disabled={busyId !== null}
-                  title="Split this entity back out; the pair will never be merged again"
-                >
-                  {busyId === m.member_id ? "Undoing…" : "Undo merge"}
-                </button>
-              </>
+              <Button
+                variant="ghost"
+                size="sm"
+                icon={Undo2}
+                onClick={() => undoMerge(m)}
+                loading={busyId === m.member_id}
+                disabled={busyId !== null}
+                title="Split this entity back out; the pair will never be merged again"
+              >
+                Undo merge
+              </Button>
             )}
           </li>
         ))}
@@ -71,21 +100,43 @@ function ClusterMembers({ id }: { id: string }) {
   );
 }
 
-function ClusterRow({ cluster }: { cluster: ClusterSummary }) {
+function ClusterRow({ cluster, index }: { cluster: ClusterSummary; index: number }) {
   const [open, setOpen] = useState(false);
   return (
-    <li className="conflict-item">
-      <button className="conflict-row" onClick={() => setOpen((o) => !o)}>
-        <span className="score" title="members">
+    <li
+      className={open ? "item open" : "item"}
+      style={{ animationDelay: `${Math.min(index, 8) * 30}ms` }}
+    >
+      <button
+        type="button"
+        className="item-row"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="size-chip num" title="members">
           {cluster.size}
         </span>
-        <span className="statements">{cluster.label || "(unlabelled)"}</span>
-        <span className="method" title="cohesion: mean similarity inside the group">
-          {cluster.cohesion.toFixed(2)}
-        </span>
+        <div className="item-main">
+          <p className="item-title">{cluster.label || "(unlabelled)"}</p>
+          <div className="item-sub">
+            {cluster.kind === "entity" ? (
+              <KindTag kind="other" label={plural(cluster.size, "name")} />
+            ) : (
+              <span>{plural(cluster.size, "statement")}</span>
+            )}
+          </div>
+        </div>
+        <div className="item-aside">
+          <Meter
+            value={cluster.cohesion}
+            label="Cohesion: how alike the members are"
+            tone="neutral"
+          />
+          <ChevronRight className="chevron" aria-hidden />
+        </div>
       </button>
       {open && (
-        <div className="conflict-detail">
+        <div className="item-body">
           <ClusterMembers id={cluster.id} />
         </div>
       )}
@@ -100,31 +151,32 @@ export default function Clusters() {
 
   return (
     <section>
-      <nav className="subtabs">
-        {KINDS.map((k) => (
-          <button
-            key={k.kind}
-            className={kind === k.kind ? "tab active" : "tab"}
-            onClick={() => setKind(k.kind)}
-          >
-            {k.label}
-          </button>
-        ))}
-      </nav>
-      {clusters.error && <p className="error">{clusters.error}</p>}
-      {!clusters.loading && clusters.items.length === 0 && (
-        <p className="prov-empty">Nothing grouped yet; groups appear as the clustering worker runs.</p>
+      <PageHeader
+        title="Groups"
+        description="How Gather arranged your library on its own: related statements gathered into topics, and names it recognised as the same thing."
+        actions={<Segmented label="Group type" options={KINDS} value={kind} onChange={setKind} />}
+      />
+      {clusters.error && <Callout title="Couldn't load groups">{clusters.error}</Callout>}
+      {!clusters.loading && !clusters.error && clusters.items.length === 0 && (
+        <EmptyState icon={Layers} title="Nothing grouped yet">
+          Groups appear as the clustering worker runs in the background.
+        </EmptyState>
       )}
-      <ul className="conflict-list">
-        {clusters.items.map((c) => (
-          <ClusterRow key={c.id} cluster={c} />
-        ))}
-      </ul>
-      {clusters.loading && <p>Loading…</p>}
-      {clusters.hasMore && !clusters.loading && (
-        <button className="load-more" onClick={clusters.loadMore}>
-          Load more
-        </button>
+      {clusters.loading && clusters.items.length === 0 ? (
+        <Skeleton rows={4} variant="card" />
+      ) : (
+        <ul className="stack">
+          {clusters.items.map((c, i) => (
+            <ClusterRow key={c.id} cluster={c} index={i} />
+          ))}
+        </ul>
+      )}
+      {clusters.hasMore && (
+        <div className="load-more">
+          <Button onClick={clusters.loadMore} loading={clusters.loading}>
+            Load more
+          </Button>
+        </div>
       )}
     </section>
   );

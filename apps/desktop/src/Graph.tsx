@@ -9,8 +9,28 @@ import {
   type SimulationLinkDatum,
   type SimulationNodeDatum,
 } from "d3-force";
+import {
+  ArrowRight,
+  FileText,
+  Maximize2,
+  Minus,
+  MousePointerClick,
+  Plus,
+  Search,
+  Waypoints,
+} from "lucide-react";
 import { getGraphOverview, type GraphOverview } from "./api";
-import { KIND_LABELS } from "./Library";
+import { kindLabel, plural } from "./kinds";
+import {
+  Button,
+  Callout,
+  EmptyState,
+  IconButton,
+  KindTag,
+  PageHeader,
+  Spinner,
+  errorText,
+} from "./ui";
 import UnitList from "./UnitList";
 
 interface Node extends SimulationNodeDatum {
@@ -36,18 +56,22 @@ interface View {
   k: number;
 }
 
-const HEIGHT = 560;
 const SIZES = [50, 150, 400];
-const ENTITY_COLORS: Record<string, string> = {
-  person: "#e0694f",
-  organization: "#4a7dff",
-  project: "#9b59d0",
-  tool: "#1fa39a",
-  concept: "#d4a017",
-  location: "#3f9e4d",
-  event: "#d65a9c",
-  other: "#8a8f98",
-};
+/** Entity kinds with a colour of their own (tokens.css --cat-*). */
+const ENTITY_KINDS = [
+  "person",
+  "organization",
+  "project",
+  "tool",
+  "concept",
+  "location",
+  "event",
+  "other",
+];
+
+function kindColor(kind: string): string {
+  return `var(--cat-${ENTITY_KINDS.includes(kind) ? kind : "other"})`;
+}
 
 function buildGraph(data: GraphOverview, showFiles: boolean) {
   const nodes: Node[] = data.entities.map((e) => ({
@@ -128,14 +152,17 @@ function EntityPanel({
 
   return (
     <>
-      <h3>{node.name}</h3>
-      <p className="hint">
-        {node.kind} · {node.weight} {node.weight === 1 ? "link" : "links"}
-      </p>
+      <div className="panel-head">
+        <KindTag kind={ENTITY_KINDS.includes(node.kind) ? node.kind : "other"} label={node.kind} />
+        <h2 className="panel-title">{node.name}</h2>
+        <p className="hint">{plural(node.weight, "link")}</p>
+      </div>
       {relations.length > 0 && (
-        <>
-          <h4>Connections</h4>
-          <ul className="graph-list">
+        <section className="panel-section">
+          <h3 className="section-label">
+            Connections <span className="count">{relations.length}</span>
+          </h3>
+          <ul className="relations">
             {relations.map((l, i) => {
               const source = endpoint(l.source)!;
               const target = endpoint(l.target)!;
@@ -143,49 +170,62 @@ function EntityPanel({
               const other = outgoing ? target : source;
               return (
                 <li key={i}>
-                  {outgoing ? (
-                    <>
-                      {l.label} →{" "}
-                      <button className="link-button" onClick={() => onSelect(other.key)}>
-                        {other.name}
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <button className="link-button" onClick={() => onSelect(other.key)}>
-                        {other.name}
-                      </button>{" "}
-                      {l.label} → this
-                    </>
-                  )}
+                  <button type="button" className="relation" onClick={() => onSelect(other.key)}>
+                    <span
+                      className="relation-dot"
+                      style={{ background: kindColor(other.kind) }}
+                      aria-hidden
+                    />
+                    <span className="relation-text">
+                      {outgoing ? (
+                        <>
+                          <span className="relation-verb">{l.label}</span> {other.name}
+                        </>
+                      ) : (
+                        <>
+                          {other.name} <span className="relation-verb">{l.label} this</span>
+                        </>
+                      )}
+                    </span>
+                    <ArrowRight className="relation-go" aria-hidden />
+                  </button>
                 </li>
               );
             })}
           </ul>
-        </>
+        </section>
       )}
       {files.length > 0 && (
-        <>
-          <h4>Mentioned in</h4>
-          <ul className="graph-list">
+        <section className="panel-section">
+          <h3 className="section-label">
+            Mentioned in <span className="count">{files.length}</span>
+          </h3>
+          <ul className="relations">
             {files.map((f) => (
               <li key={f.key}>
-                <button className="link-button" onClick={() => onOpenFile(f.id)}>
-                  {f.name}
+                <button type="button" className="relation" onClick={() => onOpenFile(f.id)}>
+                  <FileText className="relation-icon" aria-hidden />
+                  <span className="relation-text">{f.name}</span>
+                  <ArrowRight className="relation-go" aria-hidden />
                 </button>
               </li>
             ))}
           </ul>
-        </>
+        </section>
       )}
-      <h4>What Gather knows about it</h4>
-      <UnitList
-        subjectEntityId={node.id}
-        pageSize={50}
-        empty={
-          <p className="hint">No statements are about this one directly; it appears in others'.</p>
-        }
-      />
+      <section className="panel-section">
+        <h3 className="section-label">What Gather knows</h3>
+        <UnitList
+          subjectEntityId={node.id}
+          pageSize={50}
+          compact
+          empty={
+            <p className="hint">
+              No statements are about this one directly; it appears in others'.
+            </p>
+          }
+        />
+      </section>
     </>
   );
 }
@@ -207,19 +247,33 @@ function FilePanel({
     .filter((n): n is Node => n !== null);
   return (
     <>
-      <h3>{node.name}</h3>
-      <p className="hint">{KIND_LABELS[node.kind] ?? node.kind}</p>
-      <button onClick={() => onOpenFile(node.id)}>Open in Library</button>
-      <h4>Mentions</h4>
-      <ul className="graph-list">
-        {mentioned.map((e) => (
-          <li key={e.key}>
-            <button className="link-button" onClick={() => onSelect(e.key)}>
-              {e.name}
-            </button>
-          </li>
-        ))}
-      </ul>
+      <div className="panel-head">
+        <KindTag kind="file" label={kindLabel(node.kind)} />
+        <h2 className="panel-title">{node.name}</h2>
+        <Button variant="subtle" size="sm" icon={ArrowRight} onClick={() => onOpenFile(node.id)}>
+          Open in Library
+        </Button>
+      </div>
+      <section className="panel-section">
+        <h3 className="section-label">
+          Mentions <span className="count">{mentioned.length}</span>
+        </h3>
+        <ul className="relations">
+          {mentioned.map((e) => (
+            <li key={e.key}>
+              <button type="button" className="relation" onClick={() => onSelect(e.key)}>
+                <span
+                  className="relation-dot"
+                  style={{ background: kindColor(e.kind) }}
+                  aria-hidden
+                />
+                <span className="relation-text">{e.name}</span>
+                <ArrowRight className="relation-go" aria-hidden />
+              </button>
+            </li>
+          ))}
+        </ul>
+      </section>
     </>
   );
 }
@@ -235,6 +289,7 @@ export default function Graph({ onOpenFile }: GraphProps) {
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<View>({ x: 0, y: 0, k: 1 });
   const [width, setWidth] = useState(800);
+  const [height, setHeight] = useState(560);
   const [selected, setSelected] = useState<string | null>(null);
   const [hovered, setHovered] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
@@ -258,17 +313,20 @@ export default function Graph({ onOpenFile }: GraphProps) {
         setData(d);
         setError(null);
       })
-      .catch((e: unknown) => !cancelled && setError(e instanceof Error ? e.message : String(e)));
+      .catch((e: unknown) => !cancelled && setError(errorText(e)));
     return () => {
       cancelled = true;
     };
   }, [size]);
 
-  // Track the drawing area's width so the graph fills it.
+  // Track the drawing area's size so the graph fills it.
   useEffect(() => {
     const svg = svgRef.current;
     if (!svg) return;
-    const observer = new ResizeObserver(([entry]) => setWidth(entry.contentRect.width));
+    const observer = new ResizeObserver(([entry]) => {
+      setWidth(entry.contentRect.width);
+      setHeight(entry.contentRect.height);
+    });
     observer.observe(svg);
     return () => observer.disconnect();
   }, [data]);
@@ -288,9 +346,13 @@ export default function Graph({ onOpenFile }: GraphProps) {
           .distance((l) => (l.type === "mention" ? 70 : 55))
           .strength((l) => (l.type === "mention" ? 0.25 : 0.6)),
       )
-      .force("charge", forceManyBody<Node>().strength(-140).distanceMax(400))
+      .force("charge", forceManyBody<Node>().strength(-170).distanceMax(420))
       .force("center", forceCenter(0, 0))
-      .force("collide", forceCollide<Node>((n) => n.r + 3))
+      // Room for an entity's label as well as its dot.
+      .force(
+        "collide",
+        forceCollide<Node>((n) => n.r + (n.type === "entity" ? 12 : 4)),
+      )
       .alphaDecay(0.045)
       .on("end", () => {
         if (!interacted.current) fitRef.current();
@@ -311,8 +373,8 @@ export default function Graph({ onOpenFile }: GraphProps) {
 
   // Start centred.
   useEffect(() => {
-    if (!interacted.current) setView((v) => ({ ...v, x: width / 2, y: HEIGHT / 2 }));
-  }, [width]);
+    if (!interacted.current) setView((v) => ({ ...v, x: width / 2, y: height / 2 }));
+  }, [width, height]);
 
   const fit = useCallback(() => {
     const nodes = graph.current.nodes;
@@ -325,9 +387,20 @@ export default function Graph({ onOpenFile }: GraphProps) {
       Math.min(...ys),
       Math.max(...ys),
     ];
-    const k = Math.min(2, 0.9 * Math.min(width / (maxX - minX + 60), HEIGHT / (maxY - minY + 60)));
-    setView({ k, x: width / 2 - k * ((minX + maxX) / 2), y: HEIGHT / 2 - k * ((minY + maxY) / 2) });
-  }, [width]);
+    const k = Math.min(2, 0.9 * Math.min(width / (maxX - minX + 60), height / (maxY - minY + 60)));
+    setView({ k, x: width / 2 - k * ((minX + maxX) / 2), y: height / 2 - k * ((minY + maxY) / 2) });
+  }, [width, height]);
+
+  /** Zoom by `factor` around the centre of the canvas. */
+  const zoomBy = (factor: number) => {
+    interacted.current = true;
+    setView((v) => {
+      const k = Math.min(4, Math.max(0.2, v.k * factor));
+      const cx = width / 2;
+      const cy = height / 2;
+      return { k, x: cx - ((cx - v.x) / v.k) * k, y: cy - ((cy - v.y) / v.k) * k };
+    });
+  };
   fitRef.current = fit;
 
   // Wheel zoom around the cursor (a non-passive listener, so the page itself
@@ -422,7 +495,10 @@ export default function Graph({ onOpenFile }: GraphProps) {
   }, [focus, links]);
   const needle = filter.trim().toLowerCase();
   const matches = useMemo(
-    () => (needle ? new Set(nodes.filter((n) => n.name.toLowerCase().includes(needle)).map((n) => n.key)) : null),
+    () =>
+      needle
+        ? new Set(nodes.filter((n) => n.name.toLowerCase().includes(needle)).map((n) => n.key))
+        : null,
     [needle, nodes],
   );
 
@@ -430,58 +506,107 @@ export default function Graph({ onOpenFile }: GraphProps) {
     setSelected(key);
     const n = byKey.get(key);
     if (n?.x !== undefined && n.y !== undefined) {
-      setView((v) => ({ ...v, x: width / 2 - v.k * n.x!, y: HEIGHT / 2 - v.k * n.y! }));
+      setView((v) => ({ ...v, x: width / 2 - v.k * n.x!, y: height / 2 - v.k * n.y! }));
     }
   };
 
   const dimmed = (key: string) =>
     (matches !== null && !matches.has(key)) || (focus !== null && !neighbours.has(key));
 
-  if (error) return <p className="error">{error}</p>;
-  if (!data) return <p className="hint">Loading…</p>;
+  const header = (
+    <PageHeader
+      title="Graph"
+      description="The people, places, tools and ideas in your library, and the files that mention them."
+      eyebrow={
+        data && data.entities.length > 0
+          ? data.truncated
+            ? `${data.entities.length} most connected of ${data.entity_total.toLocaleString()}`
+            : plural(data.entities.length, "entity", "entities")
+          : undefined
+      }
+    />
+  );
+
+  if (error) {
+    return (
+      <>
+        {header}
+        <Callout title="Couldn't load the graph">{error}</Callout>
+      </>
+    );
+  }
+  if (!data) {
+    return (
+      <>
+        {header}
+        <div className="graph-loading">
+          <Spinner label="Loading the graph" />
+        </div>
+      </>
+    );
+  }
 
   if (data.entities.length === 0) {
     return (
-      <div className="graph-empty">
-        <p>Your graph is empty for now.</p>
-        <p className="hint">
-          It grows as Gather finds people, places, tools and ideas in what you add, and how they
-          connect. On its own, Gather links clear statements like "I work at Acme", "We decided to
-          use Postgres" or "I prefer tea"; each becomes a line from you to that thing, and every
-          file that mentions it connects to it too. With a local AI chat model (Ollama) it finds
-          far more connections.
-        </p>
-      </div>
+      <>
+        {header}
+        <EmptyState icon={Waypoints} title="Your graph is empty for now">
+          <p>
+            It grows as Gather finds people, places, tools and ideas in what you add, and how they
+            connect. On its own, Gather links clear statements like “I work at Acme”, “We decided to
+            use Postgres” or “I prefer tea”; each becomes a line from you to that thing, and every
+            file that mentions it connects to it too.
+          </p>
+          <p>With a local AI chat model (Ollama) it finds far more connections.</p>
+        </EmptyState>
+      </>
     );
   }
 
   const selectedNode = selected ? byKey.get(selected) : undefined;
   const showLabel = (n: Node) =>
     view.k >= 1.4 || neighbours.has(n.key) || (matches?.has(n.key) ?? false) || labelled.has(n.key);
+  const presentKinds = ENTITY_KINDS.filter((k) =>
+    nodes.some(
+      (n) =>
+        n.type === "entity" && (n.kind === k || (k === "other" && !ENTITY_KINDS.includes(n.kind))),
+    ),
+  );
 
   return (
     <div className="graph">
+      {header}
       <div className="graph-toolbar">
-        <input
-          type="search"
-          placeholder="Find in graph…"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && matches && matches.size > 0) select([...matches][0]);
-          }}
-        />
-        <label>
+        <div className="search-field">
+          <Search aria-hidden />
+          <input
+            className="input"
+            type="search"
+            aria-label="Find in graph"
+            placeholder="Find in graph…"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && matches && matches.size > 0) select([...matches][0]);
+            }}
+          />
+          {matches && (
+            <span className="search-hint num" aria-live="polite">
+              {matches.size} found
+            </span>
+          )}
+        </div>
+        <label className="check">
           <input
             type="checkbox"
             checked={showFiles}
             onChange={(e) => setShowFiles(e.target.checked)}
-          />{" "}
-          Show files
+          />
+          <span>Show files</span>
         </label>
-        <label>
-          Show up to{" "}
-          <select value={size} onChange={(e) => setSize(Number(e.target.value))}>
+        <label className="inline-field">
+          <span>Show up to</span>
+          <select className="select" value={size} onChange={(e) => setSize(Number(e.target.value))}>
             {SIZES.map((s) => (
               <option key={s} value={s}>
                 {s}
@@ -489,72 +614,108 @@ export default function Graph({ onOpenFile }: GraphProps) {
             ))}
           </select>
         </label>
-        <button onClick={fit}>Fit</button>
       </div>
-      {data.truncated && (
-        <p className="hint">
-          Showing the {data.entities.length} most connected of {data.entity_total}.
-        </p>
-      )}
 
       <div className="graph-body">
-        <svg
-          ref={svgRef}
-          className="graph-canvas"
-          height={HEIGHT}
-          onPointerDown={(e) => onPointerDown(e, null)}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-        >
-          <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
-            {links.map((l, i) => {
-              const s = endpoint(l.source);
-              const t = endpoint(l.target);
-              if (!s || !t) return null;
-              const faded = dimmed(s.key) || dimmed(t.key);
-              return (
-                <line
-                  key={i}
-                  className={`graph-link ${l.type}${faded ? " faded" : ""}`}
-                  x1={s.x}
-                  y1={s.y}
-                  x2={t.x}
-                  y2={t.y}
-                  strokeWidth={Math.min(4, 1 + Math.log2(l.count)) / Math.sqrt(view.k)}
-                >
-                  <title>{`${s.name} ${l.label} ${t.name}`}</title>
-                </line>
-              );
-            })}
-            {nodes.map((n) => {
-              const faded = dimmed(n.key);
-              const cls = `graph-node ${n.type}${faded ? " faded" : ""}${n.key === selected ? " selected" : ""}`;
-              return (
-                <g
-                  key={n.key}
-                  className={cls}
-                  transform={`translate(${n.x ?? 0},${n.y ?? 0})`}
-                  onPointerDown={(e) => onPointerDown(e, n)}
-                  onPointerEnter={() => setHovered(n.key)}
-                  onPointerLeave={() => setHovered((h) => (h === n.key ? null : h))}
-                >
-                  {n.type === "entity" ? (
-                    <circle r={n.r} fill={ENTITY_COLORS[n.kind] ?? ENTITY_COLORS.other} />
-                  ) : (
-                    <rect x={-n.r} y={-n.r} width={n.r * 2} height={n.r * 2} rx={2} />
-                  )}
-                  {showLabel(n) && (
-                    <text y={n.r + 11} fontSize={11 / Math.sqrt(view.k)}>
-                      {n.name.length > 28 ? `${n.name.slice(0, 27)}…` : n.name}
-                    </text>
-                  )}
-                </g>
-              );
-            })}
-          </g>
-        </svg>
+        <div className="graph-stage">
+          <svg
+            ref={svgRef}
+            className="graph-canvas"
+            role="img"
+            aria-label={`Graph of ${plural(nodes.length, "item")} and ${plural(links.length, "connection")}. Use Find in graph and press Enter to select one.`}
+            onPointerDown={(e) => onPointerDown(e, null)}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+          >
+            <defs>
+              <pattern id="graph-dots" width="24" height="24" patternUnits="userSpaceOnUse">
+                <circle cx="1" cy="1" r="1" className="graph-grid-dot" />
+              </pattern>
+            </defs>
+            <rect width="100%" height="100%" fill="url(#graph-dots)" />
+            <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
+              {links.map((l, i) => {
+                const s = endpoint(l.source);
+                const t = endpoint(l.target);
+                if (!s || !t) return null;
+                const faded = dimmed(s.key) || dimmed(t.key);
+                const lit = focus !== null && !faded && (s.key === focus || t.key === focus);
+                return (
+                  <line
+                    key={i}
+                    className={`graph-link ${l.type}${faded ? " faded" : ""}${lit ? " lit" : ""}`}
+                    x1={s.x}
+                    y1={s.y}
+                    x2={t.x}
+                    y2={t.y}
+                    strokeWidth={Math.min(4, 1 + Math.log2(l.count)) / Math.sqrt(view.k)}
+                  >
+                    <title>{`${s.name} ${l.label} ${t.name}`}</title>
+                  </line>
+                );
+              })}
+              {nodes.map((n) => {
+                const faded = dimmed(n.key);
+                const cls = `graph-node ${n.type}${faded ? " faded" : ""}${n.key === selected ? " selected" : ""}`;
+                return (
+                  <g
+                    key={n.key}
+                    className={cls}
+                    transform={`translate(${n.x ?? 0},${n.y ?? 0})`}
+                    onPointerDown={(e) => onPointerDown(e, n)}
+                    onPointerEnter={() => setHovered(n.key)}
+                    onPointerLeave={() => setHovered((h) => (h === n.key ? null : h))}
+                  >
+                    {n.key === selected && (
+                      <circle
+                        className="graph-halo"
+                        r={n.r + 7}
+                        style={{
+                          fill: n.type === "entity" ? kindColor(n.kind) : "var(--cat-file)",
+                        }}
+                      />
+                    )}
+                    {n.type === "entity" ? (
+                      <circle r={n.r} style={{ fill: kindColor(n.kind) }} />
+                    ) : (
+                      <rect x={-n.r} y={-n.r} width={n.r * 2} height={n.r * 2} rx={2.5} />
+                    )}
+                    {showLabel(n) && (
+                      <text y={n.r + 13} fontSize={11.5 / Math.sqrt(view.k)}>
+                        {n.name.length > 28 ? `${n.name.slice(0, 27)}…` : n.name}
+                      </text>
+                    )}
+                  </g>
+                );
+              })}
+            </g>
+          </svg>
 
-        <aside className="graph-panel">
+          <div className="graph-controls" role="group" aria-label="Zoom">
+            <IconButton icon={Plus} label="Zoom in" size="sm" onClick={() => zoomBy(1.3)} />
+            <IconButton icon={Minus} label="Zoom out" size="sm" onClick={() => zoomBy(1 / 1.3)} />
+            <span className="graph-controls-sep" aria-hidden />
+            <IconButton icon={Maximize2} label="Fit to window" size="sm" onClick={fit} />
+          </div>
+
+          <ul className="graph-legend" aria-label="Legend">
+            {presentKinds.map((kind) => (
+              <li key={kind}>
+                <KindTag kind={kind} />
+              </li>
+            ))}
+            {showFiles && (
+              <li>
+                <span className="kind-tag">
+                  <span className="legend-file" aria-hidden />
+                  file
+                </span>
+              </li>
+            )}
+          </ul>
+        </div>
+
+        <aside className="graph-panel card" aria-label="Details" aria-live="polite">
           {selectedNode ? (
             selectedNode.type === "entity" ? (
               <EntityPanel
@@ -572,29 +733,30 @@ export default function Graph({ onOpenFile }: GraphProps) {
               />
             )
           ) : (
-            <>
+            <div className="panel-intro">
+              <span className="panel-intro-icon" aria-hidden>
+                <MousePointerClick />
+              </span>
+              <h2 className="panel-title">Explore connections</h2>
               <p className="hint">
-                Click a dot to see how it connects. Drag to move things around, scroll to zoom.
+                Click a dot to see how it connects. Drag to move things around, scroll to zoom, or
+                type a name above and press Enter.
               </p>
-              <ul className="graph-legend">
-                {Object.entries(ENTITY_COLORS).map(([kind, color]) => (
-                  <li key={kind}>
-                    <svg width="12" height="12">
-                      <circle cx="6" cy="6" r="5" fill={color} />
-                    </svg>{" "}
-                    {kind}
-                  </li>
-                ))}
-                {showFiles && (
-                  <li>
-                    <svg width="12" height="12">
-                      <rect className="graph-file-swatch" x="1" y="1" width="10" height="10" rx="2" />
-                    </svg>{" "}
-                    file
-                  </li>
-                )}
-              </ul>
-            </>
+              <dl className="graph-stats">
+                <div>
+                  <dt>Entities</dt>
+                  <dd className="num">{nodes.filter((n) => n.type === "entity").length}</dd>
+                </div>
+                <div>
+                  <dt>Files</dt>
+                  <dd className="num">{nodes.filter((n) => n.type === "file").length}</dd>
+                </div>
+                <div>
+                  <dt>Links</dt>
+                  <dd className="num">{links.length}</dd>
+                </div>
+              </dl>
+            </div>
           )}
         </aside>
       </div>

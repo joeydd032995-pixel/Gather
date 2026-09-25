@@ -1,0 +1,222 @@
+/*
+ * Design tokens. Every colour, size and duration in the app comes from here,
+ * so the light and dark themes are two sets of values for the same names.
+ *
+ * Contrast (WCAG 2.2): every text colour here, including the muted
+ * --text-3 and the status colours on their soft backgrounds, reaches AAA
+ * (7:1) against the surfaces it is used on, in both themes. Status colours
+ * are never the only signal: each pairs with an icon or a word.
+ */
+
+:root {
+  /* type */
+  --font-display: "Fraunces Variable", "Iowan Old Style", Georgia, serif;
+  --font-ui:
+    "Hanken Grotesk Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --text-2xs: 0.6875rem; /* 11 */
+  --text-xs: 0.75rem; /* 12 */
+  --text-sm: 0.8125rem; /* 13 */
+  --text-base: 0.875rem; /* 14 */
+  --text-md: 0.9375rem; /* 15 */
+  --text-lg: 1.0625rem; /* 17 */
+  --text-xl: 1.375rem; /* 22 */
+  --text-2xl: 1.75rem; /* 28 */
+  --text-3xl: 2.25rem; /* 36 */
+
+  /* space: a 4px scale */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-8: 32px;
+  --s-10: 40px;
+  --s-12: 48px;
+  --s-16: 64px;
+
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-full: 999px;
+
+  --sidebar-w: 240px;
+  --measure: 68ch;
+
+  /* motion */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-1: 120ms;
+  --dur-2: 180ms;
+  --dur-3: 260ms;
+
+  /* light theme (default) */
+  color-scheme: light;
+  --bg: #f6f4ef;
+  --bg-grain: #efece4;
+  --surface: #ffffff;
+  --surface-2: #faf8f4;
+  --surface-hover: #f2efe8;
+  --sunken: #eeeae1;
+  --border: #e4dfd4;
+  --border-strong: #cfc8b9;
+  --overlay: rgba(28, 26, 22, 0.32);
+
+  --text: #1b1a17;
+  --text-2: #37342e;
+  --text-3: #504c45;
+  --text-inverse: #fbfaf7;
+
+  --accent: #0a5c4f;
+  --accent-hover: #084a40;
+  --accent-soft: #e2f0ec;
+  --accent-soft-2: #cde6df;
+  --accent-text: #084a40;
+  --accent-fg: #ffffff;
+  --focus: #0a5c4f;
+
+  --danger: #8f1a12;
+  --danger-soft: #fcebe8;
+  --warning: #6b4500;
+  --warning-soft: #fbf0d9;
+  --success: #0f5a2c;
+  --success-soft: #e4f3e9;
+  --info: #1f4a8f;
+  --info-soft: #e7eefb;
+
+  --mark: #fbe2a0;
+
+  /* categorical: entity and unit kinds */
+  --cat-person: #d0613f;
+  --cat-organization: #3a6fd8;
+  --cat-project: #8e55c9;
+  --cat-tool: #16978b;
+  --cat-concept: #c28a12;
+  --cat-location: #3c8f47;
+  --cat-event: #c9508f;
+  --cat-other: #878c93;
+  --cat-file: #a39c8e;
+
+  --shadow-xs: 0 1px 1px rgba(40, 34, 20, 0.04);
+  --shadow-sm: 0 1px 2px rgba(40, 34, 20, 0.06), 0 1px 1px rgba(40, 34, 20, 0.04);
+  --shadow-md: 0 4px 12px -2px rgba(40, 34, 20, 0.08), 0 2px 4px -2px rgba(40, 34, 20, 0.06);
+  --shadow-lg: 0 24px 48px -12px rgba(40, 34, 20, 0.22), 0 8px 16px -8px rgba(40, 34, 20, 0.12);
+  --ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #111311;
+    --bg-grain: #151816;
+    --surface: #181b19;
+    --surface-2: #1c201d;
+    --surface-hover: #222723;
+    --sunken: #0c0e0d;
+    --border: #282d29;
+    --border-strong: #394039;
+    --overlay: rgba(0, 0, 0, 0.55);
+
+    --text: #edece7;
+    --text-2: #d8d6cf;
+    --text-3: #bab7ae;
+    --text-inverse: #111311;
+
+    --accent: #5ec7ae;
+    --accent-hover: #7ad6c0;
+    --accent-soft: rgba(94, 199, 174, 0.12);
+    --accent-soft-2: rgba(94, 199, 174, 0.2);
+    --accent-text: #7ad6c0;
+    --accent-fg: #062019;
+    --focus: #7ad6c0;
+
+    --danger: #f6a79c;
+    --danger-soft: rgba(242, 135, 122, 0.12);
+    --warning: #e8b85a;
+    --warning-soft: rgba(232, 184, 90, 0.12);
+    --success: #6fcf8e;
+    --success-soft: rgba(111, 207, 142, 0.12);
+    --info: #a9c6f6;
+    --info-soft: rgba(141, 179, 242, 0.12);
+
+    --mark: rgba(232, 184, 90, 0.35);
+
+    --cat-person: #ec8a6c;
+    --cat-organization: #7ea2f0;
+    --cat-project: #b88be6;
+    --cat-tool: #4cc3b5;
+    --cat-concept: #e0b54c;
+    --cat-location: #74c27f;
+    --cat-event: #e684b8;
+    --cat-other: #9ba0a7;
+    --cat-file: #7d786e;
+
+    --shadow-xs: 0 1px 1px rgba(0, 0, 0, 0.3);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 6px 16px -4px rgba(0, 0, 0, 0.5);
+    --shadow-lg: 0 24px 56px -12px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  }
+}
+
+/* An explicit choice in Settings wins over the system preference. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #111311;
+  --bg-grain: #151816;
+  --surface: #181b19;
+  --surface-2: #1c201d;
+  --surface-hover: #222723;
+  --sunken: #0c0e0d;
+  --border: #282d29;
+  --border-strong: #394039;
+  --overlay: rgba(0, 0, 0, 0.55);
+
+  --text: #edece7;
+  --text-2: #d8d6cf;
+  --text-3: #bab7ae;
+  --text-inverse: #111311;
+
+  --accent: #5ec7ae;
+  --accent-hover: #7ad6c0;
+  --accent-soft: rgba(94, 199, 174, 0.12);
+  --accent-soft-2: rgba(94, 199, 174, 0.2);
+  --accent-text: #7ad6c0;
+  --accent-fg: #062019;
+  --focus: #7ad6c0;
+
+  --danger: #f6a79c;
+  --danger-soft: rgba(242, 135, 122, 0.12);
+  --warning: #e8b85a;
+  --warning-soft: rgba(232, 184, 90, 0.12);
+  --success: #6fcf8e;
+  --success-soft: rgba(111, 207, 142, 0.12);
+  --info: #a9c6f6;
+  --info-soft: rgba(141, 179, 242, 0.12);
+
+  --mark: rgba(232, 184, 90, 0.35);
+
+  --cat-person: #ec8a6c;
+  --cat-organization: #7ea2f0;
+  --cat-project: #b88be6;
+  --cat-tool: #4cc3b5;
+  --cat-concept: #e0b54c;
+  --cat-location: #74c27f;
+  --cat-event: #e684b8;
+  --cat-other: #9ba0a7;
+  --cat-file: #7d786e;
+
+  --shadow-xs: 0 1px 1px rgba(0, 0, 0, 0.3);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 6px 16px -4px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 24px 56px -12px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+@media (max-width: 900px) {
+  :root {
+    --sidebar-w: 64px;
+  }
+}

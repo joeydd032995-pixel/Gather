@@ -1,5 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowLeft,
+  CircleSlash,
+  FileSearch,
+  FolderOpen,
+  LoaderCircle,
+  Search,
+  SearchX,
+  Sparkles,
+} from "lucide-react";
+import {
   getArtifact,
   getArtifactContent,
   listArtifacts,
@@ -9,40 +19,38 @@ import {
   type ArtifactSummary,
   type SearchHit,
 } from "./api";
+import { kindIcon, kindLabel, plural, sizeLabel } from "./kinds";
 import Thumbnail from "./Thumbnail";
+import { Badge, Button, Callout, EmptyState, PageHeader, Skeleton, When, errorText } from "./ui";
 import UnitList from "./UnitList";
 
 const PAGE = 50;
 /** How often to refresh while a file is still being read. */
 const POLL_MS = 10_000;
 
-export const KIND_LABELS: Record<string, string> = {
-  document_pdf: "PDF",
-  document_markdown: "Markdown",
-  document_text: "Text",
-  image_photo: "Photo",
-  image_screenshot: "Screenshot",
-  chat_export: "Chat export",
-  agent_log: "Agent log",
-};
-
 function fileName(a: Pick<ArtifactSummary, "original_filename" | "source_platform">): string {
   return a.original_filename ?? `(${a.source_platform} import)`;
 }
 
-function sizeLabel(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 function StatusBadge({ file }: { file: ArtifactSummary }) {
-  if (file.status === "processing") return <span className="lib-badge reading">Reading…</span>;
-  if (file.status === "failed") return <span className="lib-badge failed">Couldn't read</span>;
+  if (file.status === "processing") {
+    return (
+      <Badge tone="warning" icon={LoaderCircle} className="badge-reading">
+        Reading
+      </Badge>
+    );
+  }
+  if (file.status === "failed") {
+    return (
+      <Badge tone="danger" icon={CircleSlash}>
+        Unreadable
+      </Badge>
+    );
+  }
   return (
-    <span className={file.unit_count > 0 ? "lib-badge found" : "lib-badge"}>
-      {file.unit_count === 1 ? "1 item" : `${file.unit_count} items`}
-    </span>
+    <Badge tone={file.unit_count > 0 ? "accent" : "neutral"}>
+      {plural(file.unit_count, "item")}
+    </Badge>
   );
 }
 
@@ -56,9 +64,11 @@ function Highlight({ text, query }: { text: string; query: string }) {
   const pattern = new RegExp(`(${words.join("|")})`, "giu");
   return (
     <>
-      {text.split(pattern).map((part, i) =>
-        i % 2 === 1 ? <mark key={i}>{part}</mark> : <span key={i}>{part}</span>,
-      )}
+      {text
+        .split(pattern)
+        .map((part, i) =>
+          i % 2 === 1 ? <mark key={i}>{part}</mark> : <span key={i}>{part}</span>,
+        )}
     </>
   );
 }
@@ -71,7 +81,10 @@ function excerpt(text: string, query: string, room = 240): string {
   const start = Math.max(0, (at < 0 ? 0 : at) - room / 3);
   const end = Math.min(text.length, start + room);
   // Start the excerpt at a word, not mid-word or on stray punctuation.
-  const body = text.slice(start, end).trim().replace(start > 0 ? /^\S*[\s.,;:!?]+/u : /^/, "");
+  const body = text
+    .slice(start, end)
+    .trim()
+    .replace(start > 0 ? /^\S*[\s.,;:!?]+/u : /^/, "");
   return `${start > 0 ? "…" : ""}${body}${end < text.length ? "…" : ""}`;
 }
 
@@ -99,32 +112,38 @@ function SearchResultList({
   const total = sections.reduce((n, [, hits]) => n + hits.length, 0);
   if (total === 0) {
     return (
-      <p className="hint">
-        Nothing matches "{results.query}". Search looks for the words themselves; try fewer or
-        different words.
-      </p>
+      <EmptyState icon={SearchX} title={`Nothing matches “${results.query}”`}>
+        Search looks for the words themselves. Try fewer or different words.
+      </EmptyState>
     );
   }
   return (
-    <div className="lib-search-results">
+    <div className="search-results" aria-live="polite">
+      <p className="hint search-summary">
+        {plural(total, "result")} for <strong>“{results.query}”</strong>
+      </p>
       {sections
         .filter(([, hits]) => hits.length > 0)
         .map(([title, hits]) => (
           <section key={title}>
-            <h3>{title}</h3>
-            <ul className="lib-hits">
+            <h2 className="section-label">
+              {title} <span className="count">{hits.length}</span>
+            </h2>
+            <ul className="hits">
               {hits.map((hit) => (
                 <li key={`${hit.scope}-${hit.id}`}>
                   <button
-                    className="lib-hit"
+                    type="button"
+                    className="hit"
                     disabled={!hit.artifact_id}
                     onClick={() => hit.artifact_id && onOpen(hit.artifact_id)}
                   >
-                    <span className="lib-hit-text">
+                    <span className="hit-text">
                       <Highlight text={excerpt(hit.content, results.query)} query={results.query} />
                     </span>
                     {hit.artifact_id && (
-                      <span className="lib-hit-source">
+                      <span className="hit-source">
+                        <FolderOpen aria-hidden />
                         {names.get(hit.artifact_id) ?? "Open file"}
                       </span>
                     )}
@@ -166,7 +185,7 @@ function FileDetail({ id, refreshKey }: { id: string; refreshKey: number }) {
         setContent(c);
       })
       .catch((e: unknown) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+        if (!cancelled) setError(errorText(e));
       });
     return () => {
       cancelled = true;
@@ -182,66 +201,88 @@ function FileDetail({ id, refreshKey }: { id: string; refreshKey: number }) {
       if (currentId.current !== requested) return;
       setContent({ ...next, items: [...content.items, ...next.items] });
     } catch (e) {
-      if (currentId.current === requested) setError(e instanceof Error ? e.message : String(e));
+      if (currentId.current === requested) setError(errorText(e));
     } finally {
       if (currentId.current === requested) setLoadingMore(false);
     }
   };
 
-  if (error) return <p className="error">{error}</p>;
-  if (!detail || !content) return <p className="hint">Loading…</p>;
+  if (error) return <Callout title="Couldn't open this file">{error}</Callout>;
+  if (!detail || !content) {
+    return (
+      <div className="doc">
+        <Skeleton rows={5} />
+      </div>
+    );
+  }
 
+  const Icon = kindIcon(detail.kind);
   return (
-    <article className="lib-detail">
-      <h2>{fileName(detail)}</h2>
-      <p className="hint">
-        {KIND_LABELS[detail.kind] ?? detail.kind} · {sizeLabel(detail.byte_size)} · added{" "}
-        {new Date(detail.ingested_at).toLocaleString()}
-        {detail.document?.page_count ? ` · ${detail.document.page_count} pages` : ""}
-      </p>
+    <article className="doc" aria-labelledby="doc-title">
+      <header className="doc-head">
+        <span className="file-icon file-icon-lg" aria-hidden>
+          <Icon />
+        </span>
+        <div className="doc-heading">
+          <h2 className="doc-title" id="doc-title">
+            {fileName(detail)}
+          </h2>
+          <p className="doc-meta">
+            <span>{kindLabel(detail.kind)}</span>
+            <span className="dot-sep">{sizeLabel(detail.byte_size)}</span>
+            {detail.document?.page_count ? (
+              <span className="dot-sep">{plural(detail.document.page_count, "page")}</span>
+            ) : null}
+            <span className="dot-sep">
+              Added <When iso={detail.ingested_at} />
+            </span>
+          </p>
+        </div>
+      </header>
 
       {detail.image && (
-        <div className="lib-image">
-          <Thumbnail imageId={detail.image.id} alt={fileName(detail)} size={240} />
-          {detail.image.caption && <p>{detail.image.caption}</p>}
-        </div>
+        <figure className="doc-image">
+          <Thumbnail imageId={detail.image.id} alt={fileName(detail)} size={280} />
+          {detail.image.caption && <figcaption>{detail.image.caption}</figcaption>}
+        </figure>
       )}
 
-      <section>
-        <h3>What Gather found</h3>
+      <section className="doc-section">
+        <h3 className="section-label">
+          <Sparkles aria-hidden className="section-icon" /> What Gather found
+        </h3>
         {detail.status === "processing" && (
-          <p className="hint">
+          <Callout tone="info" icon={LoaderCircle}>
             Gather is still reading this file. Items appear here within a minute or two.
-          </p>
+          </Callout>
         )}
         {detail.status === "failed" && (
-          <p className="error">
-            Gather couldn't read the text in this file. Details are in daemon.log.
-          </p>
+          <Callout title="Gather couldn't read the text in this file">
+            Details are in daemon.log.
+          </Callout>
         )}
         <UnitList
           artifactId={id}
           refreshKey={refreshKey}
           empty={
             detail.status === "done" && (
-              <p className="hint">
-                Nothing in this file matched what Gather looks for yet. On its own, Gather picks
-                up clear statements such as "I prefer…", "We decided to use…", "I work at…",
-                "Our rent is $1,200" or "On 2026-03-01, …". With a local AI chat model (Ollama) it
-                finds much more. The file's text is still stored and searchable.
-              </p>
+              <Callout tone="neutral" icon={FileSearch} title="Nothing extracted yet">
+                On its own, Gather picks up clear statements such as “I prefer…”, “We decided to
+                use…”, “I work at…”, “Our rent is $1,200” or “On 2026-03-01, …”. With a local AI
+                chat model (Ollama) it finds much more. The file's text is still stored and
+                searchable.
+              </Callout>
             )
           }
         />
       </section>
 
-      <section>
-        <h3>
+      <section className="doc-section">
+        <h3 className="section-label">
           Contents
           {content.total > 0 && (
-            <span className="hint">
-              {" "}
-              · {content.total} {content.source === "conversation" ? "messages" : "sections"}
+            <span className="count">
+              {plural(content.total, content.source === "conversation" ? "message" : "section")}
             </span>
           )}
         </h3>
@@ -252,25 +293,23 @@ function FileDetail({ id, refreshKey }: { id: string; refreshKey: number }) {
               : "No readable text was stored for this file."}
           </p>
         ) : (
-          <div className="lib-passages">
+          <div className={content.source === "conversation" ? "passages chat" : "passages"}>
             {content.items.map((p) => (
-              <div className="lib-passage" key={p.seq}>
+              <div className="passage" key={p.seq} data-role={p.role ?? undefined}>
                 {(p.heading || p.page || p.role) && (
-                  <div className="lib-passage-head">
-                    {[p.role, p.heading, p.page ? `page ${p.page}` : null]
-                      .filter(Boolean)
-                      .join(" · ")}
+                  <div className="passage-head">
+                    {p.role && <span className="passage-role">{p.role}</span>}
+                    {p.heading && <span className="passage-heading">{p.heading}</span>}
+                    {p.page && <span className="passage-page num">p. {p.page}</span>}
                   </div>
                 )}
                 <p>{p.text}</p>
               </div>
             ))}
             {content.items.length < content.total && (
-              <button className="link-button" onClick={loadMore} disabled={loadingMore}>
-                {loadingMore
-                  ? "Loading…"
-                  : `Show more (${content.total - content.items.length} left)`}
-              </button>
+              <Button variant="secondary" size="sm" onClick={loadMore} loading={loadingMore}>
+                Show more · {content.total - content.items.length} left
+              </Button>
             )}
           </div>
         )}
@@ -294,7 +333,7 @@ export default function Library({ selected, onSelect }: LibraryProps) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResults | null>(null);
   const [searching, setSearching] = useState(false);
-
+  const searchInput = useRef<HTMLInputElement>(null);
 
   const loadFiles = useCallback(async (count: number) => {
     try {
@@ -303,7 +342,7 @@ export default function Library({ selected, onSelect }: LibraryProps) {
       setFiles(page.slice(0, count));
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
     }
   }, []);
 
@@ -323,10 +362,21 @@ export default function Library({ selected, onSelect }: LibraryProps) {
     return () => clearInterval(timer);
   }, [reading, shown, loadFiles]);
 
-  const names = useMemo(
-    () => new Map((files ?? []).map((f) => [f.id, fileName(f)])),
-    [files],
-  );
+  // "/" focuses search, as in most apps with one primary search box.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const typing =
+        e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
+      if (e.key === "/" && !typing && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        searchInput.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const names = useMemo(() => new Map((files ?? []).map((f) => [f.id, fileName(f)])), [files]);
 
   const runSearch = async (text: string) => {
     const q = text.trim();
@@ -344,7 +394,7 @@ export default function Library({ selected, onSelect }: LibraryProps) {
       setResults({ query: q, items, passages, chats });
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
     } finally {
       setSearching(false);
     }
@@ -357,76 +407,131 @@ export default function Library({ selected, onSelect }: LibraryProps) {
 
   return (
     <div className="library">
+      <PageHeader
+        title="Library"
+        description="Everything you've added, what Gather found in each file, and the text itself."
+        eyebrow={
+          files && files.length > 0
+            ? `${plural(files.length, "file")}${hasMore ? "+" : ""}`
+            : undefined
+        }
+      />
+
       <form
-        className="lib-search"
+        className="library-search"
+        role="search"
         onSubmit={(e) => {
           e.preventDefault();
           runSearch(query);
         }}
       >
-        <input
-          type="search"
-          placeholder="Search everything you've added…"
-          value={query}
-          onChange={(e) => {
-            setQuery(e.target.value);
-            if (!e.target.value.trim()) setResults(null);
-          }}
-        />
-        <button type="submit" disabled={searching || !query.trim()}>
-          {searching ? "Searching…" : "Search"}
-        </button>
+        <div className="search-field search-field-lg">
+          <Search aria-hidden />
+          <input
+            ref={searchInput}
+            className="input"
+            type="search"
+            aria-label="Search your library"
+            placeholder="Search everything you've added…"
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              if (!e.target.value.trim()) setResults(null);
+            }}
+          />
+          {!query && (
+            <span className="search-hint" aria-hidden>
+              Press <kbd className="kbd">/</kbd>
+            </span>
+          )}
+        </div>
+        <Button
+          type="submit"
+          variant="primary"
+          size="lg"
+          loading={searching}
+          disabled={!query.trim()}
+        >
+          Search
+        </Button>
       </form>
 
-      {error && <p className="error">{error}</p>}
+      {error && <Callout title="Something went wrong">{error}</Callout>}
 
       {results ? (
         <>
-          <button className="link-button" onClick={() => setResults(null)}>
-            ← Back to your files
-          </button>
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={ArrowLeft}
+            onClick={() => setResults(null)}
+            className="back"
+          >
+            Back to your files
+          </Button>
           <SearchResultList results={results} names={names} onOpen={open} />
         </>
-      ) : files === null ? (
-        <p className="hint">Loading…</p>
+      ) : files === null && error ? null : files === null ? (
+        <div className="library-panes">
+          <div className="file-list card">
+            <Skeleton rows={7} />
+          </div>
+          <div />
+        </div>
       ) : files.length === 0 ? (
-        <p className="hint">
-          Nothing here yet. Add files on the Upload tab and they'll appear here, with what Gather
-          found in each.
-        </p>
+        <EmptyState icon={FolderOpen} title="Your library is empty">
+          Add files from <strong>Add files</strong> and they'll appear here, with what Gather found
+          in each.
+        </EmptyState>
       ) : (
-        <div className="lib-panes">
-          <ul className="lib-files">
-            {files.map((f) => (
-              <li key={f.id}>
-                <button
-                  className={f.id === selected ? "lib-file active" : "lib-file"}
-                  onClick={() => onSelect(f.id)}
-                >
-                  <span className="lib-file-name">{fileName(f)}</span>
-                  <span className="lib-file-meta">
-                    {KIND_LABELS[f.kind] ?? f.kind} ·{" "}
-                    {new Date(f.ingested_at).toLocaleDateString()}
-                  </span>
-                  <StatusBadge file={f} />
-                </button>
-              </li>
-            ))}
+        <div className="library-panes">
+          <nav className="file-list card" aria-label="Files">
+            <ul>
+              {files.map((f) => {
+                const Icon = kindIcon(f.kind);
+                const active = f.id === selected;
+                return (
+                  <li key={f.id}>
+                    <button
+                      type="button"
+                      data-file
+                      className={active ? "file-row active" : "file-row"}
+                      aria-current={active ? "true" : undefined}
+                      onClick={() => onSelect(f.id)}
+                    >
+                      <span className="file-icon" aria-hidden>
+                        <Icon />
+                      </span>
+                      <span className="file-text">
+                        <span className="file-name">{fileName(f)}</span>
+                        <span className="file-meta">
+                          {kindLabel(f.kind)}
+                          <span className="dot-sep">
+                            <When iso={f.ingested_at} />
+                          </span>
+                        </span>
+                      </span>
+                      <StatusBadge file={f} />
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
             {hasMore && (
-              <li>
-                <button className="link-button" onClick={() => loadFiles(shown + PAGE)}>
+              <div className="file-list-more">
+                <Button variant="ghost" size="sm" onClick={() => loadFiles(shown + PAGE)}>
                   Show more files
-                </button>
-              </li>
+                </Button>
+              </div>
             )}
-          </ul>
-          <div className="lib-detail-pane">
+          </nav>
+          <div className="library-detail">
             {selected ? (
               <FileDetail id={selected} refreshKey={refreshKey} />
             ) : (
-              <p className="hint">
-                Pick a file to see what Gather found in it and read its contents.
-              </p>
+              <EmptyState icon={FileSearch} title="Pick a file">
+                See what Gather found in it, and read its contents.
+              </EmptyState>
             )}
           </div>
         </div>

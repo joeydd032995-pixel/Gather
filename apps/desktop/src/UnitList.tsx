@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { listUnits, type UnitSummary } from "./api";
+import { Button, Callout, KindTag, Skeleton, errorText } from "./ui";
 
 interface UnitListProps {
   /** Units extracted from this file… */
@@ -11,6 +12,8 @@ interface UnitListProps {
   refreshKey?: number;
   /** Shown when there are no units. */
   empty?: ReactNode;
+  /** Tighter rows, for side panels. */
+  compact?: boolean;
 }
 
 /**
@@ -23,6 +26,7 @@ export default function UnitList({
   pageSize = 100,
   refreshKey = 0,
   empty = null,
+  compact = false,
 }: UnitListProps) {
   const [units, setUnits] = useState<UnitSummary[] | null>(null);
   const [hasMore, setHasMore] = useState(false);
@@ -44,7 +48,7 @@ export default function UnitList({
         setUnits(page);
         setHasMore(page.length === pageSize);
       })
-      .catch((e: unknown) => !cancelled && setError(e instanceof Error ? e.message : String(e)));
+      .catch((e: unknown) => !cancelled && setError(errorText(e)));
     return () => {
       cancelled = true;
     };
@@ -65,29 +69,29 @@ export default function UnitList({
       setUnits([...units, ...page]);
       setHasMore(page.length === pageSize);
     } catch (e) {
-      if (current.current === requested) setError(e instanceof Error ? e.message : String(e));
+      if (current.current === requested) setError(errorText(e));
     } finally {
       if (current.current === requested) setLoadingMore(false);
     }
   };
 
-  if (error) return <p className="error">{error}</p>;
-  if (units === null) return <p className="hint">Loading…</p>;
+  if (error) return <Callout title="Couldn't load statements">{error}</Callout>;
+  if (units === null) return <Skeleton rows={3} />;
   if (units.length === 0) return <>{empty}</>;
   return (
     <>
-      <ul className="lib-units">
+      <ul className={compact ? "units units-compact" : "units"}>
         {units.map((u) => (
-          <li key={u.id}>
-            <span className={`lib-kind kind-${u.kind}`}>{u.kind}</span>
-            <span>{u.statement}</span>
+          <li key={u.id} className="unit">
+            <KindTag kind={u.kind} />
+            <span className="unit-text">{u.statement}</span>
           </li>
         ))}
       </ul>
       {hasMore && (
-        <button className="link-button" onClick={loadMore} disabled={loadingMore}>
-          {loadingMore ? "Loading…" : "Show more"}
-        </button>
+        <Button variant="ghost" size="sm" onClick={loadMore} loading={loadingMore}>
+          Show more
+        </Button>
       )}
     </>
   );
