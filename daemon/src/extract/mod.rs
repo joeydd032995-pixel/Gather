@@ -39,8 +39,10 @@ pub struct PassStats {
 pub async fn worker_loop(pool: PgPool, config: Config) {
     let ollama = match OllamaClient::from_config(&config) {
         Ok(client) => {
-            if client.is_some() {
-                tracing::info!("extraction: Ollama enabled (llm + embeddings)");
+            match client.as_ref().map(|c| c.model.is_some()) {
+                Some(true) => tracing::info!("extraction: Ollama enabled (llm + embeddings)"),
+                Some(false) => tracing::info!("extraction: Ollama enabled (embeddings only)"),
+                None => {}
             }
             client
         }
@@ -432,10 +434,11 @@ async fn process_unit_chunks(
                 .map(|u| (u, "rule_based", None))
                 .collect();
 
-        if let Some(client) = ollama {
+        if let Some((client, chat_model)) = ollama.and_then(|c| c.model.as_deref().map(|m| (c, m)))
+        {
             match client.extract(&chunk.text).await {
                 Ok(llm_units) => {
-                    let model = Some(format!("ollama:{}", client.model));
+                    let model = Some(format!("ollama:{chat_model}"));
                     units.extend(
                         llm_units
                             .into_iter()

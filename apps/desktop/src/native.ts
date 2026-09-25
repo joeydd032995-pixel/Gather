@@ -19,6 +19,19 @@ export function runtimeStatus(): Promise<RuntimeStatus> {
   return call<RuntimeStatus>("runtime_status");
 }
 
+/** How much memory the bundled database and daemon are set up to use. */
+export interface MemoryInfo {
+  profile: "standard" | "low";
+  /** Total RAM in MiB, when the app could read it. */
+  total_mb: number | null;
+  /** True when GATHER_MEMORY_PROFILE chose the profile rather than detection. */
+  overridden: boolean;
+}
+
+export function memoryProfile(): Promise<MemoryInfo> {
+  return call<MemoryInfo>("memory_profile");
+}
+
 export function getApiToken(): Promise<string | null> {
   return call<string | null>("get_api_token");
 }

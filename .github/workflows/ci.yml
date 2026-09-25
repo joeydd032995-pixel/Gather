@@ -230,6 +230,10 @@ jobs:
         run: cargo build --locked
       - name: run memory budget
         run: scripts/memory-budget.sh
+      - name: run memory budget (low-memory profile)
+        run: scripts/memory-budget.sh
+        env:
+          GATHER_MEMORY_PROFILE: low
 
   # -------------------------------------------------------- build daemon ----
   build-daemon:

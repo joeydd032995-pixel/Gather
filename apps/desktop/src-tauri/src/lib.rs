@@ -3,6 +3,7 @@
 //! file's bytes for upload, the supervisor that runs the bundled database and
 //! daemon (`runtime`), and the opt-in update check (`updates`).
 
+mod memory;
 mod runtime;
 mod updates;
 
@@ -55,6 +56,12 @@ fn get_api_token() -> Result<Option<String>, String> {
 #[tauri::command]
 fn runtime_status(runtime: State<'_, Arc<Runtime>>) -> Status {
     runtime.status()
+}
+
+/// The memory profile the local stack runs with, for the Settings page.
+#[tauri::command]
+fn memory_profile() -> memory::MemoryInfo {
+    memory::current()
 }
 
 #[tauri::command]
@@ -141,6 +148,7 @@ pub fn run() {
             read_upload_file,
             get_api_token,
             runtime_status,
+            memory_profile,
             get_update_settings,
             set_update_settings,
             check_for_update,

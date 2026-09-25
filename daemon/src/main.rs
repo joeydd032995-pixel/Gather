@@ -117,6 +117,12 @@ async fn run() -> anyhow::Result<()> {
         }
     }
 
+    tracing::info!(
+        memory_profile = config.memory_profile.as_str(),
+        db_connections = config.db_max_connections,
+        max_upload_mb = config.max_upload_mb,
+        "memory profile"
+    );
     let pool = db::connect_with_max(&config.database_url, config.db_max_connections).await?;
     db::migrate(&pool).await?;
     tracing::info!("database connected, migrations applied");

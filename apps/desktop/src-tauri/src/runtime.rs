@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+use crate::memory::{self, Profile};
+
 /// The daemon's REST address (its default, which the UI also uses).
 const DAEMON_ADDR: &str = "127.0.0.1:7601";
 /// Postgres port for the bundled cluster; away from 5432 so an existing
@@ -157,15 +159,16 @@ impl Runtime {
         }
         check_major_version(&pg_data)?;
 
+        let profile = memory::current().profile;
         self.step("Starting the database")?;
         *self.postgres_bin.lock().expect("lock") = Some(bin.clone());
         *self.pg_data.lock().expect("lock") = Some(pg_data.clone());
-        start_postgres(&bin, &lib, &pg_data, logs, port)?;
+        start_postgres(&bin, &lib, &pg_data, logs, port, profile)?;
         ensure_database(&bin, &lib, &password, port)?;
 
         self.step("Starting Gather")?;
         let url = format!("postgres://{DB_USER}:{password}@127.0.0.1:{port}/{DB_NAME}");
-        let mut child = spawn_daemon(&paths.daemon, &url, logs)?;
+        let mut child = spawn_daemon(&paths.daemon, &url, logs, profile)?;
         {
             let mut slot = self.daemon.lock().expect("lock");
             // `stop` may have run between the last step and the spawn.
@@ -410,6 +413,7 @@ fn start_postgres(
     pg_data: &Path,
     logs: &Path,
     port: u16,
+    profile: Profile,
 ) -> Result<(), String> {
     // Already running (e.g. the app crashed last time): adopt it.
     let running = pg_command(bin, lib, "pg_ctl")
@@ -435,6 +439,13 @@ fn start_postgres(
     let ctl_err = ctl_log
         .try_clone()
         .map_err(|e| format!("opening {}: {e}", ctl_log_path.display()))?;
+    // Server options: the port, plus the memory profile's settings (none of
+    // which contain spaces, so pg_ctl passes them through unquoted).
+    let mut options = format!("-p {port}");
+    for setting in profile.postgres_settings() {
+        options.push_str(" -c ");
+        options.push_str(setting);
+    }
     let status = pg_command(bin, lib, "pg_ctl")
         .arg("start")
         .arg("-D")
@@ -442,7 +453,7 @@ fn start_postgres(
         .arg("-l")
         .arg(&log)
         .args(["-w", "-t", "60", "-o"])
-        .arg(format!("-p {port}"))
+        .arg(options)
         .stdout(ctl_log)
         .stderr(ctl_err)
         .status()
@@ -481,7 +492,12 @@ fn ensure_database(bin: &Path, lib: &Path, password: &str, port: u16) -> Result<
     )
 }
 
-fn spawn_daemon(daemon: &Path, database_url: &str, logs: &Path) -> Result<Child, String> {
+fn spawn_daemon(
+    daemon: &Path,
+    database_url: &str,
+    logs: &Path,
+    profile: Profile,
+) -> Result<Child, String> {
     let log_path = logs.join("daemon.log");
     trim_log(&log_path);
     let log = OpenOptions::new()
@@ -493,7 +509,9 @@ fn spawn_daemon(daemon: &Path, database_url: &str, logs: &Path) -> Result<Child,
         .try_clone()
         .map_err(|e| format!("opening {}: {e}", log_path.display()))?;
     let mut cmd = Command::new(daemon);
+    // Always the resolved profile: the daemon doesn't understand `auto`.
     cmd.env("DATABASE_URL", database_url)
+        .env("GATHER_MEMORY_PROFILE", profile.as_str())
         .stdin(Stdio::null())
         .stdout(log)
         .stderr(err_log);
