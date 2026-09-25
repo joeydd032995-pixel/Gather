@@ -244,6 +244,28 @@ async fn ingest_file_streams_markdown_into_segments() {
         .await
         .expect_err("data before meta");
     assert_eq!(err.code(), Code::InvalidArgument);
+
+    // A stream past GATHER_MAX_UPLOAD_MB (16 MB in tests) is refused.
+    let meta = pb::IngestFileChunk {
+        payload: Some(pb::ingest_file_chunk::Payload::Meta(
+            pb::ingest_file_chunk::Meta {
+                filename: format!("too-big-{salt}.txt"),
+                media_type: "text/plain".into(),
+                kind_override: pb::ArtifactKind::Unspecified as i32,
+            },
+        )),
+    };
+    let data = (0..17).map(|_| pb::IngestFileChunk {
+        payload: Some(pb::ingest_file_chunk::Payload::Data(vec![
+            b'a';
+            1024 * 1024
+        ])),
+    });
+    let err = ingest
+        .ingest_file(tokio_stream::iter(std::iter::once(meta).chain(data)))
+        .await
+        .expect_err("oversized stream");
+    assert_eq!(err.code(), Code::ResourceExhausted);
 }
 
 #[tokio::test]

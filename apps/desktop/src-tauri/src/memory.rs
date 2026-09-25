@@ -46,6 +46,25 @@ impl Profile {
     }
 }
 
+/// The daemon's per-file limit in MiB, worked out the way the daemon does:
+/// GATHER_MAX_UPLOAD_MB when set (the daemon inherits this app's
+/// environment), otherwise the profile's default.
+pub fn max_upload_mb(profile: Profile) -> u64 {
+    upload_cap_mb(
+        std::env::var("GATHER_MAX_UPLOAD_MB").ok().as_deref(),
+        profile,
+    )
+}
+
+fn upload_cap_mb(setting: Option<&str>, profile: Profile) -> u64 {
+    setting
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(match profile {
+            Profile::Standard => 256,
+            Profile::Low => 32,
+        })
+}
+
 /// The profile in use and why, for the Settings page.
 #[derive(Clone, Debug, Serialize)]
 pub struct MemoryInfo {
@@ -166,6 +185,14 @@ mod tests {
             choose(Some(" Standard "), Some(2 * GIB)),
             (Profile::Standard, true)
         );
+    }
+
+    #[test]
+    fn upload_cap_matches_the_daemon() {
+        assert_eq!(upload_cap_mb(None, Profile::Low), 32);
+        assert_eq!(upload_cap_mb(Some(""), Profile::Standard), 256);
+        assert_eq!(upload_cap_mb(Some("64"), Profile::Low), 64);
+        assert_eq!(upload_cap_mb(Some("lots"), Profile::Low), 32);
     }
 
     #[test]

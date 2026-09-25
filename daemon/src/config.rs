@@ -63,8 +63,8 @@ pub struct Config {
     /// Ollama base URL; None/empty disables all LLM/embedding features.
     pub ollama_url: Option<String>,
     /// Chat model for LLM-assisted extraction and the contradiction judge.
-    /// None (an empty GATHER_OLLAMA_MODEL, or the low profile's default)
-    /// keeps Ollama to embeddings only.
+    /// None (GATHER_OLLAMA_MODEL=none, or the low profile's default) keeps
+    /// Ollama to embeddings only.
     pub ollama_model: Option<String>,
     /// Embedding model (must produce 768-dim vectors to match the schema).
     pub ollama_embed_model: String,
@@ -302,9 +302,11 @@ impl Config {
             });
         }
 
-        // An explicitly empty model disables chat features in either profile.
-        let ollama_model = match var("GATHER_OLLAMA_MODEL") {
-            Ok(m) => Some(m.trim().to_string()).filter(|m| !m.is_empty()),
+        // `none` disables chat features in either profile; blank is the
+        // profile's default, like the other profile-dependent settings.
+        let ollama_model = match set("GATHER_OLLAMA_MODEL") {
+            Ok(m) if m.trim().eq_ignore_ascii_case("none") => None,
+            Ok(m) => Some(m.trim().to_string()),
             // A chat model needs well over 1 GB; on a 4 GB machine the
             // embedding model (search, entity matching) is what fits.
             Err(_) if low => None,
@@ -622,8 +624,16 @@ mod tests {
     }
 
     #[test]
-    fn empty_chat_model_means_embeddings_only() {
+    fn chat_model_none_means_embeddings_only_and_blank_means_default() {
+        let c = config(&[("GATHER_OLLAMA_MODEL", "None")]).unwrap();
+        assert_eq!(c.ollama_model, None);
         let c = config(&[("GATHER_OLLAMA_MODEL", " ")]).unwrap();
+        assert_eq!(c.ollama_model.as_deref(), Some("llama3.2:3b"));
+        let c = config(&[
+            ("GATHER_MEMORY_PROFILE", "low"),
+            ("GATHER_OLLAMA_MODEL", ""),
+        ])
+        .unwrap();
         assert_eq!(c.ollama_model, None);
     }
 

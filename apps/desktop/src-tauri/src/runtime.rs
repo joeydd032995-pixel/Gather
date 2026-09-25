@@ -415,7 +415,8 @@ fn start_postgres(
     port: u16,
     profile: Profile,
 ) -> Result<(), String> {
-    // Already running (e.g. the app crashed last time): adopt it.
+    // Already running (e.g. the app crashed last time): restart it, since it
+    // may have been started with another memory profile's settings.
     let running = pg_command(bin, lib, "pg_ctl")
         .arg("status")
         .arg("-D")
@@ -426,7 +427,20 @@ fn start_postgres(
         .map(|s| s.success())
         .unwrap_or(false);
     if running {
-        return Ok(());
+        let stopped = pg_command(bin, lib, "pg_ctl")
+            .arg("stop")
+            .arg("-D")
+            .arg(pg_data)
+            .args(["-m", "fast", "-w", "-t", "60"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|e| format!("restarting the database: {e}"))?;
+        if !stopped.success() {
+            return Err(format!(
+                "restarting the database failed ({stopped}). Details are in postgres.log."
+            ));
+        }
     }
     let log = logs.join("postgres.log");
     trim_log(&log);
