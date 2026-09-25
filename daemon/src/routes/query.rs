@@ -195,6 +195,9 @@ pub struct UnitListParams {
     pub subject_entity_id: Option<Uuid>,
     /// Only units extracted from this artifact.
     pub artifact_id: Option<Uuid>,
+    /// Only units that still count as knowledge (`active` or `disputed`).
+    #[serde(default)]
+    pub live: bool,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
@@ -221,6 +224,7 @@ pub async fn list_atomic_units(
           AND ($6::uuid IS NULL OR EXISTS (
                 SELECT 1 FROM atomic_unit_provenance p
                 WHERE p.atomic_unit_id = u.id AND p.artifact_id = $6))
+          AND (NOT $7 OR u.status IN ('active', 'disputed'))
         ORDER BY u.created_at DESC
         LIMIT $4 OFFSET $5
         "#,
@@ -231,6 +235,7 @@ pub async fn list_atomic_units(
     .bind(limit)
     .bind(offset)
     .bind(params.artifact_id)
+    .bind(params.live)
     .fetch_all(&state.pool)
     .await?;
 

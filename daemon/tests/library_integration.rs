@@ -286,4 +286,54 @@ async fn library_views_follow_an_upload_through_extraction() {
         .unwrap()
         .into_inner();
     assert!(without_files.files.is_empty());
+
+    // Rejecting a statement retires it: the live list and the count drop it,
+    // while the unfiltered list still has it (for audit).
+    let tool_unit = units
+        .items
+        .iter()
+        .find(|u| u.statement.contains(&tool))
+        .map(|u| u.id.clone())
+        .unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/v1/units/{tool_unit}/reject"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let (_, live) = get_json(
+        &app,
+        &format!("/api/v1/atomic-units?artifact_id={id}&live=true"),
+    )
+    .await;
+    let live_ids: Vec<&str> = live["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["id"].as_str().unwrap())
+        .collect();
+    assert!(!live_ids.contains(&tool_unit.as_str()));
+    assert_eq!(live_ids.len(), statements.len() - 1);
+    assert_eq!(
+        artifact_status(&app, &id).await["unit_count"]
+            .as_i64()
+            .unwrap(),
+        live_ids.len() as i64
+    );
+    let (_, all) = get_json(&app, &format!("/api/v1/atomic-units?artifact_id={id}")).await;
+    assert_eq!(all["items"].as_array().unwrap().len(), statements.len());
+    let live_grpc = query
+        .list_atomic_units(pb::ListAtomicUnitsRequest {
+            artifact_id: id.clone(),
+            live_only: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(live_grpc.items.len(), live_ids.len());
 }

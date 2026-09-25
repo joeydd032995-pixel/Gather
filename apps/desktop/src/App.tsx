@@ -82,8 +82,8 @@ export default function App() {
   const runtime = useRuntime();
   const settled = runtime.state === "ready" || runtime.state === "unmanaged";
   const [tab, setTab] = useState<Tab>("upload");
-  /** A file the Library should open, e.g. picked in the graph. */
-  const [libraryFocus, setLibraryFocus] = useState<string | null>(null);
+  /** The file open in the Library; the graph and upload results set it too. */
+  const [libraryFile, setLibraryFile] = useState<string | null>(null);
   const [updateVersion, setUpdateVersion] = useState<string | null>(null);
   const [health, setHealth] = useState<HealthState>({ reachable: false, ready: false });
   const [dragging, setDragging] = useState(false);
@@ -242,12 +242,12 @@ export default function App() {
         ))}
       </nav>
 
-      {tab === "library" && <Library focusId={libraryFocus} />}
+      {tab === "library" && <Library selected={libraryFile} onSelect={setLibraryFile} />}
 
       {tab === "graph" && (
         <Graph
           onOpenFile={(id) => {
-            setLibraryFocus(id);
+            setLibraryFile(id);
             setTab("library");
           }}
         />
@@ -329,7 +329,7 @@ export default function App() {
                       className="link-button"
                       title="See what Gather found in this file"
                       onClick={() => {
-                        setLibraryFocus(r.artifact_id);
+                        setLibraryFile(r.artifact_id);
                         setTab("library");
                       }}
                     >

@@ -133,7 +133,8 @@ text. Query: `limit` (default 50, max 200), `offset`.
 
 Query: `kind` (`fact`, `claim`, `decision`, `preference`, `event`), `status` (`active`,
 `superseded`, `retracted`, `disputed`), `subject_entity_id`, `artifact_id` (units extracted
-from that artifact), `limit`, `offset`.
+from that artifact), `live=true` (only `active` or `disputed` units, the ones that still count as
+knowledge), `limit`, `offset`.
 
 ### `GET /graph`
 

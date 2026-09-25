@@ -227,6 +227,7 @@ message ListAtomicUnitsRequest {
   int32 limit = 4;
   int32 offset = 5;
   string artifact_id = 6;                          // only units extracted from this artifact
+  bool live_only = 7;                              // only active or disputed units
 }
 
 message ListAtomicUnitsResponse {

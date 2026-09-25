@@ -172,6 +172,7 @@ impl pb::query_service_server::QueryService for QueryApi {
               AND ($6::uuid IS NULL OR EXISTS (
                     SELECT 1 FROM atomic_unit_provenance p
                     WHERE p.atomic_unit_id = u.id AND p.artifact_id = $6))
+              AND (NOT $7 OR u.status IN ('active', 'disputed'))
             ORDER BY u.created_at DESC
             LIMIT $4 OFFSET $5
             "#,
@@ -182,6 +183,7 @@ impl pb::query_service_server::QueryService for QueryApi {
         .bind(limit)
         .bind(offset)
         .bind(artifact)
+        .bind(req.live_only)
         .fetch_all(&self.state.pool)
         .await
         .map_err(|e| status_from(e.into()))?;

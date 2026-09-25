@@ -1,17 +1,16 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   getArtifact,
   getArtifactContent,
   listArtifacts,
-  listUnits,
   search,
   type ArtifactContent,
   type ArtifactDetail,
   type ArtifactSummary,
   type SearchHit,
-  type UnitSummary,
 } from "./api";
 import Thumbnail from "./Thumbnail";
+import UnitList from "./UnitList";
 
 const PAGE = 50;
 /** How often to refresh while a file is still being read. */
@@ -141,26 +140,29 @@ function SearchResultList({
 
 function FileDetail({ id, refreshKey }: { id: string; refreshKey: number }) {
   const [detail, setDetail] = useState<ArtifactDetail | null>(null);
-  const [units, setUnits] = useState<UnitSummary[] | null>(null);
   const [content, setContent] = useState<ArtifactContent | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
 
+  // The file whose content is on screen: a "Show more" page that arrives
+  // after the user picked another file is dropped.
+  const currentId = useRef(id);
+  currentId.current = id;
+
   // A different file starts from the top rather than showing the last one's text.
   useEffect(() => {
     setDetail(null);
-    setUnits(null);
     setContent(null);
+    setLoadingMore(false);
   }, [id]);
 
   useEffect(() => {
     let cancelled = false;
     setError(null);
-    Promise.all([getArtifact(id), listUnits({ artifactId: id }), getArtifactContent(id)])
-      .then(([d, u, c]) => {
+    Promise.all([getArtifact(id), getArtifactContent(id)])
+      .then(([d, c]) => {
         if (cancelled) return;
         setDetail(d);
-        setUnits(u);
         setContent(c);
       })
       .catch((e: unknown) => {
@@ -173,19 +175,21 @@ function FileDetail({ id, refreshKey }: { id: string; refreshKey: number }) {
 
   const loadMore = async () => {
     if (!content) return;
+    const requested = id;
     setLoadingMore(true);
     try {
-      const next = await getArtifactContent(id, 20, content.items.length);
+      const next = await getArtifactContent(requested, 20, content.items.length);
+      if (currentId.current !== requested) return;
       setContent({ ...next, items: [...content.items, ...next.items] });
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (currentId.current === requested) setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoadingMore(false);
+      if (currentId.current === requested) setLoadingMore(false);
     }
   };
 
   if (error) return <p className="error">{error}</p>;
-  if (!detail || !units || !content) return <p className="hint">Loading…</p>;
+  if (!detail || !content) return <p className="hint">Loading…</p>;
 
   return (
     <article className="lib-detail">
@@ -215,24 +219,20 @@ function FileDetail({ id, refreshKey }: { id: string; refreshKey: number }) {
             Gather couldn't read the text in this file. Details are in daemon.log.
           </p>
         )}
-        {detail.status === "done" && units.length === 0 && (
-          <p className="hint">
-            Nothing in this file matched what Gather looks for yet. On its own, Gather picks up
-            clear statements such as "I prefer…", "We decided to use…", "I work at…", "Our rent
-            is $1,200" or "On 2026-03-01, …". With a local AI chat model (Ollama) it finds much
-            more. The file's text is still stored and searchable.
-          </p>
-        )}
-        {units.length > 0 && (
-          <ul className="lib-units">
-            {units.map((u) => (
-              <li key={u.id}>
-                <span className={`lib-kind kind-${u.kind}`}>{u.kind}</span>
-                <span>{u.statement}</span>
-              </li>
-            ))}
-          </ul>
-        )}
+        <UnitList
+          artifactId={id}
+          refreshKey={refreshKey}
+          empty={
+            detail.status === "done" && (
+              <p className="hint">
+                Nothing in this file matched what Gather looks for yet. On its own, Gather picks
+                up clear statements such as "I prefer…", "We decided to use…", "I work at…",
+                "Our rent is $1,200" or "On 2026-03-01, …". With a local AI chat model (Ollama) it
+                finds much more. The file's text is still stored and searchable.
+              </p>
+            )
+          }
+        />
       </section>
 
       <section>
@@ -280,26 +280,21 @@ function FileDetail({ id, refreshKey }: { id: string; refreshKey: number }) {
 }
 
 interface LibraryProps {
-  /** A file to open, e.g. from the graph. */
-  focusId: string | null;
+  /** The open file. Kept by the parent so it survives switching tabs, and so
+   * the graph and upload results can open a file here. */
+  selected: string | null;
+  onSelect: (id: string) => void;
 }
 
-export default function Library({ focusId }: LibraryProps) {
+export default function Library({ selected, onSelect }: LibraryProps) {
   const [files, setFiles] = useState<ArtifactSummary[] | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<string | null>(focusId);
   const [refreshKey, setRefreshKey] = useState(0);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResults | null>(null);
   const [searching, setSearching] = useState(false);
 
-  useEffect(() => {
-    if (focusId) {
-      setSelected(focusId);
-      setResults(null);
-    }
-  }, [focusId]);
 
   const loadFiles = useCallback(async (count: number) => {
     try {
@@ -356,7 +351,7 @@ export default function Library({ focusId }: LibraryProps) {
   };
 
   const open = (id: string) => {
-    setSelected(id);
+    onSelect(id);
     setResults(null);
   };
 
@@ -406,7 +401,7 @@ export default function Library({ focusId }: LibraryProps) {
               <li key={f.id}>
                 <button
                   className={f.id === selected ? "lib-file active" : "lib-file"}
-                  onClick={() => setSelected(f.id)}
+                  onClick={() => onSelect(f.id)}
                 >
                   <span className="lib-file-name">{fileName(f)}</span>
                   <span className="lib-file-meta">

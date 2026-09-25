@@ -9,8 +9,9 @@ import {
   type SimulationLinkDatum,
   type SimulationNodeDatum,
 } from "d3-force";
-import { getGraphOverview, listUnits, type GraphOverview, type UnitSummary } from "./api";
+import { getGraphOverview, type GraphOverview } from "./api";
 import { KIND_LABELS } from "./Library";
+import UnitList from "./UnitList";
 
 interface Node extends SimulationNodeDatum {
   /** `e:<uuid>` for entities, `f:<uuid>` for files. */
@@ -116,19 +117,6 @@ function EntityPanel({
   onSelect: (key: string) => void;
   onOpenFile: (id: string) => void;
 }) {
-  const [units, setUnits] = useState<UnitSummary[] | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setUnits(null);
-    listUnits({ subjectEntityId: node.id, limit: 50 })
-      .then((u) => !cancelled && setUnits(u))
-      .catch(() => !cancelled && setUnits([]));
-    return () => {
-      cancelled = true;
-    };
-  }, [node.id]);
-
   const touching = links.filter(
     (l) => endpoint(l.source)?.key === node.key || endpoint(l.target)?.key === node.key,
   );
@@ -191,20 +179,13 @@ function EntityPanel({
         </>
       )}
       <h4>What Gather knows about it</h4>
-      {units === null ? (
-        <p className="hint">Loading…</p>
-      ) : units.length === 0 ? (
-        <p className="hint">No statements are about this one directly; it appears in others'.</p>
-      ) : (
-        <ul className="lib-units">
-          {units.map((u) => (
-            <li key={u.id}>
-              <span className={`lib-kind kind-${u.kind}`}>{u.kind}</span>
-              <span>{u.statement}</span>
-            </li>
-          ))}
-        </ul>
-      )}
+      <UnitList
+        subjectEntityId={node.id}
+        pageSize={50}
+        empty={
+          <p className="hint">No statements are about this one directly; it appears in others'.</p>
+        }
+      />
     </>
   );
 }

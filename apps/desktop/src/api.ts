@@ -467,13 +467,21 @@ export interface UnitSummary {
   valid_from: string | null;
 }
 
-/** Units extracted from one file, or about one entity. */
+/**
+ * Live units (not retracted or superseded) extracted from one file, or about
+ * one entity, newest first.
+ */
 export async function listUnits(filter: {
   artifactId?: string;
   subjectEntityId?: string;
   limit?: number;
+  offset?: number;
 }): Promise<UnitSummary[]> {
-  const params = new URLSearchParams({ limit: String(filter.limit ?? 200) });
+  const params = new URLSearchParams({
+    live: "true",
+    limit: String(filter.limit ?? 100),
+    offset: String(filter.offset ?? 0),
+  });
   if (filter.artifactId) params.set("artifact_id", filter.artifactId);
   if (filter.subjectEntityId) params.set("subject_entity_id", filter.subjectEntityId);
   const res = await fetch(`${DAEMON_URL}/api/v1/atomic-units?${params}`, {
