@@ -5,278 +5,45 @@ import {
   forceLink,
   forceManyBody,
   forceSimulation,
+  forceX,
+  forceY,
   type Simulation,
-  type SimulationLinkDatum,
-  type SimulationNodeDatum,
 } from "d3-force";
-import {
-  ArrowRight,
-  FileText,
-  Maximize2,
-  Minus,
-  MousePointerClick,
-  Plus,
-  Search,
-  Waypoints,
-} from "lucide-react";
+import { FileText, Maximize2, Minus, Plus, Search, Waypoints, X } from "lucide-react";
 import { getGraphOverview, type GraphOverview } from "./api";
-import { kindLabel, plural } from "./kinds";
+import { EntityPanel, FilePanel } from "./graph/Panels";
 import {
-  Button,
-  Callout,
-  EmptyState,
-  IconButton,
-  KindTag,
-  PageHeader,
-  Spinner,
-  errorText,
-} from "./ui";
-import UnitList from "./UnitList";
-
-interface Node extends SimulationNodeDatum {
-  /** `e:<uuid>` for entities, `f:<uuid>` for files. */
-  key: string;
-  id: string;
-  type: "entity" | "file";
-  name: string;
-  kind: string;
-  weight: number;
-  r: number;
-}
-
-interface Link extends SimulationLinkDatum<Node> {
-  type: "relation" | "mention";
-  label: string;
-  count: number;
-}
-
-interface View {
-  x: number;
-  y: number;
-  k: number;
-}
+  ENTITY_KINDS,
+  buildGraph,
+  kindKey,
+  type Graph as GraphModel,
+  type Link,
+  type Node,
+} from "./graph/model";
+import {
+  bounds,
+  draw,
+  drawMinimap,
+  hitTest,
+  readPalette,
+  type MinimapFrame,
+  type Palette,
+  type View,
+} from "./graph/render";
+import { kindLabel, plural } from "./kinds";
+import { Callout, EmptyState, IconButton, Kbd, PageHeader, Spinner, errorText } from "./ui";
 
 const SIZES = [50, 150, 400];
-/** Entity kinds with a colour of their own (tokens.css --cat-*). */
-const ENTITY_KINDS = [
-  "person",
-  "organization",
-  "project",
-  "tool",
-  "concept",
-  "location",
-  "event",
-  "other",
-];
+const MIN_K = 0.15;
+const MAX_K = 5;
+const MINIMAP_W = 176;
+const MINIMAP_H = 116;
+/** The detail drawer's width, which the camera leaves room for. */
+const DRAWER_W = 360;
 
-function kindColor(kind: string): string {
-  return `var(--cat-${ENTITY_KINDS.includes(kind) ? kind : "other"})`;
-}
-
-function buildGraph(data: GraphOverview, showFiles: boolean) {
-  const nodes: Node[] = data.entities.map((e) => ({
-    key: `e:${e.id}`,
-    id: e.id,
-    type: "entity",
-    name: e.name,
-    kind: e.kind,
-    weight: e.weight,
-    r: 5 + Math.min(14, Math.sqrt(e.weight) * 2.2),
-  }));
-  const links: Link[] = data.relations.map((r) => ({
-    source: `e:${r.source}`,
-    target: `e:${r.target}`,
-    type: "relation",
-    label: r.relation_type.replace(/_/g, " "),
-    count: r.count,
-  }));
-  if (showFiles) {
-    for (const f of data.files) {
-      nodes.push({
-        key: `f:${f.id}`,
-        id: f.id,
-        type: "file",
-        name: f.name,
-        kind: f.kind,
-        weight: f.mentions,
-        r: 5 + Math.min(8, Math.sqrt(f.mentions) * 1.5),
-      });
-    }
-    for (const m of data.mentions) {
-      links.push({
-        source: `f:${m.file_id}`,
-        target: `e:${m.entity_id}`,
-        type: "mention",
-        label: "mentions",
-        count: m.count,
-      });
-    }
-  }
-  return { nodes, links };
-}
-
-function endpoint(end: string | number | Node | undefined): Node | null {
-  return end && typeof end === "object" ? end : null;
-}
-
-/** Names of the heaviest entities, which keep their labels when zoomed out. */
-function labelledKeys(nodes: Node[]): Set<string> {
-  return new Set(
-    nodes
-      .filter((n) => n.type === "entity")
-      .sort((a, b) => b.weight - a.weight)
-      .slice(0, 20)
-      .map((n) => n.key),
-  );
-}
-
-function EntityPanel({
-  node,
-  links,
-  onSelect,
-  onOpenFile,
-}: {
-  node: Node;
-  links: Link[];
-  onSelect: (key: string) => void;
-  onOpenFile: (id: string) => void;
-}) {
-  const touching = links.filter(
-    (l) => endpoint(l.source)?.key === node.key || endpoint(l.target)?.key === node.key,
-  );
-  const relations = touching.filter((l) => l.type === "relation");
-  const files = touching
-    .filter((l) => l.type === "mention")
-    .map((l) => endpoint(l.source))
-    .filter((n): n is Node => n !== null);
-
-  return (
-    <>
-      <div className="panel-head">
-        <KindTag kind={ENTITY_KINDS.includes(node.kind) ? node.kind : "other"} label={node.kind} />
-        <h2 className="panel-title">{node.name}</h2>
-        <p className="hint">{plural(node.weight, "link")}</p>
-      </div>
-      {relations.length > 0 && (
-        <section className="panel-section">
-          <h3 className="section-label">
-            Connections <span className="count">{relations.length}</span>
-          </h3>
-          <ul className="relations">
-            {relations.map((l, i) => {
-              const source = endpoint(l.source)!;
-              const target = endpoint(l.target)!;
-              const outgoing = source.key === node.key;
-              const other = outgoing ? target : source;
-              return (
-                <li key={i}>
-                  <button type="button" className="relation" onClick={() => onSelect(other.key)}>
-                    <span
-                      className="relation-dot"
-                      style={{ background: kindColor(other.kind) }}
-                      aria-hidden
-                    />
-                    <span className="relation-text">
-                      {outgoing ? (
-                        <>
-                          <span className="relation-verb">{l.label}</span> {other.name}
-                        </>
-                      ) : (
-                        <>
-                          {other.name} <span className="relation-verb">{l.label} this</span>
-                        </>
-                      )}
-                    </span>
-                    <ArrowRight className="relation-go" aria-hidden />
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        </section>
-      )}
-      {files.length > 0 && (
-        <section className="panel-section">
-          <h3 className="section-label">
-            Mentioned in <span className="count">{files.length}</span>
-          </h3>
-          <ul className="relations">
-            {files.map((f) => (
-              <li key={f.key}>
-                <button type="button" className="relation" onClick={() => onOpenFile(f.id)}>
-                  <FileText className="relation-icon" aria-hidden />
-                  <span className="relation-text">{f.name}</span>
-                  <ArrowRight className="relation-go" aria-hidden />
-                </button>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-      <section className="panel-section">
-        <h3 className="section-label">What Gather knows</h3>
-        <UnitList
-          subjectEntityId={node.id}
-          pageSize={50}
-          compact
-          empty={
-            <p className="hint">
-              No statements are about this one directly; it appears in others'.
-            </p>
-          }
-        />
-      </section>
-    </>
-  );
-}
-
-function FilePanel({
-  node,
-  links,
-  onSelect,
-  onOpenFile,
-}: {
-  node: Node;
-  links: Link[];
-  onSelect: (key: string) => void;
-  onOpenFile: (id: string) => void;
-}) {
-  const mentioned = links
-    .filter((l) => l.type === "mention" && endpoint(l.source)?.key === node.key)
-    .map((l) => endpoint(l.target))
-    .filter((n): n is Node => n !== null);
-  return (
-    <>
-      <div className="panel-head">
-        <KindTag kind="file" label={kindLabel(node.kind)} />
-        <h2 className="panel-title">{node.name}</h2>
-        <Button variant="subtle" size="sm" icon={ArrowRight} onClick={() => onOpenFile(node.id)}>
-          Open in Library
-        </Button>
-      </div>
-      <section className="panel-section">
-        <h3 className="section-label">
-          Mentions <span className="count">{mentioned.length}</span>
-        </h3>
-        <ul className="relations">
-          {mentioned.map((e) => (
-            <li key={e.key}>
-              <button type="button" className="relation" onClick={() => onSelect(e.key)}>
-                <span
-                  className="relation-dot"
-                  style={{ background: kindColor(e.kind) }}
-                  aria-hidden
-                />
-                <span className="relation-text">{e.name}</span>
-                <ArrowRight className="relation-go" aria-hidden />
-              </button>
-            </li>
-          ))}
-        </ul>
-      </section>
-    </>
-  );
-}
+const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+const clampK = (k: number) => Math.min(MAX_K, Math.max(MIN_K, k));
+const ease = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 
 interface GraphProps {
   onOpenFile: (id: string) => void;
@@ -285,26 +52,175 @@ interface GraphProps {
 export default function Graph({ onOpenFile }: GraphProps) {
   const [size, setSize] = useState(150);
   const [showFiles, setShowFiles] = useState(true);
+  const [hiddenKinds, setHiddenKinds] = useState<ReadonlySet<string>>(new Set());
   const [data, setData] = useState<GraphOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState<View>({ x: 0, y: 0, k: 1 });
-  const [width, setWidth] = useState(800);
-  const [height, setHeight] = useState(560);
   const [selected, setSelected] = useState<string | null>(null);
   const [hovered, setHovered] = useState<string | null>(null);
-  const [filter, setFilter] = useState("");
-  const [, setFrame] = useState(0);
+  const [query, setQuery] = useState("");
+  const [activeResult, setActiveResult] = useState(0);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [zoom, setZoom] = useState(100);
+  const [touched, setTouched] = useState(false);
+  const [version, setVersion] = useState(0);
 
-  const svgRef = useRef<SVGSVGElement>(null);
-  const graph = useRef<{ nodes: Node[]; links: Link[] }>({ nodes: [], links: [] });
-  const sim = useRef<Simulation<Node, Link> | null>(null);
-  const viewRef = useRef(view);
-  viewRef.current = view;
-  // Until the user pans, zooms or drags, each finished layout is fitted to
-  // the window.
+  const stageRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const miniRef = useRef<HTMLCanvasElement>(null);
+  const hoverCardRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  const graphRef = useRef<GraphModel | null>(null);
+  const simRef = useRef<Simulation<Node, Link> | null>(null);
+  const viewRef = useRef<View>({ x: 0, y: 0, k: 1 });
+  const sizeRef = useRef({ w: 800, h: 560, dpr: 1 });
+  const paletteRef = useRef<Palette | null>(null);
+  const miniFrame = useRef<MinimapFrame | null>(null);
+  const frame = useRef(0);
+  const tween = useRef(0);
+  const pulseStart = useRef(0);
   const interacted = useRef(false);
-  const fitRef = useRef<() => void>(() => {});
+  const selectedRef = useRef(selected);
+  const hoveredRef = useRef(hovered);
+  const matchesRef = useRef<Set<string> | null>(null);
+  const anchorsRef = useRef<Set<string>>(new Set());
+  selectedRef.current = selected;
+  hoveredRef.current = hovered;
 
+  // ------------------------------------------------------------ drawing
+  /** The part of the stage not covered by the drawer. */
+  const visibleArea = useCallback(() => {
+    const { w, h } = sizeRef.current;
+    if (selectedRef.current === null) return { w, h };
+    // A side drawer on wide stages, a bottom sheet (52% tall) on narrow ones.
+    return w > 720 ? { w: w - DRAWER_W - 16, h } : { w, h: h * 0.48 };
+  }, []);
+
+  const render = useCallback(() => {
+    frame.current = 0;
+    const canvas = canvasRef.current;
+    const graph = graphRef.current;
+    if (!canvas || !graph) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    paletteRef.current ??= readPalette();
+    const { w, h, dpr } = sizeRef.current;
+    const pulse = Math.min(1, (performance.now() - pulseStart.current) / 650);
+    const scene = {
+      graph,
+      view: viewRef.current,
+      width: w,
+      height: h,
+      dpr,
+      palette: paletteRef.current,
+      focus: hoveredRef.current ?? selectedRef.current,
+      selected: selectedRef.current,
+      hovered: hoveredRef.current,
+      matches: matchesRef.current,
+      pulse,
+      anchors: anchorsRef.current,
+      visibleWidth: visibleArea().w,
+    };
+    draw(ctx, scene);
+    const mini = miniRef.current?.getContext("2d");
+    if (mini) miniFrame.current = drawMinimap(mini, scene, MINIMAP_W, MINIMAP_H);
+
+    // Keep the hover card pinned to its node as the layout settles.
+    const card = hoverCardRef.current;
+    const hoveredNode = hoveredRef.current ? graph.byKey.get(hoveredRef.current) : undefined;
+    if (card && hoveredNode?.x !== undefined) {
+      const v = viewRef.current;
+      const x = hoveredNode.x * v.k + v.x;
+      const y = (hoveredNode.y! - hoveredNode.r) * v.k + v.y - 10;
+      card.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px) translate(-50%, -100%)`;
+    }
+    const pct = Math.round(viewRef.current.k * 100);
+    setZoom((z) => (z === pct ? z : pct));
+    if (pulse < 1) frame.current = requestAnimationFrame(render);
+  }, [visibleArea]);
+
+  const requestDraw = useCallback(() => {
+    if (!frame.current) frame.current = requestAnimationFrame(render);
+  }, [render]);
+
+  const setView = useCallback(
+    (v: View) => {
+      viewRef.current = v;
+      requestDraw();
+    },
+    [requestDraw],
+  );
+
+  /** Glide the camera to `to`; instant when motion is reduced. */
+  const animateTo = useCallback(
+    (to: View, duration = 520) => {
+      cancelAnimationFrame(tween.current);
+      if (reducedMotion()) return setView(to);
+      const from = { ...viewRef.current };
+      const start = performance.now();
+      const step = (now: number) => {
+        const t = Math.min(1, (now - start) / duration);
+        const e = ease(t);
+        setView({
+          x: from.x + (to.x - from.x) * e,
+          y: from.y + (to.y - from.y) * e,
+          k: from.k + (to.k - from.k) * e,
+        });
+        if (t < 1) tween.current = requestAnimationFrame(step);
+      };
+      tween.current = requestAnimationFrame(step);
+    },
+    [setView],
+  );
+
+  const fit = useCallback(
+    (animated = true) => {
+      const graph = graphRef.current;
+      if (!graph) return;
+      // Frame what's connected; a stray unlinked file shouldn't shrink everything.
+      const linked = graph.nodes.filter((n) => n.degree > 0);
+      const b = bounds(linked.length > 0 ? linked : graph.nodes);
+      if (!b) return;
+      const { w, h } = visibleArea();
+      const k = clampK(
+        Math.min(2, 0.86 * Math.min(w / (b.maxX - b.minX + 80), h / (b.maxY - b.minY + 80))),
+      );
+      const to = {
+        k,
+        x: w / 2 - k * ((b.minX + b.maxX) / 2),
+        y: h / 2 - k * ((b.minY + b.maxY) / 2),
+      };
+      if (animated) animateTo(to);
+      else setView(to);
+    },
+    [animateTo, setView, visibleArea],
+  );
+
+  const centreOn = useCallback(
+    (node: Node, k = Math.max(viewRef.current.k, 1.25)) => {
+      if (node.x === undefined || node.y === undefined) return;
+      const { w, h } = visibleArea();
+      animateTo({ k, x: w / 2 - k * node.x, y: h / 2 - k * node.y });
+    },
+    [animateTo, visibleArea],
+  );
+
+  const select = useCallback(
+    (key: string | null, move = true) => {
+      selectedRef.current = key;
+      setSelected(key);
+      pulseStart.current = performance.now();
+      const node = key ? graphRef.current?.byKey.get(key) : undefined;
+      if (node && move) {
+        interacted.current = true;
+        centreOn(node);
+      }
+      requestDraw();
+    },
+    [centreOn, requestDraw],
+  );
+
+  // --------------------------------------------------------------- data
   useEffect(() => {
     let cancelled = false;
     getGraphOverview(size, 100)
@@ -319,200 +235,386 @@ export default function Graph({ onOpenFile }: GraphProps) {
     };
   }, [size]);
 
-  // Track the drawing area's size so the graph fills it.
-  useEffect(() => {
-    const svg = svgRef.current;
-    if (!svg) return;
-    const observer = new ResizeObserver(([entry]) => {
-      setWidth(entry.contentRect.width);
-      setHeight(entry.contentRect.height);
-    });
-    observer.observe(svg);
-    return () => observer.disconnect();
-  }, [data]);
-
-  // Lay the graph out. The simulation cools quickly and then stops, so an
-  // idle graph costs no CPU.
+  // Build and lay out. Positions carry over, so filters rearrange gently.
   useEffect(() => {
     if (!data) return;
-    const built = buildGraph(data, showFiles);
-    graph.current = built;
-    let pending = false;
-    const simulation = forceSimulation<Node, Link>(built.nodes)
+    const previous = graphRef.current?.byKey;
+    const graph = buildGraph(data, { showFiles, hiddenKinds, previous });
+    graphRef.current = graph;
+    anchorsRef.current = new Set(
+      graph.nodes
+        .filter((n) => n.type === "entity")
+        .sort((a, b) => b.weight - a.weight)
+        .slice(0, 16)
+        .map((n) => n.key),
+    );
+    if (selectedRef.current && !graph.byKey.has(selectedRef.current)) select(null, false);
+    setVersion((v) => v + 1);
+
+    const warm = previous !== undefined && previous.size > 0;
+    const simulation = forceSimulation<Node, Link>(graph.nodes)
       .force(
         "link",
-        forceLink<Node, Link>(built.links)
+        forceLink<Node, Link>(graph.links)
           .id((n) => n.key)
-          .distance((l) => (l.type === "mention" ? 70 : 55))
-          .strength((l) => (l.type === "mention" ? 0.25 : 0.6)),
+          .distance((l) => (l.type === "mention" ? 80 : 64))
+          .strength((l) => (l.type === "mention" ? 0.18 : 0.55)),
       )
-      .force("charge", forceManyBody<Node>().strength(-170).distanceMax(420))
+      .force("charge", forceManyBody<Node>().strength(-220).distanceMax(520))
       .force("center", forceCenter(0, 0))
-      // Room for an entity's label as well as its dot.
+      // A light pull inwards keeps loose pieces from drifting off-screen.
+      .force(
+        "x",
+        forceX<Node>(0).strength((n) => (n.degree === 0 ? 0.15 : 0.035)),
+      )
+      .force(
+        "y",
+        forceY<Node>(0).strength((n) => (n.degree === 0 ? 0.15 : 0.035)),
+      )
       .force(
         "collide",
-        forceCollide<Node>((n) => n.r + (n.type === "entity" ? 12 : 4)),
+        forceCollide<Node>((n) => n.r + (n.type === "entity" ? 14 : 6)).strength(0.9),
       )
-      .alphaDecay(0.045)
+      .alpha(warm ? 0.35 : 1)
+      .alphaDecay(0.04)
+      .on("tick", requestDraw)
       .on("end", () => {
-        if (!interacted.current) fitRef.current();
-      })
-      .on("tick", () => {
-        if (pending) return;
-        pending = true;
-        requestAnimationFrame(() => {
-          pending = false;
-          setFrame((f) => f + 1);
-        });
+        if (!interacted.current) fit();
       });
-    sim.current = simulation;
+    simRef.current = simulation;
+    // Fit early too, so the first frames aren't a speck in the middle.
+    const early = setTimeout(() => !interacted.current && fit(), 450);
     return () => {
+      clearTimeout(early);
       simulation.stop();
     };
-  }, [data, showFiles]);
+  }, [data, showFiles, hiddenKinds, fit, requestDraw, select]);
 
-  // Start centred.
+  // ------------------------------------------------------ size and theme
   useEffect(() => {
-    if (!interacted.current) setView((v) => ({ ...v, x: width / 2, y: height / 2 }));
-  }, [width, height]);
-
-  const fit = useCallback(() => {
-    const nodes = graph.current.nodes;
-    if (nodes.length === 0) return;
-    const xs = nodes.map((n) => n.x ?? 0);
-    const ys = nodes.map((n) => n.y ?? 0);
-    const [minX, maxX, minY, maxY] = [
-      Math.min(...xs),
-      Math.max(...xs),
-      Math.min(...ys),
-      Math.max(...ys),
-    ];
-    const k = Math.min(2, 0.9 * Math.min(width / (maxX - minX + 60), height / (maxY - minY + 60)));
-    setView({ k, x: width / 2 - k * ((minX + maxX) / 2), y: height / 2 - k * ((minY + maxY) / 2) });
-  }, [width, height]);
-
-  /** Zoom by `factor` around the centre of the canvas. */
-  const zoomBy = (factor: number) => {
-    interacted.current = true;
-    setView((v) => {
-      const k = Math.min(4, Math.max(0.2, v.k * factor));
-      const cx = width / 2;
-      const cy = height / 2;
-      return { k, x: cx - ((cx - v.x) / v.k) * k, y: cy - ((cy - v.y) / v.k) * k };
+    const stage = stageRef.current;
+    const canvas = canvasRef.current;
+    if (!stage || !canvas) return;
+    const observer = new ResizeObserver(([entry]) => {
+      const { width, height } = entry.contentRect;
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const first = sizeRef.current.w === 800 && sizeRef.current.h === 560;
+      const old = sizeRef.current;
+      sizeRef.current = { w: width, h: height, dpr };
+      canvas.width = Math.round(width * dpr);
+      canvas.height = Math.round(height * dpr);
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
+      const mini = miniRef.current;
+      if (mini) {
+        mini.width = MINIMAP_W * dpr;
+        mini.height = MINIMAP_H * dpr;
+      }
+      // Keep the same point in the middle as the stage resizes.
+      const v = viewRef.current;
+      viewRef.current = first
+        ? { k: 1, x: width / 2, y: height / 2 }
+        : { ...v, x: v.x + (width - old.w) / 2, y: v.y + (height - old.h) / 2 };
+      requestDraw();
     });
-  };
-  fitRef.current = fit;
+    observer.observe(stage);
+    return () => observer.disconnect();
+  }, [data, requestDraw]);
 
-  // Wheel zoom around the cursor (a non-passive listener, so the page itself
-  // doesn't scroll).
   useEffect(() => {
-    const svg = svgRef.current;
-    if (!svg) return;
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      interacted.current = true;
-      const rect = svg.getBoundingClientRect();
-      const mx = e.clientX - rect.left;
-      const my = e.clientY - rect.top;
-      setView((v) => {
-        const k = Math.min(4, Math.max(0.2, v.k * Math.exp(-e.deltaY * 0.0015)));
-        return { k, x: mx - ((mx - v.x) / v.k) * k, y: my - ((my - v.y) / v.k) * k };
-      });
+    const refresh = () => {
+      paletteRef.current = readPalette();
+      requestDraw();
     };
-    svg.addEventListener("wheel", onWheel, { passive: false });
-    return () => svg.removeEventListener("wheel", onWheel);
-  }, [data]);
+    const media = matchMedia("(prefers-color-scheme: dark)");
+    media.addEventListener("change", refresh);
+    const observer = new MutationObserver(refresh);
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
+    document.fonts?.ready.then(refresh);
+    return () => {
+      media.removeEventListener("change", refresh);
+      observer.disconnect();
+    };
+  }, [requestDraw]);
 
-  // Dragging the background pans; dragging a node moves it; a click without
-  // movement selects.
-  const drag = useRef<{
+  useEffect(
+    () => () => {
+      cancelAnimationFrame(frame.current);
+      cancelAnimationFrame(tween.current);
+      // A remount (StrictMode does one) must be able to schedule again.
+      frame.current = 0;
+    },
+    [],
+  );
+
+  // -------------------------------------------------------------- search
+  const needle = query.trim().toLowerCase();
+  const results = useMemo(() => {
+    const graph = graphRef.current;
+    if (!needle || !graph) return [];
+    return graph.nodes
+      .filter((n) => n.name.toLowerCase().includes(needle))
+      .sort(
+        (a, b) =>
+          Number(b.name.toLowerCase().startsWith(needle)) -
+            Number(a.name.toLowerCase().startsWith(needle)) || b.weight - a.weight,
+      );
+    // `version` changes whenever the graph is rebuilt.
+  }, [needle, version]);
+
+  useEffect(() => {
+    matchesRef.current = needle ? new Set(results.map((n) => n.key)) : null;
+    setActiveResult(0);
+    requestDraw();
+  }, [needle, results, requestDraw]);
+
+  useEffect(requestDraw, [selected, hovered, requestDraw]);
+
+  const pick = (node: Node) => {
+    select(node.key);
+    setSearchOpen(false);
+  };
+
+  // ------------------------------------------------------------ pointers
+  const pointers = useRef(new Map<number, { x: number; y: number }>());
+  const gesture = useRef<{
     node: Node | null;
     startX: number;
     startY: number;
     view: View;
     moved: boolean;
+    pinch?: { dist: number; mx: number; my: number; view: View };
   } | null>(null);
 
-  const toGraph = (e: React.PointerEvent) => {
-    const rect = svgRef.current!.getBoundingClientRect();
-    const v = viewRef.current;
-    return { x: (e.clientX - rect.left - v.x) / v.k, y: (e.clientY - rect.top - v.y) / v.k };
+  const local = (e: { clientX: number; clientY: number }) => {
+    const rect = canvasRef.current!.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
   };
 
-  const onPointerDown = (e: React.PointerEvent, node: Node | null) => {
-    e.stopPropagation();
-    (e.target as Element).setPointerCapture(e.pointerId);
-    drag.current = { node, startX: e.clientX, startY: e.clientY, view, moved: false };
-  };
-
-  const onPointerMove = (e: React.PointerEvent) => {
-    const d = drag.current;
-    if (!d) return;
-    if (Math.hypot(e.clientX - d.startX, e.clientY - d.startY) > 4) d.moved = true;
-    if (!d.moved) return;
+  const noteInteraction = () => {
     interacted.current = true;
-    if (d.node) {
-      const p = toGraph(e);
-      d.node.fx = p.x;
-      d.node.fy = p.y;
-      sim.current?.alphaTarget(0.2).restart();
-    } else {
+    cancelAnimationFrame(tween.current);
+    if (!touched) setTouched(true);
+  };
+
+  const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const graph = graphRef.current;
+    if (!graph) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const p = local(e);
+    pointers.current.set(e.pointerId, p);
+    if (pointers.current.size === 2) {
+      const [a, b] = [...pointers.current.values()];
+      gesture.current = {
+        node: null,
+        startX: p.x,
+        startY: p.y,
+        view: { ...viewRef.current },
+        moved: true,
+        pinch: {
+          dist: Math.hypot(a.x - b.x, a.y - b.y),
+          mx: (a.x + b.x) / 2,
+          my: (a.y + b.y) / 2,
+          view: { ...viewRef.current },
+        },
+      };
+      return;
+    }
+    gesture.current = {
+      node: hitTest(graph, viewRef.current, p.x, p.y),
+      startX: p.x,
+      startY: p.y,
+      view: { ...viewRef.current },
+      moved: false,
+    };
+  };
+
+  const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const graph = graphRef.current;
+    if (!graph) return;
+    const p = local(e);
+    if (pointers.current.has(e.pointerId)) pointers.current.set(e.pointerId, p);
+    const g = gesture.current;
+
+    if (!g) {
+      // Once you're pointing at something, the camera stops moving on its own.
+      interacted.current = true;
+      const hit = hitTest(graph, viewRef.current, p.x, p.y);
+      const key = hit?.key ?? null;
+      if (key !== hoveredRef.current) {
+        hoveredRef.current = key;
+        setHovered(key);
+      }
+      e.currentTarget.style.cursor = hit ? "pointer" : "grab";
+      return;
+    }
+
+    if (g.pinch && pointers.current.size >= 2) {
+      const [a, b] = [...pointers.current.values()];
+      const dist = Math.hypot(a.x - b.x, a.y - b.y);
+      const mx = (a.x + b.x) / 2;
+      const my = (a.y + b.y) / 2;
+      const v = g.pinch.view;
+      const k = clampK(v.k * (dist / g.pinch.dist));
       setView({
-        ...d.view,
-        x: d.view.x + e.clientX - d.startX,
-        y: d.view.y + e.clientY - d.startY,
+        k,
+        x: mx - ((g.pinch.mx - v.x) / v.k) * k,
+        y: my - ((g.pinch.my - v.y) / v.k) * k,
       });
+      return;
+    }
+
+    if (!g.moved && Math.hypot(p.x - g.startX, p.y - g.startY) > 4) {
+      g.moved = true;
+      noteInteraction();
+      if (hoveredRef.current) {
+        hoveredRef.current = null;
+        setHovered(null);
+      }
+    }
+    if (!g.moved) return;
+    if (g.node) {
+      const v = viewRef.current;
+      g.node.fx = (p.x - v.x) / v.k;
+      g.node.fy = (p.y - v.y) / v.k;
+      simRef.current?.alphaTarget(0.25).restart();
+    } else {
+      e.currentTarget.style.cursor = "grabbing";
+      setView({ ...g.view, x: g.view.x + p.x - g.startX, y: g.view.y + p.y - g.startY });
     }
   };
 
-  const onPointerUp = () => {
-    const d = drag.current;
-    drag.current = null;
-    if (!d) return;
-    if (d.node) {
-      d.node.fx = null;
-      d.node.fy = null;
-      sim.current?.alphaTarget(0);
+  const onPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    pointers.current.delete(e.pointerId);
+    const g = gesture.current;
+    if (pointers.current.size > 0) return;
+    gesture.current = null;
+    e.currentTarget.style.cursor = "grab";
+    if (!g) return;
+    if (g.node && g.moved) {
+      g.node.fx = null;
+      g.node.fy = null;
+      simRef.current?.alphaTarget(0);
     }
-    if (!d.moved) setSelected(d.node ? d.node.key : null);
-  };
-
-  const { nodes, links } = graph.current;
-  const byKey = useMemo(() => new Map(nodes.map((n) => [n.key, n])), [nodes]);
-  const labelled = useMemo(() => labelledKeys(nodes), [nodes]);
-  const focus = hovered ?? selected;
-  const neighbours = useMemo(() => {
-    const set = new Set<string>();
-    if (!focus) return set;
-    set.add(focus);
-    for (const l of links) {
-      const s = endpoint(l.source)?.key;
-      const t = endpoint(l.target)?.key;
-      if (s === focus && t) set.add(t);
-      if (t === focus && s) set.add(s);
-    }
-    return set;
-  }, [focus, links]);
-  const needle = filter.trim().toLowerCase();
-  const matches = useMemo(
-    () =>
-      needle
-        ? new Set(nodes.filter((n) => n.name.toLowerCase().includes(needle)).map((n) => n.key))
-        : null,
-    [needle, nodes],
-  );
-
-  const select = (key: string) => {
-    setSelected(key);
-    const n = byKey.get(key);
-    if (n?.x !== undefined && n.y !== undefined) {
-      setView((v) => ({ ...v, x: width / 2 - v.k * n.x!, y: height / 2 - v.k * n.y! }));
+    if (!g.moved) {
+      noteInteraction();
+      select(g.node ? g.node.key : null, false);
+      // Keep what you clicked clear of the drawer that just opened.
+      const node = g.node;
+      if (node?.x !== undefined) {
+        const v = viewRef.current;
+        const sx = node.x * v.k + v.x;
+        const sy = node.y! * v.k + v.y;
+        const { w, h } = visibleArea();
+        if (sx > w - 60 || sy > h - 60) centreOn(node, v.k);
+      }
     }
   };
 
-  const dimmed = (key: string) =>
-    (matches !== null && !matches.has(key)) || (focus !== null && !neighbours.has(key));
+  const onPointerLeave = () => {
+    if (hoveredRef.current && !gesture.current) {
+      hoveredRef.current = null;
+      setHovered(null);
+    }
+  };
 
+  const onDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const graph = graphRef.current;
+    if (!graph) return;
+    const p = local(e);
+    const hit = hitTest(graph, viewRef.current, p.x, p.y);
+    noteInteraction();
+    if (hit) {
+      select(hit.key, false);
+      centreOn(hit, Math.min(MAX_K, viewRef.current.k * 1.8));
+      return;
+    }
+    const v = viewRef.current;
+    const k = clampK(v.k * 1.8);
+    animateTo({ k, x: p.x - ((p.x - v.x) / v.k) * k, y: p.y - ((p.y - v.y) / v.k) * k }, 360);
+  };
+
+  // Wheel zoom around the cursor (non-passive, so the page doesn't scroll).
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      noteInteraction();
+      const p = local(e);
+      const v = viewRef.current;
+      // Trackpad pinches arrive as ctrl+wheel with small deltas.
+      const factor = Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0016));
+      const k = clampK(v.k * factor);
+      setView({ k, x: p.x - ((p.x - v.x) / v.k) * k, y: p.y - ((p.y - v.y) / v.k) * k });
+    };
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheel);
+    // noteInteraction only reads refs and a setter.
+  }, [data, setView]);
+
+  const zoomBy = (factor: number) => {
+    noteInteraction();
+    const v = viewRef.current;
+    const { w, h } = visibleArea();
+    const k = clampK(v.k * factor);
+    animateTo(
+      { k, x: w / 2 - ((w / 2 - v.x) / v.k) * k, y: h / 2 - ((h / 2 - v.y) / v.k) * k },
+      260,
+    );
+  };
+
+  const onCanvasKey = (e: React.KeyboardEvent) => {
+    const v = viewRef.current;
+    const pan = (dx: number, dy: number) => {
+      noteInteraction();
+      animateTo({ ...v, x: v.x + dx, y: v.y + dy }, 180);
+    };
+    switch (e.key) {
+      case "ArrowLeft":
+        return pan(80, 0);
+      case "ArrowRight":
+        return pan(-80, 0);
+      case "ArrowUp":
+        return pan(0, 80);
+      case "ArrowDown":
+        return pan(0, -80);
+      case "+":
+      case "=":
+        return zoomBy(1.3);
+      case "-":
+        return zoomBy(1 / 1.3);
+      case "0":
+        return fit();
+      case "Escape":
+        return select(null, false);
+      case "/":
+        e.preventDefault();
+        return searchRef.current?.focus();
+      default:
+        return;
+    }
+  };
+
+  const onMinimap = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const f = miniFrame.current;
+    if (!f || (e.type === "pointermove" && e.buttons !== 1)) return;
+    if (e.type === "pointerdown") e.currentTarget.setPointerCapture(e.pointerId);
+    const rect = e.currentTarget.getBoundingClientRect();
+    const gx = (e.clientX - rect.left - f.ox) / f.scale;
+    const gy = (e.clientY - rect.top - f.oy) / f.scale;
+    const v = viewRef.current;
+    const { w, h } = visibleArea();
+    const to = { k: v.k, x: w / 2 - v.k * gx, y: h / 2 - v.k * gy };
+    noteInteraction();
+    if (e.type === "pointerdown") animateTo(to, 300);
+    else setView(to);
+  };
+
+  // --------------------------------------------------------------- view
   const header = (
     <PageHeader
       title="Graph"
@@ -539,13 +641,12 @@ export default function Graph({ onOpenFile }: GraphProps) {
     return (
       <>
         {header}
-        <div className="graph-loading">
+        <div className="explorer explorer-loading">
           <Spinner label="Loading the graph" />
         </div>
       </>
     );
   }
-
   if (data.entities.length === 0) {
     return (
       <>
@@ -563,202 +664,263 @@ export default function Graph({ onOpenFile }: GraphProps) {
     );
   }
 
-  const selectedNode = selected ? byKey.get(selected) : undefined;
-  const showLabel = (n: Node) =>
-    view.k >= 1.4 || neighbours.has(n.key) || (matches?.has(n.key) ?? false) || labelled.has(n.key);
-  const presentKinds = ENTITY_KINDS.filter((k) =>
-    nodes.some(
-      (n) =>
-        n.type === "entity" && (n.kind === k || (k === "other" && !ENTITY_KINDS.includes(n.kind))),
-    ),
-  );
+  const graph = graphRef.current;
+  const kindCounts = new Map<string, number>();
+  for (const e of data.entities)
+    kindCounts.set(kindKey(e.kind), (kindCounts.get(kindKey(e.kind)) ?? 0) + 1);
+  const selectedNode = selected ? graph?.byKey.get(selected) : undefined;
+  const hoveredNode = hovered && hovered !== selected ? graph?.byKey.get(hovered) : undefined;
+  const shownResults = results.slice(0, 7);
+
+  const toggleKind = (kind: string) => {
+    noteInteraction();
+    setHiddenKinds((prev) => {
+      const next = new Set(prev);
+      if (next.has(kind)) next.delete(kind);
+      else next.add(kind);
+      return next;
+    });
+  };
 
   return (
-    <div className="graph">
+    <div className="graph-view">
       {header}
-      <div className="graph-toolbar">
-        <div className="search-field">
-          <Search aria-hidden />
-          <input
-            className="input"
-            type="search"
-            aria-label="Find in graph"
-            placeholder="Find in graph…"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && matches && matches.size > 0) select([...matches][0]);
-            }}
-          />
-          {matches && (
-            <span className="search-hint num" aria-live="polite">
-              {matches.size} found
-            </span>
-          )}
-        </div>
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={showFiles}
-            onChange={(e) => setShowFiles(e.target.checked)}
-          />
-          <span>Show files</span>
-        </label>
-        <label className="inline-field">
-          <span>Show up to</span>
-          <select className="select" value={size} onChange={(e) => setSize(Number(e.target.value))}>
-            {SIZES.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
+      <div className={selectedNode ? "explorer has-drawer" : "explorer"} ref={stageRef}>
+        <canvas
+          ref={canvasRef}
+          className="explorer-canvas"
+          tabIndex={0}
+          role="application"
+          aria-roledescription="graph"
+          aria-label={`Graph of ${plural(graph?.nodes.length ?? 0, "item")} and ${plural(
+            graph?.links.length ?? 0,
+            "connection",
+          )}. Arrow keys pan, plus and minus zoom, 0 fits, slash searches.`}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
+          onPointerLeave={onPointerLeave}
+          onDoubleClick={onDoubleClick}
+          onKeyDown={onCanvasKey}
+        />
 
-      <div className="graph-body">
-        <div className="graph-stage">
-          <svg
-            ref={svgRef}
-            className="graph-canvas"
-            role="img"
-            aria-label={`Graph of ${plural(nodes.length, "item")} and ${plural(links.length, "connection")}. Use Find in graph and press Enter to select one.`}
-            onPointerDown={(e) => onPointerDown(e, null)}
-            onPointerMove={onPointerMove}
-            onPointerUp={onPointerUp}
-          >
-            <defs>
-              <pattern id="graph-dots" width="24" height="24" patternUnits="userSpaceOnUse">
-                <circle cx="1" cy="1" r="1" className="graph-grid-dot" />
-              </pattern>
-            </defs>
-            <rect width="100%" height="100%" fill="url(#graph-dots)" />
-            <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
-              {links.map((l, i) => {
-                const s = endpoint(l.source);
-                const t = endpoint(l.target);
-                if (!s || !t) return null;
-                const faded = dimmed(s.key) || dimmed(t.key);
-                const lit = focus !== null && !faded && (s.key === focus || t.key === focus);
-                return (
-                  <line
-                    key={i}
-                    className={`graph-link ${l.type}${faded ? " faded" : ""}${lit ? " lit" : ""}`}
-                    x1={s.x}
-                    y1={s.y}
-                    x2={t.x}
-                    y2={t.y}
-                    strokeWidth={Math.min(4, 1 + Math.log2(l.count)) / Math.sqrt(view.k)}
-                  >
-                    <title>{`${s.name} ${l.label} ${t.name}`}</title>
-                  </line>
-                );
-              })}
-              {nodes.map((n) => {
-                const faded = dimmed(n.key);
-                const cls = `graph-node ${n.type}${faded ? " faded" : ""}${n.key === selected ? " selected" : ""}`;
-                return (
-                  <g
-                    key={n.key}
-                    className={cls}
-                    transform={`translate(${n.x ?? 0},${n.y ?? 0})`}
-                    onPointerDown={(e) => onPointerDown(e, n)}
-                    onPointerEnter={() => setHovered(n.key)}
-                    onPointerLeave={() => setHovered((h) => (h === n.key ? null : h))}
-                  >
-                    {n.key === selected && (
-                      <circle
-                        className="graph-halo"
-                        r={n.r + 7}
-                        style={{
-                          fill: n.type === "entity" ? kindColor(n.kind) : "var(--cat-file)",
-                        }}
-                      />
-                    )}
-                    {n.type === "entity" ? (
-                      <circle r={n.r} style={{ fill: kindColor(n.kind) }} />
-                    ) : (
-                      <rect x={-n.r} y={-n.r} width={n.r * 2} height={n.r * 2} rx={2.5} />
-                    )}
-                    {showLabel(n) && (
-                      <text y={n.r + 13} fontSize={11.5 / Math.sqrt(view.k)}>
-                        {n.name.length > 28 ? `${n.name.slice(0, 27)}…` : n.name}
-                      </text>
-                    )}
-                  </g>
-                );
-              })}
-            </g>
-          </svg>
-
-          <div className="graph-controls" role="group" aria-label="Zoom">
-            <IconButton icon={Plus} label="Zoom in" size="sm" onClick={() => zoomBy(1.3)} />
-            <IconButton icon={Minus} label="Zoom out" size="sm" onClick={() => zoomBy(1 / 1.3)} />
-            <span className="graph-controls-sep" aria-hidden />
-            <IconButton icon={Maximize2} label="Fit to window" size="sm" onClick={fit} />
+        {/* search and filters */}
+        <div className="explorer-bar glass">
+          <div className="explorer-search">
+            <Search aria-hidden />
+            <input
+              ref={searchRef}
+              type="search"
+              role="combobox"
+              aria-expanded={searchOpen && shownResults.length > 0}
+              aria-controls="graph-results"
+              aria-activedescendant={
+                searchOpen && shownResults[activeResult]
+                  ? `graph-result-${activeResult}`
+                  : undefined
+              }
+              aria-label="Find in graph"
+              placeholder="Find a person, place, file…"
+              value={query}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setSearchOpen(true);
+              }}
+              onFocus={() => setSearchOpen(true)}
+              onBlur={() => setTimeout(() => setSearchOpen(false), 120)}
+              onKeyDown={(e) => {
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setActiveResult((i) => Math.min(i + 1, shownResults.length - 1));
+                } else if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setActiveResult((i) => Math.max(i - 1, 0));
+                } else if (e.key === "Enter" && shownResults[activeResult]) {
+                  pick(shownResults[activeResult]);
+                } else if (e.key === "Escape") {
+                  setQuery("");
+                  canvasRef.current?.focus();
+                }
+              }}
+            />
+            {query ? <span className="explorer-count num">{results.length}</span> : <Kbd>/</Kbd>}
           </div>
+          <span className="explorer-divider" aria-hidden />
+          <label className="explorer-select">
+            <span className="visually-hidden">Show up to</span>
+            <select value={size} onChange={(e) => setSize(Number(e.target.value))}>
+              {SIZES.map((s) => (
+                <option key={s} value={s}>
+                  Top {s}
+                </option>
+              ))}
+            </select>
+          </label>
 
-          <ul className="graph-legend" aria-label="Legend">
-            {presentKinds.map((kind) => (
-              <li key={kind}>
-                <KindTag kind={kind} />
-              </li>
-            ))}
-            {showFiles && (
-              <li>
-                <span className="kind-tag">
-                  <span className="legend-file" aria-hidden />
-                  file
-                </span>
-              </li>
-            )}
-          </ul>
+          {searchOpen && needle && (
+            <ul className="explorer-results glass" id="graph-results" role="listbox">
+              {shownResults.length === 0 && <li className="explorer-noresult">No matches</li>}
+              {shownResults.map((n, i) => (
+                <li
+                  key={n.key}
+                  id={`graph-result-${i}`}
+                  role="option"
+                  aria-selected={i === activeResult}
+                  className="explorer-result"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onMouseMove={() => setActiveResult(i)}
+                  onClick={() => pick(n)}
+                >
+                  {n.type === "file" ? (
+                    <FileText className="explorer-result-icon" aria-hidden />
+                  ) : (
+                    <span className="relation-dot" data-kind={kindKey(n.kind)} aria-hidden />
+                  )}
+                  <span className="explorer-result-name">{n.name}</span>
+                  <span className="explorer-result-meta">
+                    {n.type === "file" ? kindLabel(n.kind) : n.kind}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
 
-        <aside className="graph-panel card" aria-label="Details" aria-live="polite">
-          {selectedNode ? (
-            selectedNode.type === "entity" ? (
-              <EntityPanel
-                node={selectedNode}
-                links={links}
-                onSelect={select}
-                onOpenFile={onOpenFile}
-              />
-            ) : (
-              <FilePanel
-                node={selectedNode}
-                links={links}
-                onSelect={select}
-                onOpenFile={onOpenFile}
-              />
-            )
-          ) : (
-            <div className="panel-intro">
-              <span className="panel-intro-icon" aria-hidden>
-                <MousePointerClick />
+        {/* zoom */}
+        <div className="explorer-zoom glass" role="group" aria-label="Zoom">
+          <IconButton icon={Plus} label="Zoom in (+)" size="sm" onClick={() => zoomBy(1.35)} />
+          <span className="explorer-zoom-value num" aria-live="off">
+            {zoom}%
+          </span>
+          <IconButton
+            icon={Minus}
+            label="Zoom out (−)"
+            size="sm"
+            onClick={() => zoomBy(1 / 1.35)}
+          />
+          <span className="explorer-divider-h" aria-hidden />
+          <IconButton icon={Maximize2} label="Fit to window (0)" size="sm" onClick={() => fit()} />
+        </div>
+
+        {/* legend: also a filter */}
+        <div className="explorer-legend glass" role="group" aria-label="Show or hide kinds">
+          {ENTITY_KINDS.filter((k) => kindCounts.has(k)).map((kind) => {
+            const on = !hiddenKinds.has(kind);
+            return (
+              <button
+                key={kind}
+                type="button"
+                className={on ? "legend-chip" : "legend-chip off"}
+                aria-pressed={on}
+                data-kind={kind}
+                onClick={() => toggleKind(kind)}
+                title={on ? `Hide ${kind}` : `Show ${kind}`}
+              >
+                <span className="legend-dot" aria-hidden />
+                {kind}
+                <span className="legend-count num">{kindCounts.get(kind)}</span>
+              </button>
+            );
+          })}
+          <button
+            type="button"
+            className={showFiles ? "legend-chip" : "legend-chip off"}
+            aria-pressed={showFiles}
+            onClick={() => {
+              noteInteraction();
+              setShowFiles((s) => !s);
+            }}
+            title={showFiles ? "Hide files" : "Show files"}
+          >
+            <span className="legend-file" aria-hidden />
+            files
+            <span className="legend-count num">{data.files.length}</span>
+          </button>
+        </div>
+
+        {/* minimap */}
+        <div className="explorer-minimap glass" aria-hidden>
+          <canvas
+            ref={miniRef}
+            style={{ width: MINIMAP_W, height: MINIMAP_H }}
+            onPointerDown={onMinimap}
+            onPointerMove={onMinimap}
+          />
+        </div>
+
+        {!touched && !selectedNode && (
+          <div className="explorer-hint glass" aria-hidden>
+            <span>
+              <b>Click</b> to explore
+            </span>
+            <span>
+              <b>Drag</b> to pan
+            </span>
+            <span>
+              <b>Scroll</b> to zoom
+            </span>
+            <span>
+              <b>Double-click</b> to dive in
+            </span>
+          </div>
+        )}
+
+        {/* hover card, positioned by the render loop */}
+        <div
+          ref={hoverCardRef}
+          className={hoveredNode ? "explorer-card glass visible" : "explorer-card glass"}
+          aria-hidden
+        >
+          {hoveredNode && (
+            <>
+              <span className="explorer-card-name">
+                {hoveredNode.type === "file" ? (
+                  <FileText className="explorer-result-icon" />
+                ) : (
+                  <span className="relation-dot" data-kind={kindKey(hoveredNode.kind)} />
+                )}
+                {hoveredNode.name}
               </span>
-              <h2 className="panel-title">Explore connections</h2>
-              <p className="hint">
-                Click a dot to see how it connects. Drag to move things around, scroll to zoom, or
-                type a name above and press Enter.
-              </p>
-              <dl className="graph-stats">
-                <div>
-                  <dt>Entities</dt>
-                  <dd className="num">{nodes.filter((n) => n.type === "entity").length}</dd>
-                </div>
-                <div>
-                  <dt>Files</dt>
-                  <dd className="num">{nodes.filter((n) => n.type === "file").length}</dd>
-                </div>
-                <div>
-                  <dt>Links</dt>
-                  <dd className="num">{links.length}</dd>
-                </div>
-              </dl>
-            </div>
+              <span className="explorer-card-meta">
+                {hoveredNode.type === "file" ? kindLabel(hoveredNode.kind) : hoveredNode.kind}
+                <span className="dot-sep">{plural(hoveredNode.degree, "link")}</span>
+              </span>
+            </>
           )}
-        </aside>
+        </div>
+
+        {selectedNode && graph && (
+          <aside className="explorer-drawer glass" aria-label={`Details for ${selectedNode.name}`}>
+            <IconButton
+              icon={X}
+              label="Close details (Esc)"
+              size="sm"
+              className="drawer-close"
+              onClick={() => {
+                select(null, false);
+                canvasRef.current?.focus();
+              }}
+            />
+            <div className="drawer-body" key={selectedNode.key}>
+              {selectedNode.type === "entity" ? (
+                <EntityPanel
+                  node={selectedNode}
+                  graph={graph}
+                  onSelect={(key) => select(key)}
+                  onOpenFile={onOpenFile}
+                />
+              ) : (
+                <FilePanel
+                  node={selectedNode}
+                  graph={graph}
+                  onSelect={(key) => select(key)}
+                  onOpenFile={onOpenFile}
+                />
+              )}
+            </div>
+          </aside>
+        )}
       </div>
     </div>
   );
