@@ -28,10 +28,13 @@ pub struct ScanStats {
 
 /// Long-running scanner entrypoint, spawned from main.
 pub async fn worker_loop(pool: PgPool, config: Config) {
-    let ollama = OllamaClient::from_config(&config).unwrap_or_else(|e| {
-        tracing::error!(error = %e, "scanner: Ollama misconfigured; judging disabled");
-        None
-    });
+    // The judge needs a chat model; embeddings alone don't judge.
+    let ollama = OllamaClient::from_config(&config)
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, "scanner: Ollama misconfigured; judging disabled");
+            None
+        })
+        .filter(|client| client.model.is_some());
 
     let mut interval = tokio::time::interval(Duration::from_secs(config.scan_interval_secs));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

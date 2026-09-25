@@ -69,6 +69,9 @@ impl pb::ingest_service_server::IngestService for IngestApi {
         request: Request<Streaming<pb::IngestFileChunk>>,
     ) -> Result<Response<pb::IngestFileResponse>, Status> {
         let mut stream = request.into_inner();
+        // The same per-file cap as REST, checked as chunks arrive so an
+        // oversized stream is refused before it is all in memory.
+        let max_bytes = self.state.config.max_upload_mb * 1024 * 1024;
 
         let mut meta: Option<pb::ingest_file_chunk::Meta> = None;
         let mut bytes: Vec<u8> = Vec::new();
@@ -83,6 +86,12 @@ impl pb::ingest_service_server::IngestService for IngestApi {
                 Some(pb::ingest_file_chunk::Payload::Data(d)) => {
                     if meta.is_none() {
                         return Err(Status::invalid_argument("first chunk must carry file meta"));
+                    }
+                    if bytes.len() + d.len() > max_bytes {
+                        return Err(Status::resource_exhausted(format!(
+                            "file exceeds the {} MB limit (GATHER_MAX_UPLOAD_MB)",
+                            self.state.config.max_upload_mb
+                        )));
                     }
                     bytes.extend_from_slice(&d);
                 }

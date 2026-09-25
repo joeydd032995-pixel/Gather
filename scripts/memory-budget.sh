@@ -14,21 +14,35 @@
 # Env:
 #   DATABASE_URL                 required
 #   GATHER_DAEMON_BIN            daemon binary (default daemon/target/debug/gather-daemon)
-#   GATHER_MEMORY_BUDGET_MB      peak PSS allowed (default 256; storing a file peaks near 3.5x its size + ~30 MB)
-#   GATHER_MEMORY_TEXT_MB        size of the large text file (default 48)
+#   GATHER_MEMORY_PROFILE        standard (default) or low; low keeps the profile's own
+#                                32 MB upload cap and its smaller defaults
+#   GATHER_MEMORY_BUDGET_MB      peak PSS allowed (default 256, low 160; storing a file
+#                                peaks near 3.5x its size + ~30 MB)
+#   GATHER_MEMORY_TEXT_MB        size of the large text file (default 48, low 24)
 set -euo pipefail
 
 : "${DATABASE_URL:?DATABASE_URL must be set}"
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BIN=${GATHER_DAEMON_BIN:-$ROOT/daemon/target/debug/gather-daemon}
-BUDGET_MB=${GATHER_MEMORY_BUDGET_MB:-256}
-TEXT_MB=${GATHER_MEMORY_TEXT_MB:-48}
+PROFILE=${GATHER_MEMORY_PROFILE:-standard}
+if [ "$PROFILE" = low ]; then
+  BUDGET_MB=${GATHER_MEMORY_BUDGET_MB:-160}
+  TEXT_MB=${GATHER_MEMORY_TEXT_MB:-24}
+  CAP_MB=32 # the low profile's default; deliberately not overridden below
+  CAP_ENV=()
+else
+  BUDGET_MB=${GATHER_MEMORY_BUDGET_MB:-256}
+  TEXT_MB=${GATHER_MEMORY_TEXT_MB:-48}
+  CAP_MB=$((TEXT_MB + 16))
+  CAP_ENV=(GATHER_MAX_UPLOAD_MB=$CAP_MB)
+fi
 PORT=7611
 API="http://127.0.0.1:$PORT/api/v1"
 WORK=$(mktemp -d)
+echo "memory profile: $PROFILE"
 
-GATHER_BIND_ADDR="127.0.0.1:$PORT" GATHER_GRPC_ENABLED=false GATHER_AUTH_MODE=env \
-  GATHER_API_TOKEN="" GATHER_RATE_LIMIT_RPS=0 GATHER_MAX_UPLOAD_MB=$((TEXT_MB + 16)) \
+env GATHER_MEMORY_PROFILE="$PROFILE" GATHER_BIND_ADDR="127.0.0.1:$PORT" GATHER_GRPC_ENABLED=false \
+  GATHER_AUTH_MODE=env GATHER_API_TOKEN="" GATHER_RATE_LIMIT_RPS=0 "${CAP_ENV[@]}" \
   GATHER_EXTRACTION_INTERVAL_SECS=2 GATHER_PHOTO_INTERVAL_SECS=2 \
   "$BIN" >"$WORK/daemon.log" 2>&1 &
 DAEMON=$!
@@ -86,7 +100,7 @@ done
 [ "$pending" = 0 ] || { echo "photo worker did not finish ($pending pending)"; tail -20 "$WORK/daemon.log"; exit 1; }
 
 phase oversized "oversized upload is refused before it is read"
-code=$(curl -s -o /dev/null -w '%{http_code}' -H "Content-Length: $(( (TEXT_MB + 17) * 1024 * 1024 ))" \
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "Content-Length: $(( (CAP_MB + 1) * 1024 * 1024 ))" \
   -H "Content-Type: multipart/form-data; boundary=x" --data-binary $'--x--\r\n' "$API/ingest/files")
 [ "$code" = 413 ] || { echo "oversized upload: expected 413, got $code"; exit 1; }
 

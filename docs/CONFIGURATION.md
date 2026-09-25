@@ -34,11 +34,12 @@ These are read by `docker-compose.yml`, not by the daemon itself.
 
 | Variable | Default | Description |
 |---|---|---|
+| `GATHER_MEMORY_PROFILE` | `standard` | `low` for machines with about 4 GB of RAM. It lowers the defaults marked *low:* on this page; any variable you set explicitly still wins. The desktop app sets it automatically on machines under 6 GB ([INSTALL.md](INSTALL.md#system-requirements)). **Validated** |
 | `DATABASE_URL` | — | **Required** when running the binary directly (Compose builds it for you). `postgres://user:pass@host:port/db` |
 | `GATHER_BIND_ADDR` | `127.0.0.1:7601` | REST listen address. A non-loopback address is refused unless `GATHER_ALLOW_NON_LOOPBACK=true` |
 | `GATHER_ALLOW_NON_LOOPBACK` | `false` | Explicit opt-out of the loopback-only policy (for both listeners and the Ollama URL). Containers set this; desktops should not |
-| `GATHER_DB_MAX_CONNECTIONS` | `8` | Shared Postgres pool size. **Validated**, ≥ 1 |
-| `GATHER_MAX_UPLOAD_MB` | `256` | Maximum request body size. A request that declares a larger size is refused with `413` before any of it is read. Storing a file briefly costs the daemon about 3.5× its size (the upload, plus the database driver's encoded copy of it), so keep this low on small-memory machines |
+| `GATHER_DB_MAX_CONNECTIONS` | `8` (low: `4`) | Shared Postgres pool size. **Validated**, ≥ 1 |
+| `GATHER_MAX_UPLOAD_MB` | `256` (low: `32`) | Maximum request body size, and the per-file limit for gRPC `IngestFile` streams (`RESOURCE_EXHAUSTED`). A request that declares a larger size is refused with `413` before any of it is read. The desktop app checks a picked file's size against the same limit before reading it. Storing a file briefly costs the daemon about 3.5× its size (the upload, plus the database driver's encoded copy of it), so keep this low on small-memory machines |
 | `GATHER_RATE_LIMIT_RPS` | `50` | Global requests/second shared by REST and gRPC; `0` disables. **Validated** |
 | `RUST_LOG` | `info,sqlx=warn,tower_http=info` | Log filter (tracing `EnvFilter` syntax) |
 | `GATHER_LOG_JSON` | `false` | Emit JSON logs |
@@ -50,6 +51,7 @@ Read by the packaged app's supervisor, not the daemon ([INSTALL.md](INSTALL.md))
 | Variable | Default | Description |
 |---|---|---|
 | `GATHER_PG_PORT` | `7603` | Loopback port of the bundled PostgreSQL. Change it only if another program uses 7603 |
+| `GATHER_MEMORY_PROFILE` | `auto` | `auto` picks `low` below 6 GB of RAM and `standard` otherwise; `low` or `standard` forces one. The app passes the result to the daemon and, in `low`, starts PostgreSQL with `shared_buffers=64MB`, `work_mem=2MB`, `maintenance_work_mem=32MB`, `max_connections=12`, one autovacuum worker, no parallel query workers and JIT off |
 
 ## Authentication
 
@@ -83,9 +85,12 @@ Extracts PDF text, runs image OCR and produces atomic units.
 | Variable | Default | Description |
 |---|---|---|
 | `GATHER_OLLAMA_URL` | *(empty)* | Empty disables all LLM and embedding features. For example `http://127.0.0.1:11434`. Must be loopback unless `GATHER_ALLOW_NON_LOOPBACK=true` |
-| `GATHER_OLLAMA_MODEL` | `llama3.2:3b` | Chat model for LLM-assisted extraction and the contradiction judge |
+| `GATHER_OLLAMA_MODEL` | `llama3.2:3b` (low: `none`) | Chat model for LLM-assisted extraction and the contradiction judge. `none` keeps Ollama to embeddings (and captions, with a vision model); set a model, e.g. `llama3.2:1b`, to use one in the low profile |
 | `GATHER_OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Embedding model. It must produce 768-dimension vectors to match the schema |
 | `GATHER_OLLAMA_VISION_MODEL` | *(empty)* | Vision model for photo captions and visual topics, e.g. `moondream` or `llava`. Empty disables captions. Needs `GATHER_OLLAMA_URL` |
+| `GATHER_OLLAMA_KEEP_ALIVE` | Ollama's default (low: `1m`) | How long Ollama keeps a model in memory after Gather's last request, as an Ollama duration (`30s`, `5m`, `0`) |
+| `GATHER_OLLAMA_NUM_CTX` | Ollama's default (low: `2048`) | Context window for chat and caption requests. It sizes the model's cache, so smaller uses less memory. **Validated**, ≥ 512 |
+| `GATHER_OLLAMA_ONE_AT_A_TIME` | `false` (low: `true`) | Send Ollama one request at a time across all of Gather's workers, so two models are never busy at once. Search may then wait for a running extraction request |
 
 With Ollama enabled you get LLM-extracted units, embeddings for units, segments and entities,
 semantic search, and embedding-based entity-merge and contradiction candidates. Without it,

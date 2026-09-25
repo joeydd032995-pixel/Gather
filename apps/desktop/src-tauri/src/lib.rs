@@ -3,6 +3,7 @@
 //! file's bytes for upload, the supervisor that runs the bundled database and
 //! daemon (`runtime`), and the opt-in update check (`updates`).
 
+mod memory;
 mod runtime;
 mod updates;
 
@@ -19,14 +20,35 @@ use updates::{InstallError, PendingUpdate, UpdateCheck, UpdateSettings};
 /// returned by the dialog plugin; rejects directories. Returned as raw bytes
 /// (an ArrayBuffer in the webview): serialized as JSON it would be an array
 /// of numbers many times the file's size.
+///
+/// A file over the daemon's per-file limit is refused from its size, before
+/// any of it is read: the daemon would refuse it anyway, and holding it in
+/// memory first could exhaust a small machine.
 #[tauri::command]
 fn read_upload_file(path: PathBuf) -> Result<tauri::ipc::Response, String> {
+    use std::io::Read;
+
     if path.is_dir() {
         return Err("directories cannot be uploaded".to_string());
     }
-    std::fs::read(&path)
-        .map(tauri::ipc::Response::new)
-        .map_err(|e| format!("failed to read {}: {e}", path.display()))
+    let failed = |e: std::io::Error| format!("failed to read {}: {e}", path.display());
+    let cap_mb = memory::max_upload_mb(memory::current().profile);
+    let cap = cap_mb * 1024 * 1024;
+    let too_large = || {
+        format!("This file is larger than {cap_mb} MB, the most Gather accepts per file on this computer.")
+    };
+    let file = std::fs::File::open(&path).map_err(failed)?;
+    let len = file.metadata().map_err(failed)?.len();
+    if len > cap {
+        return Err(too_large());
+    }
+    // Bounded, in case the file grew since its size was read.
+    let mut bytes = Vec::with_capacity(len as usize);
+    file.take(cap + 1).read_to_end(&mut bytes).map_err(failed)?;
+    if bytes.len() as u64 > cap {
+        return Err(too_large());
+    }
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 /// The daemon's API token. In GATHER_AUTH_MODE=env (chosen by the user,
@@ -55,6 +77,12 @@ fn get_api_token() -> Result<Option<String>, String> {
 #[tauri::command]
 fn runtime_status(runtime: State<'_, Arc<Runtime>>) -> Status {
     runtime.status()
+}
+
+/// The memory profile the local stack runs with, for the Settings page.
+#[tauri::command]
+fn memory_profile() -> memory::MemoryInfo {
+    memory::current()
 }
 
 #[tauri::command]
@@ -141,6 +169,7 @@ pub fn run() {
             read_upload_file,
             get_api_token,
             runtime_status,
+            memory_profile,
             get_update_settings,
             set_update_settings,
             check_for_update,

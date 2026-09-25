@@ -5,6 +5,7 @@ PostgreSQL database with pgvector, so there is nothing else to install and nothi
 configure. Everything runs on your machine; nothing is sent anywhere.
 
 - [Download](#download)
+- [System requirements](#system-requirements)
 - [First launch](#first-launch) (Windows, macOS, Linux)
 - [Checking your download](#checking-your-download)
 - [What runs, and where your data lives](#what-runs-and-where-your-data-lives)
@@ -26,6 +27,33 @@ Get the installer for your system from the
 Optional, for richer extraction: [Ollama](https://ollama.com) for local AI models, and
 [Tesseract](https://tesseract-ocr.github.io) for text in images. Both run locally too; see
 [CONFIGURATION.md](CONFIGURATION.md).
+
+## System requirements
+
+| | Minimum | Recommended |
+|---|---|---|
+| Memory (RAM) | 4 GB | 8 GB or more |
+| Processor | 2 cores, 64-bit | 4 cores |
+| Disk | 1 GB for Gather, plus room for your data | SSD |
+
+On a computer with less than 6 GB of RAM, Gather turns on **low-memory mode** by itself.
+Settings shows which mode is in use. In low-memory mode:
+
+- The database and the daemon use smaller buffers and fewer connections. While
+  Gather is busy with a large file, the two together peak at about 300 MB. Measured on
+  Linux, the daemon's peak is about 90 MB and the database's about 195 MB (it idles near
+  100 MB). The app window adds what the system web view uses, typically 150–250 MB.
+- Each file can be up to 32 MB. Storing a file briefly takes several times its size in
+  memory, so larger files are refused with a clear message rather than slowing the
+  computer down.
+- If you use Ollama, Gather uses only its small embedding model (for search and matching
+  names), one request at a time, and lets Ollama unload it a minute after the work is done.
+  Chat models need well over 1 GB of memory, which a 4 GB computer doesn't have to spare
+  next to the operating system. On 4 GB, also start Ollama with `OLLAMA_MAX_LOADED_MODELS=1`
+  and `OLLAMA_NUM_PARALLEL=1`.
+
+Everything else works the same. To choose the mode yourself, start Gather with
+`GATHER_MEMORY_PROFILE` set to `low` or `standard` ([CONFIGURATION.md](CONFIGURATION.md)).
 
 ## First launch
 
