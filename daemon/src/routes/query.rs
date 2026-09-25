@@ -12,6 +12,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::error::ApiError;
+use crate::library;
 use crate::AppState;
 
 fn clamp_limit(limit: Option<i64>, default: i64, max: i64) -> i64 {
@@ -56,10 +57,24 @@ pub async fn list_artifacts(
     .fetch_all(&state.pool)
     .await?;
 
-    let items: Vec<Value> = rows.iter().map(artifact_row_to_json).collect();
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.get("id")).collect();
+    let progress = library::artifact_progress(&state.pool, &ids).await?;
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|r| with_progress(artifact_row_to_json(r), progress.get(&r.get("id"))))
+        .collect();
     Ok(Json(
         json!({ "items": items, "limit": limit, "offset": offset }),
     ))
+}
+
+/// Add `unit_count` and processing `status` to an artifact's JSON.
+fn with_progress(mut body: Value, progress: Option<&library::ArtifactProgress>) -> Value {
+    if let Some(p) = progress {
+        body["unit_count"] = json!(p.unit_count);
+        body["status"] = json!(p.status);
+    }
+    body
 }
 
 pub async fn get_artifact(
@@ -79,7 +94,8 @@ pub async fn get_artifact(
     .await?
     .ok_or_else(|| ApiError::NotFound(format!("artifact {id}")))?;
 
-    let mut body = artifact_row_to_json(&row);
+    let progress = library::artifact_progress(&state.pool, &[id]).await?;
+    let mut body = with_progress(artifact_row_to_json(&row), progress.get(&id));
 
     // Attach modality detail so one call answers "what is this artifact".
     let conversations: Vec<Value> = sqlx::query(
@@ -177,6 +193,8 @@ pub struct UnitListParams {
     pub kind: Option<String>,
     pub status: Option<String>,
     pub subject_entity_id: Option<Uuid>,
+    /// Only units extracted from this artifact.
+    pub artifact_id: Option<Uuid>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
@@ -200,6 +218,9 @@ pub async fn list_atomic_units(
         WHERE ($1::unit_kind IS NULL OR u.kind = $1::unit_kind)
           AND ($2::unit_status IS NULL OR u.status = $2::unit_status)
           AND ($3::uuid IS NULL OR u.subject_entity_id = $3)
+          AND ($6::uuid IS NULL OR EXISTS (
+                SELECT 1 FROM atomic_unit_provenance p
+                WHERE p.atomic_unit_id = u.id AND p.artifact_id = $6))
         ORDER BY u.created_at DESC
         LIMIT $4 OFFSET $5
         "#,
@@ -209,6 +230,7 @@ pub async fn list_atomic_units(
     .bind(params.subject_entity_id)
     .bind(limit)
     .bind(offset)
+    .bind(params.artifact_id)
     .fetch_all(&state.pool)
     .await?;
 

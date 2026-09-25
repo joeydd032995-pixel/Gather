@@ -79,7 +79,9 @@ photo out") rather than reviewing thousands of suggestions.
 
 **Interfaces**
 - **REST** API (`127.0.0.1:7601/api/v1`) and an equivalent **gRPC** API (`127.0.0.1:7602`)
-- **Desktop app** (Tauri v2 + React) with drag-and-drop upload, the optional review tray
+- **Desktop app** (Tauri v2 + React) with drag-and-drop upload, a Library to browse and
+  search everything stored, an interactive graph of how people, things and files connect,
+  the optional review tray
   (keyboard-driven, with undo), topic and photo browsers, contradiction review, entity
   management and a view of what the auto-tuner learned
 - Full-store **export / import** bundle for backup, migration and replication

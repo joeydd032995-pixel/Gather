@@ -414,3 +414,145 @@ export interface UnmergeOutcome {
 export function unmergeEntity(id: string, note?: string): Promise<UnmergeOutcome> {
   return postJson(`/entities/${id}/unmerge`, { note: note || null });
 }
+
+// --- Library: stored files, their contents, and search ---------------------
+
+export type ArtifactStatus = "processing" | "done" | "failed";
+
+export interface ArtifactSummary {
+  id: string;
+  kind: string;
+  source_platform: string;
+  original_filename: string | null;
+  media_type: string | null;
+  byte_size: number;
+  ingested_at: string;
+  /** Items Gather extracted from this file. */
+  unit_count: number;
+  status: ArtifactStatus;
+}
+
+export interface ArtifactDetail extends ArtifactSummary {
+  document: { page_count: number | null; segment_count: number; extraction_status: string } | null;
+  image: {
+    id: string;
+    width: number | null;
+    height: number | null;
+    taken_at: string | null;
+    caption: string | null;
+  } | null;
+  conversations: { id: string; title: string | null }[];
+}
+
+export async function listArtifacts(limit = 50, offset = 0): Promise<ArtifactSummary[]> {
+  const res = await fetch(`${DAEMON_URL}/api/v1/artifacts?limit=${limit}&offset=${offset}`, {
+    headers: authHeaders(),
+  });
+  const body = await jsonOrThrow<{ items: ArtifactSummary[] }>(res);
+  return body.items;
+}
+
+export async function getArtifact(id: string): Promise<ArtifactDetail> {
+  const res = await fetch(`${DAEMON_URL}/api/v1/artifacts/${id}`, { headers: authHeaders() });
+  return jsonOrThrow<ArtifactDetail>(res);
+}
+
+export interface UnitSummary {
+  id: string;
+  kind: string;
+  statement: string;
+  confidence: number;
+  status: string;
+  subject_entity_id: string | null;
+  valid_from: string | null;
+}
+
+/** Units extracted from one file, or about one entity. */
+export async function listUnits(filter: {
+  artifactId?: string;
+  subjectEntityId?: string;
+  limit?: number;
+}): Promise<UnitSummary[]> {
+  const params = new URLSearchParams({ limit: String(filter.limit ?? 200) });
+  if (filter.artifactId) params.set("artifact_id", filter.artifactId);
+  if (filter.subjectEntityId) params.set("subject_entity_id", filter.subjectEntityId);
+  const res = await fetch(`${DAEMON_URL}/api/v1/atomic-units?${params}`, {
+    headers: authHeaders(),
+  });
+  const body = await jsonOrThrow<{ items: UnitSummary[] }>(res);
+  return body.items;
+}
+
+export interface Passage {
+  seq: number;
+  heading: string | null;
+  page: number | null;
+  role: string | null;
+  text: string;
+}
+
+export interface ArtifactContent {
+  source: "document" | "conversation" | "image" | "none";
+  items: Passage[];
+  total: number;
+}
+
+export async function getArtifactContent(
+  id: string,
+  limit = 20,
+  offset = 0,
+): Promise<ArtifactContent> {
+  const res = await fetch(
+    `${DAEMON_URL}/api/v1/artifacts/${id}/content?limit=${limit}&offset=${offset}`,
+    { headers: authHeaders() },
+  );
+  return jsonOrThrow<ArtifactContent>(res);
+}
+
+export type SearchScope = "document_segments" | "atomic_units" | "messages";
+
+export interface SearchHit {
+  id: string;
+  scope: SearchScope;
+  content: string;
+  score: number;
+  artifact_id: string | null;
+}
+
+export async function search(text: string, scope: SearchScope, limit = 20): Promise<SearchHit[]> {
+  const res = await fetch(`${DAEMON_URL}/api/v1/search/semantic`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ text, scope, limit }),
+  });
+  const body = await jsonOrThrow<{ hits: SearchHit[] }>(res);
+  return body.hits;
+}
+
+// --- Graph: how entities and files connect --------------------------------
+
+export interface GraphOverview {
+  entities: { id: string; name: string; kind: string; weight: number }[];
+  files: { id: string; name: string; kind: string; mentions: number }[];
+  relations: {
+    source: string;
+    target: string;
+    relation_type: string;
+    count: number;
+    confidence: number;
+  }[];
+  mentions: { file_id: string; entity_id: string; count: number }[];
+  entity_total: number;
+  truncated: boolean;
+}
+
+export async function getGraphOverview(
+  maxEntities = 150,
+  maxFiles = 100,
+): Promise<GraphOverview> {
+  const res = await fetch(
+    `${DAEMON_URL}/api/v1/graph?max_entities=${maxEntities}&max_files=${maxFiles}`,
+    { headers: authHeaders() },
+  );
+  return jsonOrThrow<GraphOverview>(res);
+}

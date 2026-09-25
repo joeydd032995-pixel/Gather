@@ -9,6 +9,8 @@ import {
 import Clusters from "./Clusters";
 import Contradictions from "./Contradictions";
 import Entities from "./Entities";
+import Graph from "./Graph";
+import Library from "./Library";
 import Photos from "./Photos";
 import { useRuntime } from "./hooks/useRuntime";
 import { checkForUpdate, getApiToken, getUpdateSettings, isTauri } from "./native";
@@ -18,6 +20,8 @@ import Tuning from "./Tuning";
 
 type Tab =
   | "upload"
+  | "library"
+  | "graph"
   | "review"
   | "clusters"
   | "photos"
@@ -28,6 +32,8 @@ type Tab =
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "upload", label: "Upload" },
+  { id: "library", label: "Library" },
+  { id: "graph", label: "Graph" },
   { id: "review", label: "Review" },
   { id: "clusters", label: "Groups" },
   { id: "photos", label: "Photos" },
@@ -76,6 +82,8 @@ export default function App() {
   const runtime = useRuntime();
   const settled = runtime.state === "ready" || runtime.state === "unmanaged";
   const [tab, setTab] = useState<Tab>("upload");
+  /** A file the Library should open, e.g. picked in the graph. */
+  const [libraryFocus, setLibraryFocus] = useState<string | null>(null);
   const [updateVersion, setUpdateVersion] = useState<string | null>(null);
   const [health, setHealth] = useState<HealthState>({ reachable: false, ready: false });
   const [dragging, setDragging] = useState(false);
@@ -202,7 +210,7 @@ export default function App() {
   }
 
   return (
-    <main className="app">
+    <main className={tab === "library" || tab === "graph" ? "app wide" : "app"}>
       <header>
         <h1>Gather</h1>
         <span
@@ -233,6 +241,17 @@ export default function App() {
           </button>
         ))}
       </nav>
+
+      {tab === "library" && <Library focusId={libraryFocus} />}
+
+      {tab === "graph" && (
+        <Graph
+          onOpenFile={(id) => {
+            setLibraryFocus(id);
+            setTab("library");
+          }}
+        />
+      )}
 
       {tab === "review" && <ReviewTray />}
 
@@ -285,6 +304,13 @@ export default function App() {
       )}
 
       {tab === "upload" && results.length > 0 && (
+        <p className="hint">
+          Gather reads each file in the background. Click a file name to see what it found, or
+          open the Library tab.
+        </p>
+      )}
+
+      {tab === "upload" && results.length > 0 && (
         <table className="results">
           <thead>
             <tr>
@@ -297,7 +323,22 @@ export default function App() {
           <tbody>
             {results.map((r, i) => (
               <tr key={`${r.artifact_id ?? r.filename}-${i}`}>
-                <td>{r.filename}</td>
+                <td>
+                  {r.artifact_id ? (
+                    <button
+                      className="link-button"
+                      title="See what Gather found in this file"
+                      onClick={() => {
+                        setLibraryFocus(r.artifact_id);
+                        setTab("library");
+                      }}
+                    >
+                      {r.filename}
+                    </button>
+                  ) : (
+                    r.filename
+                  )}
+                </td>
                 <td>{r.kind ?? "—"}</td>
                 <td className={`status-${r.status}`}>
                   {r.status}

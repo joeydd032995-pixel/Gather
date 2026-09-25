@@ -108,14 +108,49 @@ Per-request size is capped by `GATHER_MAX_UPLOAD_MB`; larger requests get `413 p
 Query: `kind` (`chat_export`, `agent_log`, `document_pdf`, `document_markdown`,
 `document_text`, `image_photo`, `image_screenshot`), `source_platform`, `limit`, `offset`.
 
+Each item also carries `unit_count` (live atomic units extracted from it) and `status`:
+`processing` while text extraction, OCR or unit extraction is still pending, `failed` when
+text extraction or OCR failed, else `done`.
+
 ### `GET /artifacts/{id}`
 
-One artifact with its conversations/messages, document segments or image metadata.
+One artifact with its conversations/messages, document segments or image metadata, plus
+`unit_count` and `status` as above.
+
+### `GET /artifacts/{id}/content`
+
+The artifact's readable text, in order: document segments, chat messages, or an image's OCR
+text. Query: `limit` (default 50, max 200), `offset`.
+
+```json
+{ "source": "document", "total": 12,
+  "items": [ { "seq": 0, "heading": "Notes", "page": null, "role": null, "text": "…" } ] }
+```
+
+`source` is `document`, `conversation`, `image` or `none`.
 
 ### `GET /atomic-units`
 
 Query: `kind` (`fact`, `claim`, `decision`, `preference`, `event`), `status` (`active`,
-`superseded`, `retracted`, `disputed`), `subject_entity_id`, `limit`, `offset`.
+`superseded`, `retracted`, `disputed`), `subject_entity_id`, `artifact_id` (units extracted
+from that artifact), `limit`, `offset`.
+
+### `GET /graph`
+
+The whole collection at a glance: the most connected entities, the relationships among them,
+and the files they were extracted from. Query: `max_entities` (default 150, max 1000),
+`max_files` (default 100, max 1000; `0` leaves files out).
+
+```json
+{ "entities": [ { "id": "…", "name": "Me", "kind": "person", "weight": 16 } ],
+  "files": [ { "id": "…", "name": "notes.md", "kind": "document_markdown", "mentions": 4 } ],
+  "relations": [ { "source": "…", "target": "…", "relation_type": "works_at", "count": 1, "confidence": 0.6 } ],
+  "mentions": [ { "file_id": "…", "entity_id": "…", "count": 2 } ],
+  "entity_total": 10, "truncated": false }
+```
+
+An entity's `weight` is its relationships plus the units about it; entities with neither are
+left out. `truncated` is true when more connected entities exist than were returned.
 
 ### `GET /entities/{id}/graph`
 
@@ -250,7 +285,7 @@ calls the same core function as its REST route:
 | Service | RPCs |
 |---|---|
 | `IngestService` | `IngestChatExport`, `IngestAgentLog`, `IngestFile` (client streaming) |
-| `QueryService` | `ListArtifacts`, `GetArtifact`, `ListAtomicUnits`, `GetEntityGraph`, `SemanticSearch` |
+| `QueryService` | `ListArtifacts`, `GetArtifact`, `GetArtifactContent`, `ListAtomicUnits`, `GetEntityGraph`, `GetGraphOverview`, `SemanticSearch` |
 | `ContradictionService` | `ListContradictions`, `GetContradiction`, `ResolveContradiction`, `AnnotateContradiction` |
 | `EntityService` | `ListEntities`, `ListMergeSuggestions`, `GetEntity`, `MergeEntities`, `UnmergeEntity`, `DismissMergeSuggestion`, `AddAlias` |
 | `ExportService` | `ExportBundle` (server streaming), `ImportBundle` (client streaming) |

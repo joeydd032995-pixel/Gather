@@ -7,6 +7,7 @@ configure. Everything runs on your machine; nothing is sent anywhere.
 - [Download](#download)
 - [System requirements](#system-requirements)
 - [First launch](#first-launch) (Windows, macOS, Linux)
+- [Using Gather](#using-gather)
 - [Checking your download](#checking-your-download)
 - [What runs, and where your data lives](#what-runs-and-where-your-data-lives)
 - [Updates](#updates)
@@ -98,6 +99,33 @@ see [CONFIGURATION.md](CONFIGURATION.md).
 
 The first start takes a little longer. Gather creates your private database (you'll see
 "Setting up your private database"), then starts. Later launches take a few seconds.
+
+## Using Gather
+
+1. **Upload** files on the Upload tab: PDFs, Markdown, text files, photos or screenshots.
+   Gather stores each one and reads it in the background.
+2. **Library** lists everything you've added. Pick a file to see what Gather found in it
+   (facts, decisions, preferences, events) and to read its text. The search box searches
+   all of it.
+3. **Graph** shows how things connect: people, places, tools and ideas as dots, joined when a
+   statement links them, and each file joined to what it mentions. Click a dot for details;
+   drag, scroll and "Find in graph" to explore.
+
+The other tabs fill in only when Gather has something for you to decide:
+
+| Tab | Shows | Checked about every |
+|---|---|---|
+| Review | Things Gather wasn't sure about and would like you to confirm | 10 minutes |
+| Contradictions | Two statements that disagree, e.g. two different amounts for the same bill | 10 minutes |
+| Entities | Two names that may be the same thing | 15 minutes |
+| Groups | Related items gathered into topics | 15 minutes |
+| Photos | Duplicate photos, and albums from photos taken close together | 10 minutes |
+
+On its own, Gather picks up clear statements such as "I prefer…", "We decided to use…",
+"I work at…", "Our rent is $1,200 per month" or "On 2026-03-01, …". Everything else in a file
+is still stored and searchable. A local AI chat model (Ollama, see
+[CONFIGURATION.md](CONFIGURATION.md)) makes it find far more, but needs more memory than a
+4 GB computer has to spare.
 
 ## Checking your download
 
