@@ -92,9 +92,10 @@ pub async fn run_one_pass(
 
 async fn prepare_pass(pool: &PgPool, config: &Config) -> anyhow::Result<usize> {
     let mut tx = pool.begin().await?;
-    let rows = sqlx::query(
-        "SELECT i.id, a.raw_content FROM images i \
-         JOIN artifacts a ON a.id = i.artifact_id \
+    // Claim the batch by id only; each photo's bytes are loaded as it is
+    // processed, so memory holds one photo at a time, not the whole batch.
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT i.id FROM images i \
          WHERE i.photo_prepared_at IS NULL \
          ORDER BY i.id LIMIT $1 FOR UPDATE OF i SKIP LOCKED",
     )
@@ -102,9 +103,14 @@ async fn prepare_pass(pool: &PgPool, config: &Config) -> anyhow::Result<usize> {
     .fetch_all(&mut *tx)
     .await?;
 
-    for row in &rows {
-        let id: Uuid = row.get("id");
-        let bytes: Option<Vec<u8>> = row.get("raw_content");
+    for &id in &ids {
+        let bytes: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT a.raw_content FROM images i JOIN artifacts a ON a.id = i.artifact_id \
+             WHERE i.id = $1",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
         // Decoding is CPU-bound; keep it off the async runtime. An artifact
         // stored only by path (no bytes) is stamped with no hash.
         let (phash, analysis) = match bytes {
@@ -138,7 +144,7 @@ async fn prepare_pass(pool: &PgPool, config: &Config) -> anyhow::Result<usize> {
         .await?;
     }
     tx.commit().await?;
-    Ok(rows.len())
+    Ok(ids.len())
 }
 
 // ---------------------------------------------------------------------------
@@ -450,6 +456,12 @@ async fn reconcile(pool: &PgPool, grouping: Grouping, groups: &[Group]) -> anyho
 // ---------------------------------------------------------------------------
 // 3. Captions + visual topics (opt-in)
 
+/// Longest side of the copy sent to the vision model. Local vision models work
+/// at a few hundred px (moondream ~378, llava 336/672), so more only costs
+/// memory and time.
+const CAPTION_MAX_SIDE: u32 = 768;
+const CAPTION_QUALITY: u8 = 85;
+
 async fn caption_pass(
     pool: &PgPool,
     config: &Config,
@@ -457,8 +469,9 @@ async fn caption_pass(
     stats: &mut PhotoStats,
 ) -> anyhow::Result<()> {
     // Only decodable photos (hashed) are sent to the vision model.
+    // Bytes are loaded per photo below, never for the whole batch at once.
     let rows = sqlx::query(
-        "SELECT i.id, i.caption, a.raw_content FROM images i \
+        "SELECT i.id, i.caption FROM images i \
          JOIN artifacts a ON a.id = i.artifact_id \
          WHERE i.captioned_at IS NULL AND i.phash IS NOT NULL AND a.raw_content IS NOT NULL \
          ORDER BY i.id LIMIT $1",
@@ -478,7 +491,20 @@ async fn caption_pass(
         let (caption, generated) = match existing {
             Some(caption) => (caption, false),
             None => {
-                let bytes: Vec<u8> = row.get("raw_content");
+                let bytes: Vec<u8> = sqlx::query_scalar(
+                    "SELECT a.raw_content FROM images i JOIN artifacts a ON a.id = i.artifact_id \
+                     WHERE i.id = $1",
+                )
+                .bind(id)
+                .fetch_one(pool)
+                .await?;
+                // The vision model only needs a modest resolution; sending a
+                // downscaled copy keeps both processes' memory small.
+                let bytes = tokio::task::spawn_blocking(move || {
+                    crate::photo::decode::render_jpeg(&bytes, CAPTION_MAX_SIDE, CAPTION_QUALITY)
+                        .unwrap_or(bytes)
+                })
+                .await?;
                 match client.caption(&bytes).await {
                     Ok(caption) => (caption, true),
                     Err(CaptionError::Rejected(e)) => {

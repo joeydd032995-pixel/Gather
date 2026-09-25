@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{ConnectOptions, PgPool};
+use sqlx::{ConnectOptions, Connection, PgPool};
 
 /// Connect to Postgres with the default pool size (8). Used by tests and any
 /// caller that doesn't tune the pool.
@@ -25,6 +25,16 @@ pub async fn connect_with_max(database_url: &str, max_connections: u32) -> anyho
             .max_connections(max_connections.max(1))
             .min_connections(1)
             .acquire_timeout(Duration::from_secs(10))
+            // A connection's I/O buffers grow to fit the largest message it
+            // has carried (an uploaded file, a photo) and never shrink on
+            // their own, so every pooled connection would keep that much
+            // memory for good. Shrink them each time a connection returns.
+            .after_release(|conn, _| {
+                Box::pin(async move {
+                    conn.shrink_buffers();
+                    Ok(true)
+                })
+            })
             .connect_with(options.clone())
             .await
         {

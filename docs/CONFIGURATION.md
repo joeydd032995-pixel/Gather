@@ -38,7 +38,7 @@ These are read by `docker-compose.yml`, not by the daemon itself.
 | `GATHER_BIND_ADDR` | `127.0.0.1:7601` | REST listen address. A non-loopback address is refused unless `GATHER_ALLOW_NON_LOOPBACK=true` |
 | `GATHER_ALLOW_NON_LOOPBACK` | `false` | Explicit opt-out of the loopback-only policy (for both listeners and the Ollama URL). Containers set this; desktops should not |
 | `GATHER_DB_MAX_CONNECTIONS` | `8` | Shared Postgres pool size. **Validated**, ≥ 1 |
-| `GATHER_MAX_UPLOAD_MB` | `256` | Maximum request body size |
+| `GATHER_MAX_UPLOAD_MB` | `256` | Maximum request body size. A request that declares a larger size is refused with `413` before any of it is read. Storing a file briefly costs the daemon about 3.5× its size (the upload, plus the database driver's encoded copy of it), so keep this low on small-memory machines |
 | `GATHER_RATE_LIMIT_RPS` | `50` | Global requests/second shared by REST and gRPC; `0` disables. **Validated** |
 | `RUST_LOG` | `info,sqlx=warn,tower_http=info` | Log filter (tracing `EnvFilter` syntax) |
 | `GATHER_LOG_JSON` | `false` | Emit JSON logs |

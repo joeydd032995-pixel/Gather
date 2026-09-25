@@ -7,8 +7,9 @@
 //!   3. everything downstream (extraction, graph, contradiction scan) reads
 //!      from those normalized tables and never re-parses platform formats.
 
+use axum::extract::multipart::Field;
 use axum::extract::{Multipart, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -19,7 +20,7 @@ use uuid::Uuid;
 
 use crate::adapters::{self, NormalizedConversation};
 use crate::error::ApiError;
-use crate::extract::segment::segment_text;
+use crate::extract::segment::{Segment, Segments};
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
@@ -441,27 +442,37 @@ pub struct FilesResponse {
 ///     `image_screenshot`) to override detection.
 pub async fn ingest_files(
     State(state): State<AppState>,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<FilesResponse>), ApiError> {
+    // Refuse an oversized upload from its declared length, before reading any
+    // of it: the body limit alone only trips once the bytes are in memory.
+    let max_bytes = state.config.max_upload_mb * 1024 * 1024;
+    let declared_len = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok());
+    if declared_len.is_some_and(|len| len > max_bytes) {
+        return Err(too_large(max_bytes));
+    }
     let job_id = create_job(&state.pool, "rest").await?;
     let mut results: Vec<FileResult> = Vec::new();
     let mut all_ok = true;
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| ApiError::BadRequest(format!("malformed multipart body: {e}")))?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            too_large(max_bytes)
+        } else {
+            ApiError::BadRequest(format!("malformed multipart body: {e}"))
+        }
+    })? {
         let part_name = field.name().unwrap_or("file").to_string();
         let filename = field
             .file_name()
             .map(String::from)
             .unwrap_or_else(|| "unnamed".to_string());
         let declared_type = field.content_type().map(String::from);
-        let bytes = field
-            .bytes()
-            .await
-            .map_err(|e| ApiError::BadRequest(format!("failed reading part '{part_name}': {e}")))?;
+        let bytes = read_part(field, &part_name, max_bytes, declared_len).await?;
 
         match ingest_one_file(&state, job_id, &part_name, &filename, declared_type, &bytes).await {
             Ok(result) => {
@@ -566,6 +577,43 @@ fn classify(
     Ok(kind.to_string())
 }
 
+fn too_large(max_bytes: usize) -> ApiError {
+    ApiError::PayloadTooLarge(format!(
+        "upload exceeds the {} MB limit (GATHER_MAX_UPLOAD_MB); send large batches one file per request",
+        max_bytes / (1024 * 1024)
+    ))
+}
+
+/// Read one multipart part into memory, at most `max_bytes`. The buffer is
+/// sized from the request's declared length when there is one, so a large
+/// file is held once rather than through a series of growing reallocations.
+async fn read_part(
+    mut field: Field<'_>,
+    part_name: &str,
+    max_bytes: usize,
+    declared_len: Option<usize>,
+) -> Result<Vec<u8>, ApiError> {
+    let mut bytes = Vec::with_capacity(declared_len.unwrap_or(0).min(max_bytes));
+    while let Some(chunk) = field.chunk().await.map_err(|e| {
+        // The request-wide body limit surfaces here as a read error.
+        if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            too_large(max_bytes)
+        } else {
+            ApiError::BadRequest(format!("failed reading part '{part_name}': {e}"))
+        }
+    })? {
+        if bytes.len() + chunk.len() > max_bytes {
+            return Err(too_large(max_bytes));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+/// Segments inserted per statement: large documents are written in batches
+/// instead of one round trip per segment.
+const SEGMENT_BATCH: usize = 256;
+
 pub(crate) async fn ingest_one_file(
     state: &AppState,
     job_id: Uuid,
@@ -606,7 +654,9 @@ pub(crate) async fn ingest_one_file(
             // Markdown / plain text: extraction is pure UTF-8 decoding, so it
             // completes synchronously at ingest time, including segmentation.
             "document_markdown" | "document_text" => {
-                let text = String::from_utf8_lossy(bytes).into_owned();
+                // Borrowed when the file is valid UTF-8 (the usual case), so
+                // the text isn't a second copy of the upload.
+                let text = String::from_utf8_lossy(bytes);
                 let (document_id,): (Uuid,) = sqlx::query_as(
                     r#"
                     INSERT INTO documents
@@ -617,26 +667,42 @@ pub(crate) async fn ingest_one_file(
                     "#,
                 )
                 .bind(stored.id)
-                .bind(&text)
+                .bind(text.as_ref())
                 .fetch_one(&mut *tx)
                 .await?;
 
-                for (seq, seg) in segment_text(&text).into_iter().enumerate() {
+                let mut pending = Segments::new(&text);
+                loop {
+                    let batch: Vec<Segment> = pending.by_ref().take(SEGMENT_BATCH).collect();
+                    if batch.is_empty() {
+                        break;
+                    }
+                    let seqs: Vec<i32> = (segments..segments + batch.len())
+                        .map(|seq| seq as i32)
+                        .collect();
+                    let hashes: Vec<String> = batch
+                        .iter()
+                        .map(|seg| sha256_hex(seg.content.as_bytes()))
+                        .collect();
+                    let (headings, contents): (Vec<Option<String>>, Vec<String>) = batch
+                        .into_iter()
+                        .map(|seg| (seg.heading, seg.content))
+                        .unzip();
                     sqlx::query(
                         r#"
                         INSERT INTO document_segments
                             (document_id, seq, heading, content, content_hash)
-                        VALUES ($1, $2, $3, $4, $5)
+                        SELECT $1, * FROM UNNEST($2::int4[], $3::text[], $4::text[], $5::text[])
                         "#,
                     )
                     .bind(document_id)
-                    .bind(seq as i32)
-                    .bind(&seg.heading)
-                    .bind(&seg.content)
-                    .bind(sha256_hex(seg.content.as_bytes()))
+                    .bind(&seqs)
+                    .bind(&headings)
+                    .bind(&contents)
+                    .bind(&hashes)
                     .execute(&mut *tx)
                     .await?;
-                    segments += 1;
+                    segments += seqs.len();
                 }
                 metrics::counter!("gather_extraction_segments_total", "tool" => "utf8-passthrough")
                     .increment(segments as u64);

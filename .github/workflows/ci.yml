@@ -190,11 +190,52 @@ jobs:
       - name: run graph benchmark
         run: scripts/graph-benchmark.sh
 
+  # ------------------------------------------------------- memory budget ----
+  # Gather must run on 4 GB machines, so the daemon's memory may not grow with
+  # input size. Drives a 200-file batch, a 48 MB text file and 24 MP photos
+  # through the real daemon and fails if its peak PSS exceeds the budget
+  # (scripts/memory-budget.sh). It only adds rows, in its own database.
+  memory-budget:
+    name: memory budget (tier 1 — daemon peak under large inputs)
+    runs-on: ubuntu-24.04
+    needs: [lint]
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: gather
+          POSTGRES_USER: gather
+          POSTGRES_PASSWORD: gather-ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gather -d gather"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://gather:gather-ci@localhost:5432/gather
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon
+      - name: install postgresql-client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+      - name: build daemon (debug)
+        working-directory: daemon
+        run: cargo build --locked
+      - name: run memory budget
+        run: scripts/memory-budget.sh
+
   # -------------------------------------------------------- build daemon ----
   build-daemon:
     name: build daemon (linux x86_64)
     runs-on: ubuntu-24.04
-    needs: [lint, test, restore-drill, graph-benchmark]
+    needs: [lint, test, restore-drill, graph-benchmark, memory-budget]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -229,7 +270,7 @@ jobs:
   # release tags (v*): branch and PR builds never see them.
   build-desktop:
     name: build desktop (${{ matrix.platform }})
-    needs: [lint, test, restore-drill, graph-benchmark]
+    needs: [lint, test, restore-drill, graph-benchmark, memory-budget]
     # A cold build compiles PostgreSQL too (~20 min on Windows); anything far
     # beyond that is a hang, and should fail rather than hold a runner for 6 h.
     timeout-minutes: 90

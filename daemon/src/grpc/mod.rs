@@ -46,6 +46,7 @@ pub(crate) fn status_from(error: ApiError) -> tonic::Status {
         ApiError::NotFound(m) => tonic::Status::not_found(m.clone()),
         ApiError::Unauthorized => tonic::Status::unauthenticated("missing or invalid token"),
         ApiError::TooManyRequests => tonic::Status::resource_exhausted("rate limit exceeded"),
+        ApiError::PayloadTooLarge(m) => tonic::Status::resource_exhausted(m),
         ApiError::Db(e) => {
             tracing::error!(error = %e, "grpc database error");
             tonic::Status::internal("database error")

@@ -174,6 +174,123 @@ async fn multipart_upload_segments_markdown() {
     );
 }
 
+fn multipart_body(boundary: &str, filename: &str, content_type: &str, content: &str) -> String {
+    format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n{content}\r\n--{boundary}--\r\n"
+    )
+}
+
+#[tokio::test]
+async fn large_text_upload_stores_every_segment_in_order() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let pool = state.pool.clone();
+    let app = routes::build_router(state);
+
+    // Well over one insert batch (256) of segments, from both headings and
+    // an oversized paragraph that has to be split.
+    let unique = uuid::Uuid::new_v4();
+    let mut text = format!("preamble {unique}\n");
+    for i in 0..600 {
+        text.push_str(&format!("# Section {i}\nbody {i} {unique}\n"));
+    }
+    text.push_str("# Long\n");
+    text.push_str(&"sentence without a paragraph break ".repeat(400));
+    let expected = gather_daemon::extract::segment::segment_text(&text);
+    assert!(expected.len() > 600);
+
+    let boundary = "gatherboundary";
+    let res = app
+        .oneshot(
+            Request::post("/api/v1/ingest/files")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(multipart_body(
+                    boundary,
+                    "big.txt",
+                    "text/plain",
+                    &text,
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::ACCEPTED);
+    let out = body_json(res).await;
+    let file = &out["files"][0];
+    assert_eq!(file["segments"], json!(expected.len()));
+    let artifact_id: uuid::Uuid = file["artifact_id"].as_str().unwrap().parse().unwrap();
+
+    let stored: Vec<(i32, Option<String>, String)> = sqlx::query_as(
+        "SELECT s.seq, s.heading, s.content FROM document_segments s \
+         JOIN documents d ON d.id = s.document_id WHERE d.artifact_id = $1 ORDER BY s.seq",
+    )
+    .bind(artifact_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored.len(), expected.len());
+    for (i, ((seq, heading, content), want)) in stored.iter().zip(&expected).enumerate() {
+        assert_eq!(*seq, i as i32);
+        assert_eq!(heading, &want.heading);
+        assert_eq!(content, &want.content);
+    }
+}
+
+#[tokio::test]
+async fn oversized_uploads_are_refused_with_413() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let limit = state.config.max_upload_mb * 1024 * 1024;
+    let app = routes::build_router(state);
+    let boundary = "gatherboundary";
+    let content_type = format!("multipart/form-data; boundary={boundary}");
+
+    // Declared too large: refused from the header, before any body is read
+    // (the body here is tiny, so only the declared length can trip it).
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/ingest/files")
+                .header(header::CONTENT_TYPE, &content_type)
+                .header(header::CONTENT_LENGTH, (limit + 1).to_string())
+                .body(Body::from(multipart_body(
+                    boundary,
+                    "a.txt",
+                    "text/plain",
+                    "hi",
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    // No declared length: the cap trips while reading, still as 413.
+    let big = "x".repeat(limit + 1);
+    let res = app
+        .oneshot(
+            Request::post("/api/v1/ingest/files")
+                .header(header::CONTENT_TYPE, &content_type)
+                .body(Body::from(multipart_body(
+                    boundary,
+                    "big.txt",
+                    "text/plain",
+                    &big,
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let out = body_json(res).await;
+    assert_eq!(out["error"]["code"], json!("payload_too_large"));
+}
+
 #[tokio::test]
 async fn export_bundle_has_manifest() {
     let Some(state) = test_state().await else {

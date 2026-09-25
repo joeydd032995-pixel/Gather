@@ -6,9 +6,8 @@
 //! bits, so near-duplicates sit within a small Hamming distance.
 
 use std::collections::HashMap;
-use std::io::Cursor;
 
-use image::{imageops, GrayImage, ImageReader, Limits};
+use image::{imageops, GrayImage};
 
 use crate::cluster::UnionFind;
 
@@ -16,24 +15,15 @@ use crate::cluster::UnionFind;
 const SIZE: usize = 32;
 /// Side of the low-frequency block the hash bits come from.
 const LOW: usize = 8;
-/// Refuse to decode images larger than this on either side.
-const MAX_DIMENSION: u32 = 20_000;
-/// Decoder allocation ceiling (bytes).
-const MAX_ALLOC: u64 = 512 * 1024 * 1024;
+/// Hashing decodes at reduced scale: the 32×32 DCT input only needs a few
+/// hundred source pixels per side (see `decode::decode_at_least`).
+const DECODE_MIN_SIDE: u32 = 512;
 
 /// Decode `bytes` (JPEG/PNG/WebP/TIFF/GIF/BMP) and hash it. `None` for
 /// undecodable or oversized input (e.g. HEIC, which has no pure-Rust decoder):
 /// such photos are simply left out of duplicate grouping.
 pub fn compute_phash(bytes: &[u8]) -> Option<u64> {
-    let mut reader = ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?;
-    let mut limits = Limits::default();
-    limits.max_image_width = Some(MAX_DIMENSION);
-    limits.max_image_height = Some(MAX_DIMENSION);
-    limits.max_alloc = Some(MAX_ALLOC);
-    reader.limits(limits);
-    let img = reader.decode().ok()?;
+    let img = super::decode::decode_at_least(bytes, DECODE_MIN_SIDE)?;
     Some(phash_luma(&img.to_luma8()))
 }
 

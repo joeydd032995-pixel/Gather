@@ -3,13 +3,9 @@
 //! this module adds the one thing a UI needs beyond that: small thumbnails,
 //! rendered locally on demand.
 
-use std::io::Cursor;
-
 use axum::extract::{Path, State};
 use axum::http::header;
 use axum::response::IntoResponse;
-use image::codecs::jpeg::JpegEncoder;
-use image::{ImageReader, Limits};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -19,29 +15,9 @@ use crate::AppState;
 /// Longest side of a thumbnail, px.
 const THUMBNAIL_SIZE: u32 = 256;
 const THUMBNAIL_QUALITY: u8 = 80;
-/// Same decode ceilings as hashing: refuse pathological inputs.
-const MAX_DIMENSION: u32 = 20_000;
-const MAX_ALLOC: u64 = 512 * 1024 * 1024;
 
 fn render_thumbnail(bytes: &[u8]) -> Option<Vec<u8>> {
-    let mut reader = ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?;
-    let mut limits = Limits::default();
-    limits.max_image_width = Some(MAX_DIMENSION);
-    limits.max_image_height = Some(MAX_DIMENSION);
-    limits.max_alloc = Some(MAX_ALLOC);
-    reader.limits(limits);
-    let thumb = reader
-        .decode()
-        .ok()?
-        .thumbnail(THUMBNAIL_SIZE, THUMBNAIL_SIZE)
-        .to_rgb8();
-    let mut out = Vec::new();
-    JpegEncoder::new_with_quality(&mut out, THUMBNAIL_QUALITY)
-        .encode_image(&thumb)
-        .ok()?;
-    Some(out)
+    crate::photo::decode::render_jpeg(bytes, THUMBNAIL_SIZE, THUMBNAIL_QUALITY)
 }
 
 /// A JPEG thumbnail, at most 256 px on its long side. `UnsupportedMedia` when

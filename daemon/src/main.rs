@@ -32,8 +32,34 @@ fn print_api_token() -> anyhow::Result<()> {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// glibc raises its mmap threshold (up to 32 MB) after large blocks are freed,
+/// after which big buffers — an uploaded file, a photo — come from the heap
+/// and are kept after being freed. Pinning the threshold keeps every
+/// allocation over 1 MB mmap-backed, so it goes back to the OS when freed and
+/// the daemon's memory falls back after a large file (Gather targets 4 GB
+/// machines). Windows' and macOS' allocators already behave this way.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn bound_heap_retention() {
+    const THRESHOLD: libc::c_int = 1 << 20;
+    // SAFETY: mallopt only adjusts allocator parameters; called once at
+    // startup, before any other threads exist.
+    unsafe {
+        libc::mallopt(libc::M_MMAP_THRESHOLD, THRESHOLD);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn bound_heap_retention() {}
+
+fn main() -> anyhow::Result<()> {
+    bound_heap_retention();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> anyhow::Result<()> {
     if std::env::args().nth(1).as_deref() == Some("print-api-token") {
         return print_api_token();
     }
