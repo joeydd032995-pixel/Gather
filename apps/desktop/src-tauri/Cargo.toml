@@ -1,6 +1,6 @@
 [package]
 name = "gather-desktop"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Gather desktop UI (Tauri v2)"
 license = "MIT"
@@ -17,6 +17,7 @@ tauri-plugin-updater = "2"
 getrandom = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+dunce = "1"
 keyring = { version = "3", features = ["sync-secret-service", "vendored", "apple-native", "windows-native"] }
 
 [lib]

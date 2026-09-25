@@ -137,10 +137,16 @@ fn runtime_paths(app: &AppHandle) -> Result<Paths, String> {
         .parent()
         .map(PathBuf::from)
         .ok_or("locating the app directory")?;
+    // On Windows these can come back as verbatim `\\?\C:\...` paths.
+    // PostgreSQL's tools locate each other from their own path and pass it
+    // through cmd.exe, which can't run a verbatim path, so initdb fails with
+    // "program postgres is needed by initdb but was not found". Plain paths
+    // work everywhere; `simplified` leaves them unchanged elsewhere.
+    let plain = |p: PathBuf| dunce::simplified(&p).to_path_buf();
     Ok(Paths {
-        postgres: resources.join("postgres"),
-        daemon: exe_dir.join(format!("gather-daemon{}", std::env::consts::EXE_SUFFIX)),
-        data,
+        postgres: plain(resources.join("postgres")),
+        daemon: plain(exe_dir.join(format!("gather-daemon{}", std::env::consts::EXE_SUFFIX))),
+        data: plain(data),
     })
 }
 
