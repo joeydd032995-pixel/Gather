@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Check, ChevronRight, CircleCheck, History, Info, Unlink } from "lucide-react";
+import { Check, CircleCheck, Combine, History, Info, Unlink } from "lucide-react";
 import {
   dismissMergeSuggestion,
   getEntity,
@@ -9,7 +9,7 @@ import {
   type EntityRef,
   type MergeSuggestion,
 } from "./api";
-import { plural } from "./kinds";
+import { useListKeys } from "./hooks/useListKeys";
 import {
   Badge,
   Button,
@@ -17,8 +17,9 @@ import {
   EmptyState,
   KindTag,
   Meter,
-  PageHeader,
   Skeleton,
+  SplitView,
+  Toolbar,
   When,
   errorText,
 } from "./ui";
@@ -28,12 +29,26 @@ const METHOD_LABELS: Record<string, string> = {
   "embedding:cosine": "Similar meaning",
 };
 
+const keyOf = (s: MergeSuggestion) => `${s.a.id}:${s.b.id}`;
+
+function initials(name: string): string {
+  return (
+    name
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((w) => w[0]!.toUpperCase())
+      .join("") || "?"
+  );
+}
+
 /** Aliases + merge history for one side of a suggested pair. */
 function EntityFacts({ id }: { id: string }) {
   const [detail, setDetail] = useState<EntityDetail | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    setDetail(null);
     getEntity(id)
       .then((d) => {
         if (!cancelled) setDetail(d);
@@ -63,8 +78,7 @@ function EntityFacts({ id }: { id: string }) {
         // casually reversible — so surface them rather than just fetch them.
         <details className="history">
           <summary>
-            <History aria-hidden /> Merge history{" "}
-            <span className="count num">{detail.audit.length}</span>
+            <History aria-hidden /> Merge history <span className="num">{detail.audit.length}</span>
           </summary>
           <ol className="timeline">
             {detail.audit.map((a, i) => (
@@ -96,6 +110,7 @@ function Detail({ suggestion, onDone }: { suggestion: MergeSuggestion; onDone: (
       onDone();
     } catch (e) {
       setError(errorText(e));
+    } finally {
       setBusy(null);
     }
   };
@@ -104,7 +119,15 @@ function Detail({ suggestion, onDone }: { suggestion: MergeSuggestion; onDone: (
     run(winner.id, () => mergeEntities(winner.id, loser.id, note.trim() || undefined));
 
   return (
-    <div className="item-body">
+    <div className="inspector" key={keyOf(suggestion)}>
+      <div className="inspector-kicker">
+        <Badge tone="info" icon={Combine}>
+          {METHOD_LABELS[suggestion.method] ?? suggestion.method}
+        </Badge>
+        <Meter value={suggestion.score} label="Similarity" width={64} />
+      </div>
+      <h2 className="inspector-title">Are these the same {suggestion.a.kind}?</h2>
+
       <div className="versus">
         {[suggestion.a, suggestion.b].map((side, i) => {
           const other = i === 0 ? suggestion.b : suggestion.a;
@@ -114,18 +137,20 @@ function Detail({ suggestion, onDone }: { suggestion: MergeSuggestion; onDone: (
               key={side.id}
               aria-label={`Entity ${i === 0 ? "A" : "B"}`}
             >
-              <div className="versus-head">
-                <span className="versus-letter" aria-hidden>
-                  {i === 0 ? "A" : "B"}
+              <div className="entity-head">
+                <span className="monogram" data-kind={side.kind} aria-hidden>
+                  {initials(side.name)}
                 </span>
-                <KindTag kind={side.kind} />
+                <div className="min0">
+                  <p className="versus-statement">{side.name}</p>
+                  <KindTag kind={side.kind} />
+                </div>
               </div>
-              <p className="versus-statement">{side.name}</p>
               <EntityFacts id={side.id} />
               <Button
                 variant="secondary"
-                size="sm"
                 icon={Check}
+                className="versus-keep"
                 loading={busy === side.id}
                 disabled={busy !== null}
                 onClick={() => merge(side, other)}
@@ -143,9 +168,11 @@ function Detail({ suggestion, onDone }: { suggestion: MergeSuggestion; onDone: (
         connections and sources move across, and the old name keeps resolving to the one you kept.
       </Callout>
 
-      <div className="resolve-bar">
+      {error && <Callout>{error}</Callout>}
+
+      <div className="inspector-actions">
         <input
-          className="input"
+          className="input note-input"
           type="text"
           aria-label="Note (optional)"
           placeholder="Add a note (optional)…"
@@ -153,32 +180,28 @@ function Detail({ suggestion, onDone }: { suggestion: MergeSuggestion; onDone: (
           onChange={(e) => setNote(e.target.value)}
           disabled={busy !== null}
         />
-        <div className="item-actions">
-          <Button
-            variant="ghost"
-            size="sm"
-            icon={Unlink}
-            loading={busy === "dismiss"}
-            disabled={busy !== null}
-            onClick={() =>
-              run("dismiss", () =>
-                dismissMergeSuggestion(suggestion.a.id, suggestion.b.id, note.trim() || undefined),
-              )
-            }
-          >
-            Not duplicates
-          </Button>
-        </div>
+        <span className="spacer" />
+        <Button
+          variant="secondary"
+          icon={Unlink}
+          loading={busy === "dismiss"}
+          disabled={busy !== null}
+          onClick={() =>
+            run("dismiss", () =>
+              dismissMergeSuggestion(suggestion.a.id, suggestion.b.id, note.trim() || undefined),
+            )
+          }
+        >
+          Not duplicates
+        </Button>
       </div>
-
-      {error && <Callout>{error}</Callout>}
     </div>
   );
 }
 
 export default function Entities() {
   const [items, setItems] = useState<MergeSuggestion[] | null>(null);
-  const [expanded, setExpanded] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
@@ -196,69 +219,84 @@ export default function Entities() {
     return () => clearInterval(timer);
   }, [refresh]);
 
+  useEffect(() => {
+    if (!items || items.length === 0) return;
+    if (!selected || !items.some((s) => keyOf(s) === selected)) setSelected(keyOf(items[0]));
+  }, [items, selected]);
+
+  const listRef = useListKeys(items ?? [], selected, keyOf, setSelected);
+  const current = items?.find((s) => keyOf(s) === selected);
+
   return (
-    <section>
-      <PageHeader
+    <>
+      <Toolbar
         title="Entities"
-        description="Pairs that might be the same person, place or thing under different names. Clear matches merge on their own; these are the close calls."
-        eyebrow={items && items.length > 0 ? plural(items.length, "suggestion") : undefined}
+        icon={Combine}
+        count={items && items.length > 0 ? items.length : undefined}
       />
-      {error && <Callout title="Couldn't load suggestions">{error}</Callout>}
-      {items === null && !error ? (
-        <Skeleton rows={3} variant="card" />
-      ) : items && items.length === 0 && !error ? (
+      {error && (
+        <div className="view-callout">
+          <Callout title="Couldn't load suggestions">{error}</Callout>
+        </div>
+      )}
+      {items !== null && items.length === 0 && !error ? (
         <EmptyState icon={CircleCheck} tone="success" title="No duplicates to check">
-          Your knowledge graph looks deduplicated. New suggestions appear here as you add more.
+          Your knowledge graph looks deduplicated. Clear matches merge on their own; close calls
+          appear here.
         </EmptyState>
       ) : (
-        <ul className="stack">
-          {(items ?? []).map((s, i) => {
-            const key = `${s.a.id}:${s.b.id}`;
-            const open = expanded === key;
-            return (
-              <li
-                key={key}
-                className={open ? "item open" : "item"}
-                style={{ animationDelay: `${Math.min(i, 8) * 30}ms` }}
-              >
-                <button
-                  type="button"
-                  className="item-row"
-                  aria-expanded={open}
-                  onClick={() => setExpanded(open ? null : key)}
-                >
-                  <div className="item-main">
-                    <div className="pair-names">
-                      <span className="item-title">{s.a.name}</span>
-                      <span className="pair-sep" aria-label="and">
-                        ≈
+        <SplitView
+          listLabel="Possible duplicates"
+          listHeader={
+            <p className="hint list-note">Close calls only. Clear matches merge on their own.</p>
+          }
+          list={
+            items === null ? (
+              <Skeleton rows={4} />
+            ) : (
+              <ul className="rows" ref={listRef}>
+                {items.map((s) => (
+                  <li key={keyOf(s)}>
+                    <button
+                      type="button"
+                      className="row"
+                      aria-current={keyOf(s) === selected ? "true" : undefined}
+                      onClick={() => setSelected(keyOf(s))}
+                    >
+                      <span className="monogram monogram-sm" data-kind={s.a.kind} aria-hidden>
+                        {initials(s.a.name)}
                       </span>
-                      <span className="item-title">{s.b.name}</span>
-                    </div>
-                    <div className="item-sub">
-                      <KindTag kind={s.a.kind} />
-                      <span>{METHOD_LABELS[s.method] ?? s.method}</span>
-                    </div>
-                  </div>
-                  <div className="item-aside">
-                    <Meter value={s.score} label="Similarity" />
-                    <ChevronRight className="chevron" aria-hidden />
-                  </div>
-                </button>
-                {open && (
-                  <Detail
-                    suggestion={s}
-                    onDone={() => {
-                      setExpanded(null);
-                      refresh();
-                    }}
-                  />
-                )}
-              </li>
-            );
-          })}
-        </ul>
+                      <span className="row-main">
+                        <span className="row-title">
+                          {s.a.name} <span className="approx">≈</span> {s.b.name}
+                        </span>
+                        <span className="row-meta">
+                          <span className="cap">{s.a.kind}</span>
+                          <span className="dot-sep">{METHOD_LABELS[s.method] ?? s.method}</span>
+                        </span>
+                      </span>
+                      <span className="row-trail">
+                        <span className="num row-score">{s.score.toFixed(2)}</span>
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )
+          }
+          detail={
+            current ? (
+              <Detail
+                suggestion={current}
+                onDone={() => {
+                  setSelected(null);
+                  refresh();
+                }}
+              />
+            ) : null
+          }
+        />
       )}
-    </section>
+    </>
   );
 }

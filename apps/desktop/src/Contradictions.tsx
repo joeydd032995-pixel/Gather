@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   Check,
-  ChevronRight,
   CircleCheck,
+  GitCompareArrows,
   History,
   MessageSquarePlus,
   Quote,
@@ -18,15 +18,17 @@ import {
   type Provenance,
   type Resolution,
 } from "./api";
-import { kindLabel, plural } from "./kinds";
+import { useListKeys } from "./hooks/useListKeys";
+import { kindLabel } from "./kinds";
 import {
   Badge,
   Button,
   Callout,
   EmptyState,
   Meter,
-  PageHeader,
   Skeleton,
+  SplitView,
+  Toolbar,
   When,
   errorText,
 } from "./ui";
@@ -79,7 +81,11 @@ function Detail({ id, onResolved }: { id: string; onResolved: (label: string) =>
       .then(setDetail)
       .catch((e) => setError(errorText(e)));
   }, [id]);
-  useEffect(reload, [reload]);
+  useEffect(() => {
+    setDetail(null);
+    setNote("");
+    reload();
+  }, [reload]);
 
   const act = async (resolution: Resolution, label: string) => {
     setBusy(resolution);
@@ -89,6 +95,7 @@ function Detail({ id, onResolved }: { id: string; onResolved: (label: string) =>
       onResolved(label);
     } catch (e) {
       setError(errorText(e));
+    } finally {
       setBusy(null);
     }
   };
@@ -110,17 +117,33 @@ function Detail({ id, onResolved }: { id: string; onResolved: (label: string) =>
 
   if (!detail) {
     return (
-      <div className="item-body">{error ? <Callout>{error}</Callout> : <Skeleton rows={2} />}</div>
+      <div className="inspector">{error ? <Callout>{error}</Callout> : <Skeleton rows={4} />}</div>
     );
   }
 
   return (
-    <div className="item-body">
-      {detail.explanation && <p className="explanation">{detail.explanation}</p>}
+    <div className="inspector" key={id}>
+      <div className="inspector-kicker">
+        <Badge tone={detail.score >= 0.75 ? "danger" : "warning"} icon={GitCompareArrows}>
+          {methodLabel(detail.detection_method)}
+        </Badge>
+        <Meter
+          value={detail.score}
+          label="Conflict strength"
+          tone={detail.score >= 0.75 ? "danger" : "warning"}
+          width={64}
+        />
+        <span className="hint">
+          found <When iso={detail.detected_at} />
+        </span>
+      </div>
+      <h2 className="inspector-title">Which one holds?</h2>
+      {detail.explanation && <p className="explain">{detail.explanation}</p>}
 
       <div className="versus">
         {(["unit_a", "unit_b"] as const).map((side) => {
           const letter = side === "unit_a" ? "A" : "B";
+          const resolution: Resolution = side === "unit_a" ? "resolved_a" : "resolved_b";
           return (
             <section className="versus-side" key={side} aria-label={`Statement ${letter}`}>
               <div className="versus-head">
@@ -137,13 +160,11 @@ function Detail({ id, onResolved }: { id: string; onResolved: (label: string) =>
               <ProvenanceList items={detail[side].provenance} />
               <Button
                 variant="secondary"
-                size="sm"
                 icon={Check}
-                loading={busy === (side === "unit_a" ? "resolved_a" : "resolved_b")}
+                className="versus-keep"
+                loading={busy === resolution}
                 disabled={busy !== null}
-                onClick={() =>
-                  act(side === "unit_a" ? "resolved_a" : "resolved_b", `Kept statement ${letter}`)
-                }
+                onClick={() => act(resolution, `Kept statement ${letter}`)}
               >
                 Keep {letter}
               </Button>
@@ -152,56 +173,12 @@ function Detail({ id, onResolved }: { id: string; onResolved: (label: string) =>
         })}
       </div>
 
-      <div className="resolve-bar">
-        <input
-          className="input"
-          type="text"
-          aria-label="Note (optional)"
-          placeholder="Add a note (optional)…"
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
-          disabled={busy !== null}
-        />
-        <div className="item-actions">
-          <Button
-            variant="secondary"
-            size="sm"
-            icon={CircleCheck}
-            loading={busy === "both_valid"}
-            disabled={busy !== null}
-            onClick={() => act("both_valid", "Marked both as valid")}
-          >
-            Both valid
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            icon={X}
-            loading={busy === "dismissed"}
-            disabled={busy !== null}
-            onClick={() => act("dismissed", "Dismissed")}
-          >
-            Dismiss
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            icon={MessageSquarePlus}
-            loading={busy === "annotate"}
-            disabled={busy !== null || !note.trim()}
-            onClick={annotate}
-          >
-            Add note
-          </Button>
-        </div>
-      </div>
-
       {error && <Callout>{error}</Callout>}
 
       {detail.audit.length > 0 && (
         <details className="history">
           <summary>
-            <History aria-hidden /> History <span className="count num">{detail.audit.length}</span>
+            <History aria-hidden /> History <span className="num">{detail.audit.length}</span>
           </summary>
           <ol className="timeline">
             {detail.audit.map((a, i) => (
@@ -216,13 +193,53 @@ function Detail({ id, onResolved }: { id: string; onResolved: (label: string) =>
           </ol>
         </details>
       )}
+
+      <div className="inspector-actions">
+        <input
+          className="input note-input"
+          type="text"
+          aria-label="Note (optional)"
+          placeholder="Add a note (optional)…"
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          disabled={busy !== null}
+        />
+        <Button
+          variant="ghost"
+          icon={MessageSquarePlus}
+          loading={busy === "annotate"}
+          disabled={busy !== null || !note.trim()}
+          onClick={annotate}
+        >
+          Add note
+        </Button>
+        <span className="spacer" />
+        <Button
+          variant="secondary"
+          icon={CircleCheck}
+          loading={busy === "both_valid"}
+          disabled={busy !== null}
+          onClick={() => act("both_valid", "Marked both as valid")}
+        >
+          Both valid
+        </Button>
+        <Button
+          variant="ghost"
+          icon={X}
+          loading={busy === "dismissed"}
+          disabled={busy !== null}
+          onClick={() => act("dismissed", "Dismissed")}
+        >
+          Dismiss
+        </Button>
+      </div>
     </div>
   );
 }
 
 export default function Contradictions() {
   const [items, setItems] = useState<ContradictionSummary[] | null>(null);
-  const [expanded, setExpanded] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
 
@@ -241,87 +258,97 @@ export default function Contradictions() {
     return () => clearInterval(timer);
   }, [refresh]);
 
+  // Keep a valid selection as items come and go.
+  useEffect(() => {
+    if (!items || items.length === 0) return;
+    if (!selected || !items.some((c) => c.id === selected)) setSelected(items[0].id);
+  }, [items, selected]);
+
+  const listRef = useListKeys(items ?? [], selected, (c) => c.id, setSelected);
+
   return (
-    <section>
-      <PageHeader
+    <>
+      <Toolbar
         title="Contradictions"
-        description="Places where your sources disagree with each other, strongest first. Pick the statement that holds, or mark both as true."
-        eyebrow={items && items.length > 0 ? `${plural(items.length, "open conflict")}` : undefined}
+        icon={GitCompareArrows}
+        count={items && items.length > 0 ? items.length : undefined}
       />
-      {error && <Callout title="Couldn't load contradictions">{error}</Callout>}
       {done && (
-        <div className="sr-status visually-hidden" role="status">
+        <div className="visually-hidden" role="status">
           {done}
         </div>
       )}
-      {items === null && !error ? (
-        <Skeleton rows={3} variant="card" />
-      ) : items && items.length === 0 && !error ? (
+      {error && (
+        <div className="view-callout">
+          <Callout title="Couldn't load contradictions">{error}</Callout>
+        </div>
+      )}
+      {items !== null && items.length === 0 && !error ? (
         <EmptyState icon={CircleCheck} tone="success" title="Everything agrees">
           No open contradictions. Gather keeps scanning in the background as you add more.
         </EmptyState>
       ) : (
-        <ul className="stack">
-          {(items ?? []).map((c, i) => {
-            const open = expanded === c.id;
-            return (
-              <li
-                key={c.id}
-                className={open ? "item open" : "item"}
-                style={{ animationDelay: `${Math.min(i, 8) * 30}ms` }}
-              >
-                <button
-                  type="button"
-                  className="item-row"
-                  aria-expanded={open}
-                  onClick={() => setExpanded(open ? null : c.id)}
-                >
-                  <div className="item-main">
-                    <div className="conflict-pair">
-                      <span className="conflict-line">
-                        <span className="pair-letter" aria-hidden>
-                          A
+        <SplitView
+          listLabel="Open contradictions"
+          listHeader={
+            <p className="hint list-note">Strongest first. Pick the statement that holds.</p>
+          }
+          list={
+            items === null ? (
+              <Skeleton rows={5} />
+            ) : (
+              <ul className="rows" ref={listRef}>
+                {items.map((c) => (
+                  <li key={c.id}>
+                    <button
+                      type="button"
+                      className="row"
+                      aria-current={c.id === selected ? "true" : undefined}
+                      onClick={() => setSelected(c.id)}
+                    >
+                      <span
+                        className={`row-strength ${c.score >= 0.75 ? "hi" : "mid"}`}
+                        style={{ height: `${Math.max(30, c.score * 100)}%` }}
+                        aria-hidden
+                      />
+                      <span className="row-main">
+                        <span className="conflict-line">
+                          <span className="pair-letter" aria-hidden>
+                            A
+                          </span>
+                          <span className="clamp1">{c.unit_a.statement}</span>
                         </span>
-                        {c.unit_a.statement}
-                      </span>
-                      <span className="conflict-line">
-                        <span className="pair-letter" aria-hidden>
-                          B
+                        <span className="conflict-line">
+                          <span className="pair-letter" aria-hidden>
+                            B
+                          </span>
+                          <span className="clamp1">{c.unit_b.statement}</span>
                         </span>
-                        {c.unit_b.statement}
+                        <span className="row-meta">
+                          {methodLabel(c.detection_method)}
+                          <span className="dot-sep num">{c.score.toFixed(2)}</span>
+                        </span>
                       </span>
-                    </div>
-                    <div className="item-sub">
-                      <span>{methodLabel(c.detection_method)}</span>
-                      <span>
-                        found <When iso={c.detected_at} />
-                      </span>
-                    </div>
-                  </div>
-                  <div className="item-aside">
-                    <Meter
-                      value={c.score}
-                      label="Conflict strength"
-                      tone={c.score >= 0.75 ? "danger" : "warning"}
-                    />
-                    <ChevronRight className="chevron" aria-hidden />
-                  </div>
-                </button>
-                {open && (
-                  <Detail
-                    id={c.id}
-                    onResolved={(label) => {
-                      setDone(label);
-                      setExpanded(null);
-                      refresh();
-                    }}
-                  />
-                )}
-              </li>
-            );
-          })}
-        </ul>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )
+          }
+          detail={
+            selected ? (
+              <Detail
+                id={selected}
+                onResolved={(label) => {
+                  setDone(label);
+                  setSelected(null);
+                  refresh();
+                }}
+              />
+            ) : null
+          }
+        />
       )}
-    </section>
+    </>
   );
 }

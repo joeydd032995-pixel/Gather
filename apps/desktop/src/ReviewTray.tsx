@@ -5,7 +5,9 @@ import {
   CircleCheck,
   Combine,
   EyeOff,
+  Inbox,
   Layers,
+  Link2,
   Pencil,
   RefreshCw,
   ShieldQuestion,
@@ -29,10 +31,13 @@ import {
   Button,
   Callout,
   EmptyState,
+  IconButton,
   Kbd,
   Meter,
-  PageHeader,
   Skeleton,
+  SplitView,
+  Toolbar,
+  When,
   errorText,
   type Tone,
 } from "./ui";
@@ -41,10 +46,20 @@ const TRAY_LIMIT = 100;
 /** Re-read the tray this often: background workers park new items. */
 const REFRESH_MS = 15000;
 
-const REASONS: Record<string, { label: string; tone: Tone; icon: typeof Layers }> = {
-  "low-confidence": { label: "Unsure fact", tone: "warning", icon: ShieldQuestion },
-  "merge-band": { label: "Possible duplicate", tone: "info", icon: Combine },
-  "oversized-component": { label: "Large duplicate group", tone: "neutral", icon: Layers },
+const REASONS: Record<string, { label: string; tone: Tone; icon: typeof Layers; lead: string }> = {
+  "low-confidence": {
+    label: "Unsure fact",
+    tone: "warning",
+    icon: ShieldQuestion,
+    lead: "lead-warning",
+  },
+  "merge-band": { label: "Possible duplicate", tone: "info", icon: Combine, lead: "lead-info" },
+  "oversized-component": {
+    label: "Large duplicate group",
+    tone: "neutral",
+    icon: Layers,
+    lead: "",
+  },
 };
 
 /** The last action, and how to take it back when that is possible. */
@@ -61,58 +76,22 @@ function asNumber(value: unknown): number | null {
   return typeof value === "number" ? value : null;
 }
 
-function ItemSummary({ item }: { item: ReviewItem }) {
-  if (item.target_kind === "unit") {
-    const confidence = asNumber(item.signals.confidence);
-    return (
-      <>
-        <p className="item-title">{item.statement ?? "(statement unavailable)"}</p>
-        {confidence !== null && (
-          <div className="item-sub">
-            <span>Confidence</span>
-            <Meter value={confidence} label="Confidence" tone="warning" width={44} />
-          </div>
-        )}
-      </>
-    );
-  }
+function reasonOf(item: ReviewItem) {
+  return (
+    REASONS[item.reason] ?? { label: item.reason, tone: "neutral" as Tone, icon: Layers, lead: "" }
+  );
+}
+
+/** One line naming the item, for the list. */
+function titleOf(item: ReviewItem): string {
+  if (item.target_kind === "unit") return item.statement ?? "(statement unavailable)";
   if (item.reason === "merge-band") {
     const a = asString(item.signals.a);
     const b = asString(item.signals.b);
-    const score = asNumber(item.signals.score);
-    if (!a || !b) return <p className="item-title">Malformed merge suggestion</p>;
-    // Names come with the tray listing; an id means the entity is gone.
-    return (
-      <>
-        <p className="pair-names">
-          <span className="item-title">{item.a_name ?? a.slice(0, 8)}</span>
-          <span className="pair-sep" aria-label="and">
-            ≈
-          </span>
-          <span className="item-title">{item.b_name ?? b.slice(0, 8)}</span>
-        </p>
-        {score !== null && (
-          <div className="item-sub">
-            <span>Similarity</span>
-            <Meter value={score} label="Similarity" tone="info" width={44} />
-          </div>
-        )}
-        {item.signals.chained === true && (
-          <div className="item-sub">
-            A close match, but part of a chain linking things that don't match each other, so it
-            wasn't merged on its own.
-          </div>
-        )}
-      </>
-    );
+    return `${item.a_name ?? a?.slice(0, 8) ?? "?"} ≈ ${item.b_name ?? b?.slice(0, 8) ?? "?"}`;
   }
   const members = Array.isArray(item.signals.members) ? item.signals.members.length : 0;
-  return (
-    <>
-      <p className="item-title">{plural(members, "entity", "entities")} chained together</p>
-      <div className="item-sub">Too large to merge automatically; dismiss once you've looked.</div>
-    </>
-  );
+  return `${plural(members, "entity", "entities")} chained together`;
 }
 
 /** Oversized duplicate groups can only be dismissed: there is no single
@@ -123,6 +102,182 @@ function canJudge(item: ReviewItem): boolean {
 
 function isTyping(target: EventTarget | null): boolean {
   return target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
+}
+
+/** The selected item, large, with everything needed to decide. */
+function ReviewDetail({
+  item,
+  busy,
+  editing,
+  draft,
+  onDraft,
+  onEdit,
+  onCancelEdit,
+  onSave,
+  onAccept,
+  onReject,
+  onDismiss,
+}: {
+  item: ReviewItem;
+  busy: boolean;
+  editing: boolean;
+  draft: string;
+  onDraft: (s: string) => void;
+  onEdit: () => void;
+  onCancelEdit: () => void;
+  onSave: () => void;
+  onAccept: () => void;
+  onReject: () => void;
+  onDismiss: () => void;
+}) {
+  const reason = reasonOf(item);
+  const isUnit = item.target_kind === "unit";
+  const confidence = asNumber(item.signals.confidence);
+  const score = asNumber(item.signals.score);
+  const chained = item.signals.chained === true;
+
+  return (
+    <div className="inspector review-detail" key={item.id}>
+      <div className="inspector-kicker">
+        <Badge tone={reason.tone} icon={reason.icon}>
+          {reason.label}
+        </Badge>
+        <span className="hint">
+          parked <When iso={item.created_at} />
+        </span>
+      </div>
+
+      {editing ? (
+        <div className="edit-block">
+          <label className="field-label" htmlFor="review-edit">
+            Corrected statement
+          </label>
+          <textarea
+            id="review-edit"
+            className="input textarea"
+            autoFocus
+            rows={3}
+            value={draft}
+            onChange={(e) => onDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey && draft.trim()) {
+                e.preventDefault();
+                onSave();
+              }
+              if (e.key === "Escape") onCancelEdit();
+            }}
+          />
+        </div>
+      ) : item.reason === "merge-band" ? (
+        <div className="pair-hero">
+          <span className="pair-name">{item.a_name ?? "?"}</span>
+          <span className="pair-approx" aria-label="might be the same as">
+            ≈
+          </span>
+          <span className="pair-name">{item.b_name ?? "?"}</span>
+        </div>
+      ) : (
+        <p className="statement-hero">{titleOf(item)}</p>
+      )}
+
+      <dl className="facts">
+        {confidence !== null && (
+          <div>
+            <dt>Confidence</dt>
+            <dd>
+              <Meter value={confidence} label="Confidence" tone="warning" width={120} />
+            </dd>
+          </div>
+        )}
+        {score !== null && (
+          <div>
+            <dt>Similarity</dt>
+            <dd>
+              <Meter value={score} label="Similarity" tone="info" width={120} />
+            </dd>
+          </div>
+        )}
+        <div>
+          <dt>Information gain</dt>
+          <dd>
+            <Meter value={item.info_gain} label="Information gain" tone="neutral" width={120} />
+          </dd>
+        </div>
+      </dl>
+
+      {chained && (
+        <Callout tone="info" icon={Link2} title="Part of a chain">
+          This pair is a close match, but it links to things that don't match each other, so Gather
+          didn't merge any of them on its own. Merge the pairs that are right.
+        </Callout>
+      )}
+      {item.reason === "oversized-component" && (
+        <Callout tone="neutral" icon={Layers}>
+          Too many names are linked together to merge safely in one go. Dismiss it once you've
+          looked; the individual pairs still come through on their own.
+        </Callout>
+      )}
+      {item.reason === "low-confidence" && (
+        <p className="explain">
+          Gather wasn't sure about this statement. It's already in your library; keeping or removing
+          it teaches Gather where its bar should sit.
+        </p>
+      )}
+
+      <div className="inspector-actions">
+        {editing ? (
+          <>
+            <Button
+              variant="primary"
+              icon={Check}
+              onClick={onSave}
+              disabled={busy || !draft.trim()}
+              shortcut="↵"
+            >
+              Save
+            </Button>
+            <Button variant="ghost" onClick={onCancelEdit} shortcut="Esc">
+              Cancel
+            </Button>
+          </>
+        ) : (
+          <>
+            {canJudge(item) && (
+              <>
+                <Button
+                  variant="primary"
+                  icon={isUnit ? Check : Combine}
+                  onClick={onAccept}
+                  disabled={busy}
+                  shortcut="A"
+                >
+                  {isUnit ? "Keep" : "Merge"}
+                </Button>
+                <Button
+                  variant="secondary"
+                  icon={isUnit ? Trash2 : Unlink}
+                  onClick={onReject}
+                  disabled={busy}
+                  shortcut="R"
+                >
+                  {isUnit ? "Remove" : "Not duplicates"}
+                </Button>
+              </>
+            )}
+            {isUnit && (
+              <Button variant="ghost" icon={Pencil} onClick={onEdit} disabled={busy} shortcut="E">
+                Edit
+              </Button>
+            )}
+            <span className="spacer" />
+            <Button variant="ghost" icon={EyeOff} onClick={onDismiss} disabled={busy} shortcut="D">
+              Dismiss
+            </Button>
+          </>
+        )}
+      </div>
+    </div>
+  );
 }
 
 /**
@@ -243,7 +398,7 @@ export default function ReviewTray() {
   // Keep the selected item in view as j/k move through a long tray.
   useEffect(() => {
     listRef.current
-      ?.querySelector(".item.selected")
+      ?.querySelector('[aria-current="true"]')
       ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [selected]);
 
@@ -261,190 +416,114 @@ export default function ReviewTray() {
     return () => clearTimeout(timer);
   }, [last]);
 
-  const header = (
-    <PageHeader
-      title="Review"
-      description="Optional. Everything here is already live in your library; answering only teaches Gather where its thresholds should sit."
-      eyebrow={items.length > 0 ? plural(items.length, "item") + " waiting" : undefined}
-      actions={
-        <Button variant="ghost" size="sm" icon={RefreshCw} onClick={reload} disabled={busy}>
-          Refresh
-        </Button>
-      }
-    />
+  const toolbar = (
+    <Toolbar title="Review" icon={Inbox} count={items.length > 0 ? items.length : undefined}>
+      <span className="toolbar-keys" aria-label="Keyboard shortcuts">
+        <Kbd>J</Kbd>
+        <Kbd>K</Kbd>
+        <span>move</span>
+        <Kbd>U</Kbd>
+        <span>undo</span>
+      </span>
+      <IconButton icon={RefreshCw} label="Refresh" size="sm" onClick={reload} disabled={busy} />
+    </Toolbar>
   );
 
   if (tray.loading && !tray.data) {
     return (
-      <section>
-        {header}
-        <Skeleton rows={4} variant="card" />
-      </section>
+      <>
+        {toolbar}
+        <SplitView listLabel="Review items" list={<Skeleton rows={6} />} detail={null} />
+      </>
     );
   }
   if (tray.error) {
     return (
-      <section>
-        {header}
-        <Callout title="Couldn't load the review tray">{tray.error}</Callout>
-      </section>
+      <>
+        {toolbar}
+        <div className="view-callout">
+          <Callout title="Couldn't load the review tray">{tray.error}</Callout>
+        </div>
+      </>
     );
   }
 
   return (
-    <section>
-      {header}
-
-      {items.length > 0 && (
-        <div className="keys" aria-label="Keyboard shortcuts">
-          <span>
-            <Kbd>J</Kbd>
-            <Kbd>K</Kbd> move
-          </span>
-          <span>
-            <Kbd>A</Kbd> keep / merge
-          </span>
-          <span>
-            <Kbd>R</Kbd> remove
-          </span>
-          <span>
-            <Kbd>E</Kbd> edit
-          </span>
-          <span>
-            <Kbd>D</Kbd> dismiss
-          </span>
-          <span>
-            <Kbd>U</Kbd> undo
-          </span>
-        </div>
-      )}
-
-      {error && <Callout>{error}</Callout>}
-
+    <>
+      {toolbar}
       {items.length === 0 ? (
         <EmptyState icon={CircleCheck} tone="success" title="Nothing needs you">
           The pipeline decided everything on its own. Items appear here only when Gather is
-          genuinely unsure.
+          genuinely unsure. Everything here is optional; answering only tunes Gather's thresholds.
         </EmptyState>
       ) : (
-        <ul className="stack" ref={listRef}>
-          {items.map((item, index) => {
-            const reason = REASONS[item.reason] ?? {
-              label: item.reason,
-              tone: "neutral" as Tone,
-              icon: Layers,
-            };
-            const isCurrent = item === current;
-            const isUnit = item.target_kind === "unit";
-            return (
-              <li
-                key={item.id}
-                className={`item review-item${isCurrent ? " selected" : ""}`}
-                onClick={() => setSelected(index)}
-                aria-current={isCurrent ? "true" : undefined}
-              >
-                <div className="item-row">
-                  <div className="item-main">
-                    <Badge tone={reason.tone} icon={reason.icon} className="review-reason">
-                      {reason.label}
-                    </Badge>
-                    {editingId === item.id ? (
-                      <div className="edit-row">
-                        <input
-                          className="input"
-                          autoFocus
-                          aria-label="Corrected statement"
-                          value={draft}
-                          onChange={(e) => setDraft(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter" && draft.trim()) saveEdit(item);
-                            if (e.key === "Escape") setEditingId(null);
-                          }}
-                        />
-                        <Button
-                          variant="primary"
-                          size="sm"
-                          icon={Check}
-                          onClick={() => saveEdit(item)}
-                          disabled={busy || !draft.trim()}
-                        >
-                          Save
-                        </Button>
-                        <Button variant="ghost" size="sm" onClick={() => setEditingId(null)}>
-                          Cancel
-                        </Button>
-                      </div>
-                    ) : (
-                      <ItemSummary item={item} />
-                    )}
-                  </div>
-                  <div className="item-aside review-gain">
-                    <span className="gain-label" aria-hidden>
-                      Info gain
-                    </span>
-                    <Meter
-                      value={item.info_gain}
-                      label="Information gain: how much one answer teaches"
-                      tone="neutral"
-                      width={40}
-                    />
-                  </div>
-                </div>
-                {editingId !== item.id && (
-                  <div className="item-foot">
-                    {canJudge(item) && (
-                      <>
-                        <Button
-                          variant={isCurrent ? "primary" : "secondary"}
-                          size="sm"
-                          icon={isUnit ? Check : Combine}
-                          onClick={() => accept(item)}
-                          disabled={busy}
-                          shortcut={isCurrent ? "A" : undefined}
-                        >
-                          {isUnit ? "Keep" : "Merge"}
-                        </Button>
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          icon={isUnit ? Trash2 : Unlink}
-                          onClick={() => reject(item)}
-                          disabled={busy}
-                          shortcut={isCurrent ? "R" : undefined}
-                        >
-                          {isUnit ? "Remove" : "Not duplicates"}
-                        </Button>
-                      </>
-                    )}
-                    {isUnit && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        icon={Pencil}
-                        onClick={() => {
-                          setEditingId(item.id);
-                          setDraft(item.statement ?? "");
-                        }}
-                        disabled={busy}
-                      >
-                        Edit
-                      </Button>
-                    )}
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      icon={EyeOff}
-                      onClick={() => dismiss(item)}
-                      disabled={busy}
+        <SplitView
+          listLabel="Review items"
+          listHeader={
+            <p className="hint list-note">
+              Optional. Everything here is already live; your answers tune Gather's thresholds.
+            </p>
+          }
+          list={
+            <ul className="rows" ref={listRef}>
+              {items.map((item, index) => {
+                const reason = reasonOf(item);
+                const Icon = reason.icon;
+                const isCurrent = item === current;
+                return (
+                  <li key={item.id}>
+                    <button
+                      type="button"
+                      className="row"
+                      aria-current={isCurrent ? "true" : undefined}
+                      onClick={() => setSelected(index)}
                     >
-                      Dismiss
-                    </Button>
-                  </div>
-                )}
-              </li>
-            );
-          })}
-        </ul>
+                      <span className={`row-lead ${reason.lead}`} aria-hidden>
+                        <Icon />
+                      </span>
+                      <span className="row-main">
+                        <span className="row-title wrap">{titleOf(item)}</span>
+                        <span className="row-meta">
+                          {reason.label}
+                          {item.signals.chained === true && (
+                            <span className="dot-sep">chained</span>
+                          )}
+                        </span>
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          }
+          detail={
+            <>
+              {error && (
+                <div className="view-callout">
+                  <Callout>{error}</Callout>
+                </div>
+              )}
+              {current && (
+                <ReviewDetail
+                  item={current}
+                  busy={busy}
+                  editing={editingId === current.id}
+                  draft={draft}
+                  onDraft={setDraft}
+                  onEdit={() => {
+                    setEditingId(current.id);
+                    setDraft(current.statement ?? "");
+                  }}
+                  onCancelEdit={() => setEditingId(null)}
+                  onSave={() => saveEdit(current)}
+                  onAccept={() => accept(current)}
+                  onReject={() => reject(current)}
+                  onDismiss={() => dismiss(current)}
+                />
+              )}
+            </>
+          }
+        />
       )}
 
       {createPortal(
@@ -463,6 +542,6 @@ export default function ReviewTray() {
         </div>,
         document.body,
       )}
-    </section>
+    </>
   );
 }

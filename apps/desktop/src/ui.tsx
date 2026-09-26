@@ -1,5 +1,5 @@
 // Shared UI primitives. Views compose these rather than styling their own
-// buttons, badges and empty states, so the whole app reads as one system.
+// buttons, rows and panels, so the whole app reads as one system.
 
 import {
   createContext,
@@ -51,7 +51,11 @@ export function Button({
         Icon && <Icon className="btn-icon" aria-hidden />
       )}
       {children && <span className="btn-label">{children}</span>}
-      {shortcut && <Kbd className="btn-kbd">{shortcut}</Kbd>}
+      {shortcut && (
+        <kbd className="btn-kbd" aria-hidden>
+          {shortcut}
+        </kbd>
+      )}
     </button>
   );
 }
@@ -62,6 +66,8 @@ interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   label: string;
   variant?: Variant;
   size?: Size;
+  /** Where the tooltip opens. */
+  tip?: "top" | "bottom" | "left" | "right";
 }
 
 export function IconButton({
@@ -69,6 +75,7 @@ export function IconButton({
   label,
   variant = "ghost",
   size = "md",
+  tip = "bottom",
   className,
   type = "button",
   ...rest
@@ -77,7 +84,8 @@ export function IconButton({
     <button
       type={type}
       aria-label={label}
-      title={label}
+      data-tip={label}
+      data-tip-side={tip}
       className={`btn btn-${variant} btn-${size} btn-icon-only${className ? ` ${className}` : ""}`}
       {...rest}
     >
@@ -144,10 +152,10 @@ export function Skeleton({
     <div className={`skeleton skeleton-${variant}`} role="status" aria-label="Loading">
       {Array.from({ length: rows }, (_, i) => (
         <div className="skeleton-item" key={i} style={{ animationDelay: `${i * 60}ms` }}>
-          <span className="skeleton-bar" style={{ width: `${88 - ((i * 17) % 40)}%` }} />
+          <span className="skeleton-bar" style={{ width: `${86 - ((i * 17) % 38)}%` }} />
           <span
             className="skeleton-bar skeleton-bar-sub"
-            style={{ width: `${40 + ((i * 23) % 30)}%` }}
+            style={{ width: `${38 + ((i * 23) % 30)}%` }}
           />
         </div>
       ))}
@@ -161,19 +169,25 @@ export function EmptyState({
   children,
   action,
   tone = "neutral",
+  compact = false,
 }: {
   icon: LucideIcon;
   title: string;
   children?: ReactNode;
   action?: ReactNode;
   tone?: "neutral" | "success";
+  compact?: boolean;
 }) {
   return (
-    <div className={`empty empty-${tone}`}>
-      <div className="empty-icon" aria-hidden>
-        <Icon />
+    <div className={`empty empty-${tone}${compact ? " empty-compact" : ""}`}>
+      <div className="empty-art" aria-hidden>
+        <span className="empty-ring r1" />
+        <span className="empty-ring r2" />
+        <span className="empty-icon">
+          <Icon />
+        </span>
       </div>
-      <h3 className="empty-title">{title}</h3>
+      <h2 className="empty-title">{title}</h2>
       {children && <div className="empty-body">{children}</div>}
       {action && <div className="empty-action">{action}</div>}
     </div>
@@ -211,13 +225,15 @@ export function Meter({
   label,
   tone = "accent",
   digits = 2,
-  width = 56,
+  width = 48,
+  showValue = true,
 }: {
   value: number;
   label: string;
   tone?: Tone;
   digits?: number;
   width?: number;
+  showValue?: boolean;
 }) {
   const pct = Math.max(0, Math.min(1, value)) * 100;
   return (
@@ -233,7 +249,7 @@ export function Meter({
       >
         <span className="meter-fill" style={{ width: `${pct}%` }} />
       </span>
-      <span className="meter-value num">{value.toFixed(digits)}</span>
+      {showValue && <span className="meter-value num">{value.toFixed(digits)}</span>}
     </span>
   );
 }
@@ -301,13 +317,13 @@ export function Switch({
 }) {
   const id = useId();
   return (
-    <div className="switch-row">
-      <div className="switch-text">
-        <label htmlFor={id} className="switch-label">
+    <div className="setting-row">
+      <div className="setting-text">
+        <label htmlFor={id} className="setting-label">
           {label}
         </label>
         {description && (
-          <p className="switch-desc" id={`${id}-desc`}>
+          <p className="setting-desc" id={`${id}-desc`}>
             {description}
           </p>
         )}
@@ -328,39 +344,143 @@ export function Switch({
   );
 }
 
-/** The navigation group of the current view ("Explore", "Needs you"…),
- *  shown above every page title so titles sit at the same height. */
+/** The navigation group of the current view ("Explore", "Needs you"…), shown
+ *  as a breadcrumb in every toolbar. */
 export const SectionContext = createContext<string | null>(null);
 
-export function PageHeader({
+/**
+ * The strip across the top of every view: breadcrumb, title and a count on
+ * the left, the view's own controls on the right.
+ */
+export function Toolbar({
   title,
-  description,
-  actions,
-  eyebrow,
+  icon: Icon,
+  count,
+  children,
 }: {
   title: string;
-  description?: ReactNode;
-  actions?: ReactNode;
-  eyebrow?: ReactNode;
+  icon?: LucideIcon;
+  count?: ReactNode;
+  children?: ReactNode;
 }) {
   const section = useContext(SectionContext);
   return (
-    <header className="page-header">
-      <div className="page-heading">
-        {(section || eyebrow) && (
-          <div className="page-eyebrow">
-            {section && <span>{section}</span>}
-            {section && eyebrow && <span aria-hidden>·</span>}
-            {eyebrow && <span className="page-eyebrow-detail">{eyebrow}</span>}
-          </div>
+    <header className="toolbar">
+      <div className="toolbar-title">
+        {Icon && (
+          <span className="toolbar-icon" aria-hidden>
+            <Icon />
+          </span>
         )}
-        <h1 className="page-title" tabIndex={-1} data-page-title>
+        {section && (
+          <>
+            <span className="toolbar-crumb">{section}</span>
+            <span className="toolbar-slash" aria-hidden>
+              /
+            </span>
+          </>
+        )}
+        <h1 tabIndex={-1} data-page-title>
           {title}
         </h1>
-        {description && <p className="page-desc">{description}</p>}
+        {count !== undefined && count !== null && (
+          <span className="toolbar-count num">{count}</span>
+        )}
       </div>
-      {actions && <div className="page-actions">{actions}</div>}
+      {children && <div className="toolbar-actions">{children}</div>}
     </header>
+  );
+}
+
+/** A list on the left, the selected item's detail on the right. */
+export function SplitView({
+  list,
+  detail,
+  listLabel,
+  listHeader,
+}: {
+  list: ReactNode;
+  detail: ReactNode;
+  listLabel: string;
+  listHeader?: ReactNode;
+}) {
+  return (
+    <div className="split">
+      <section className="split-list" aria-label={listLabel}>
+        {listHeader && <div className="split-list-head">{listHeader}</div>}
+        <div className="split-list-body">{list}</div>
+      </section>
+      <section className="split-detail" aria-live="polite">
+        {detail}
+      </section>
+    </div>
+  );
+}
+
+/** A titled group inside an inspector or settings page. */
+export function Panel({
+  title,
+  icon: Icon,
+  actions,
+  children,
+  className,
+}: {
+  title?: ReactNode;
+  icon?: LucideIcon;
+  actions?: ReactNode;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <section className={`panel${className ? ` ${className}` : ""}`}>
+      {(title || actions) && (
+        <header className="panel-head">
+          {title && (
+            <h2 className="panel-title">
+              {Icon && <Icon aria-hidden />}
+              {title}
+            </h2>
+          )}
+          {actions && <div className="panel-actions">{actions}</div>}
+        </header>
+      )}
+      <div className="panel-body">{children}</div>
+    </section>
+  );
+}
+
+/** A labelled number, for dashboards. */
+export function StatTile({
+  icon: Icon,
+  label,
+  value,
+  hint,
+  tone = "neutral",
+  onClick,
+}: {
+  icon: LucideIcon;
+  label: string;
+  value: ReactNode;
+  hint?: ReactNode;
+  tone?: Tone;
+  onClick?: () => void;
+}) {
+  const body = (
+    <>
+      <span className={`stat-icon stat-${tone}`} aria-hidden>
+        <Icon />
+      </span>
+      <span className="stat-value num">{value}</span>
+      <span className="stat-label">{label}</span>
+      {hint && <span className="stat-hint">{hint}</span>}
+    </>
+  );
+  return onClick ? (
+    <button type="button" className="stat" onClick={onClick}>
+      {body}
+    </button>
+  ) : (
+    <div className="stat">{body}</div>
   );
 }
 

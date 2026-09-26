@@ -15,12 +15,14 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-ui);
-  font-size: var(--text-base);
-  line-height: 1.5;
-  font-feature-settings: "ss01", "cv11";
+  font-size: var(--t-sm);
+  line-height: 1.45;
+  letter-spacing: -0.003em;
+  font-feature-settings: "ss01", "cv11", "calt";
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+  overflow: hidden;
 }
 
 h1,
@@ -30,6 +32,8 @@ h4,
 p,
 ul,
 ol,
+dl,
+dd,
 figure,
 blockquote {
   margin: 0;
@@ -59,7 +63,8 @@ button:disabled {
 }
 
 img,
-svg {
+svg,
+canvas {
   display: block;
 }
 
@@ -70,7 +75,7 @@ svg {
 :focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
-  border-radius: var(--radius-xs);
+  border-radius: var(--r-xs);
 }
 
 ::selection {
@@ -84,15 +89,14 @@ mark {
   padding: 0 1px;
 }
 
-.num,
 code,
 kbd,
 pre {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
 }
 
-/* scrollbars: quiet, and only as wide as they need to be */
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--border-strong) transparent;
@@ -131,7 +135,7 @@ pre {
   padding: var(--s-2) var(--s-3);
   background: var(--accent);
   color: var(--accent-fg);
-  border-radius: var(--radius-sm);
+  border-radius: var(--r-sm);
   font-weight: 600;
   text-decoration: none;
 }
@@ -139,43 +143,66 @@ pre {
   top: var(--s-3);
 }
 
+.muted {
+  color: var(--text-3);
+}
+.hint {
+  color: var(--text-3);
+  font-size: var(--t-xs);
+}
+.num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum", "ss01";
+}
+.row-meta .dot-sep::before {
+  margin-left: -2px;
+}
+.dot-sep::before {
+  content: "·";
+  margin: 0 6px;
+  color: var(--text-3);
+}
+
 @keyframes fade-up {
   from {
     opacity: 0;
     transform: translateY(6px);
   }
-  to {
-    opacity: 1;
-    transform: none;
-  }
 }
-
 @keyframes fade-in {
   from {
     opacity: 0;
   }
-  to {
-    opacity: 1;
-  }
 }
-
 @keyframes pop-in {
   from {
     opacity: 0;
-    transform: translateY(-8px) scale(0.98);
-  }
-  to {
-    opacity: 1;
-    transform: none;
+    transform: translateY(-6px) scale(0.985);
   }
 }
-
+@keyframes scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+@keyframes slide-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+}
+@keyframes slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+}
 @keyframes spin {
   to {
     transform: rotate(360deg);
   }
 }
-
 @keyframes shimmer {
   from {
     background-position: 150% 0;
@@ -184,14 +211,32 @@ pre {
     background-position: -50% 0;
   }
 }
-
 @keyframes pulse-ring {
   0% {
     box-shadow: 0 0 0 0 currentColor;
   }
   70%,
   100% {
-    box-shadow: 0 0 0 6px transparent;
+    box-shadow: 0 0 0 5px transparent;
+  }
+}
+@keyframes drift {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(2%, -3%, 0) scale(1.05);
+  }
+}
+@keyframes ripple {
+  from {
+    transform: scale(0.6);
+    opacity: 0.6;
+  }
+  to {
+    transform: scale(1.6);
+    opacity: 0;
   }
 }
 

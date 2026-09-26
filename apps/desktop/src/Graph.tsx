@@ -31,7 +31,7 @@ import {
   type View,
 } from "./graph/render";
 import { kindLabel, plural } from "./kinds";
-import { Callout, EmptyState, IconButton, Kbd, PageHeader, Spinner, errorText } from "./ui";
+import { Callout, EmptyState, IconButton, Kbd, Spinner, Toolbar, errorText } from "./ui";
 
 const SIZES = [50, 150, 400];
 const MIN_K = 0.15;
@@ -616,24 +616,37 @@ export default function Graph({ onOpenFile }: GraphProps) {
 
   // --------------------------------------------------------------- view
   const header = (
-    <PageHeader
+    <Toolbar
       title="Graph"
-      description="The people, places, tools and ideas in your library, and the files that mention them."
-      eyebrow={
+      icon={Waypoints}
+      count={
         data && data.entities.length > 0
           ? data.truncated
-            ? `${data.entities.length} most connected of ${data.entity_total.toLocaleString()}`
-            : plural(data.entities.length, "entity", "entities")
+            ? `${data.entities.length} of ${data.entity_total.toLocaleString()}`
+            : data.entities.length
           : undefined
       }
-    />
+    >
+      <label className="toolbar-field">
+        <span>Show</span>
+        <select className="select" value={size} onChange={(e) => setSize(Number(e.target.value))}>
+          {SIZES.map((s) => (
+            <option key={s} value={s}>
+              Top {s}
+            </option>
+          ))}
+        </select>
+      </label>
+    </Toolbar>
   );
 
   if (error) {
     return (
       <>
         {header}
-        <Callout title="Couldn't load the graph">{error}</Callout>
+        <div className="view-callout">
+          <Callout title="Couldn't load the graph">{error}</Callout>
+        </div>
       </>
     );
   }
@@ -746,17 +759,6 @@ export default function Graph({ onOpenFile }: GraphProps) {
             />
             {query ? <span className="explorer-count num">{results.length}</span> : <Kbd>/</Kbd>}
           </div>
-          <span className="explorer-divider" aria-hidden />
-          <label className="explorer-select">
-            <span className="visually-hidden">Show up to</span>
-            <select value={size} onChange={(e) => setSize(Number(e.target.value))}>
-              {SIZES.map((s) => (
-                <option key={s} value={s}>
-                  Top {s}
-                </option>
-              ))}
-            </select>
-          </label>
 
           {searchOpen && needle && (
             <ul className="explorer-results glass" id="graph-results" role="listbox">

@@ -1,7 +1,7 @@
 import {
   Combine,
-  FilePlus,
   GitCompareArrows,
+  House,
   Images,
   Inbox,
   Layers,
@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 
 export type Tab =
-  | "upload"
+  | "home"
   | "library"
   | "graph"
   | "review"
@@ -33,16 +33,15 @@ export interface NavItem {
 }
 
 export interface NavGroup {
-  label: string;
+  /** Null for the ungrouped top of the sidebar. */
+  label: string | null;
   items: NavItem[];
 }
 
 export const NAV: NavGroup[] = [
   {
-    label: "Capture",
-    items: [
-      { id: "upload", label: "Add files", icon: FilePlus, hint: "Drop in documents and photos" },
-    ],
+    label: null,
+    items: [{ id: "home", label: "Overview", icon: House, hint: "Everything at a glance" }],
   },
   {
     label: "Explore",
@@ -81,6 +80,3 @@ export const NAV: NavGroup[] = [
 ];
 
 export const NAV_ITEMS: NavItem[] = NAV.flatMap((g) => g.items);
-
-/** Views that use the full window width rather than a reading column. */
-export const WIDE_VIEWS: ReadonlySet<Tab> = new Set(["library", "graph", "photos"]);

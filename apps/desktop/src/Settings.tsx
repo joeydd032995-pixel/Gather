@@ -4,10 +4,13 @@ import {
   Cpu,
   Download,
   ExternalLink,
+  Keyboard,
   Monitor,
   Moon,
   Palette as PaletteIcon,
   RefreshCw,
+  Settings as SettingsIcon,
+  ShieldCheck,
   Sun,
 } from "lucide-react";
 import type { ThemeChoice } from "./hooks/useTheme";
@@ -21,9 +24,10 @@ import {
   type MemoryInfo,
   type UpdateCheck,
 } from "./native";
-import { Badge, Button, Callout, PageHeader, Switch } from "./ui";
+import { Badge, Button, Callout, Kbd, Panel, Switch, Toolbar } from "./ui";
 
 const RELEASES_URL = "https://github.com/joeydd032995-pixel/Gather/releases";
+const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";
 
 const THEMES: { value: ThemeChoice; label: string; icon: typeof Sun }[] = [
   { value: "system", label: "System", icon: Monitor },
@@ -31,34 +35,19 @@ const THEMES: { value: ThemeChoice; label: string; icon: typeof Sun }[] = [
   { value: "dark", label: "Dark", icon: Moon },
 ];
 
-function SectionHead({
-  icon: Icon,
-  title,
-  children,
-}: {
-  icon: typeof Sun;
-  title: string;
-  children?: React.ReactNode;
-}) {
-  return (
-    <div className="settings-head">
-      <span className="settings-icon" aria-hidden>
-        <Icon />
-      </span>
-      <div>
-        <h2 className="card-title">{title}</h2>
-        {children && <p className="card-desc">{children}</p>}
-      </div>
-    </div>
-  );
-}
+const SHORTCUTS: [string[], string][] = [
+  [[MOD, "K"], "Jump to a view or run a command"],
+  [[MOD, "O"], "Add files"],
+  [["/"], "Search the Library, or find in the graph"],
+  [["J", "K"], "Move through a list"],
+  [["A", "R", "E", "D"], "Review: keep, remove, edit, dismiss"],
+  [["U"], "Undo the last review answer"],
+  [["0"], "Graph: fit everything in view"],
+];
 
 function Appearance({ theme, onTheme }: { theme: ThemeChoice; onTheme: (t: ThemeChoice) => void }) {
   return (
-    <section className="card card-pad settings-section">
-      <SectionHead icon={PaletteIcon} title="Appearance">
-        Match your system, or pick light or dark.
-      </SectionHead>
+    <Panel title="Appearance" icon={PaletteIcon}>
       <div className="theme-picker" role="radiogroup" aria-label="Appearance">
         {THEMES.map(({ value, label, icon: Icon }) => (
           <button
@@ -88,7 +77,7 @@ function Appearance({ theme, onTheme }: { theme: ThemeChoice; onTheme: (t: Theme
           </button>
         ))}
       </div>
-    </section>
+    </Panel>
   );
 }
 
@@ -147,25 +136,33 @@ export default function Settings({
 
   return (
     <>
-      <PageHeader title="Settings" />
-      <div className="settings">
-        <Appearance theme={theme} onTheme={onTheme} />
+      <Toolbar title="Settings" icon={SettingsIcon} />
+      <div className="page">
+        <div className="page-inner page-narrow settings">
+          <Appearance theme={theme} onTheme={onTheme} />
 
-        {isTauri ? (
-          <>
-            <section className="card card-pad settings-section">
-              <SectionHead icon={RefreshCw} title="Updates">
-                Gather works entirely offline. Checking for updates is the only thing that contacts
-                the internet: one request to the project's release page, sending nothing about you
-                or your data. It never happens unless you turn it on or press the button.
-              </SectionHead>
-              <div className="settings-rows">
+          <Panel title="Privacy" icon={ShieldCheck}>
+            <p className="panel-pad setting-desc-lg">
+              Gather runs entirely on this computer. It has no account, no cloud and no telemetry;
+              its services listen only on this machine. The update check below is the one feature
+              that can go online, and it stays off unless you turn it on.
+            </p>
+          </Panel>
+
+          {isTauri ? (
+            <>
+              <Panel title="Updates" icon={RefreshCw}>
                 <Switch
                   checked={checkOnStart}
                   onChange={toggle}
                   label="Check for updates when Gather starts"
+                  description="One request to the project's release page, sending nothing about you or your data."
                 />
-                <div className="settings-row">
+                <div className="setting-row">
+                  <div className="setting-text">
+                    <span className="setting-label">Check now</span>
+                    <p className="setting-desc">Look for a newer version once.</p>
+                  </div>
                   <Button
                     onClick={check}
                     icon={RefreshCw}
@@ -175,17 +172,36 @@ export default function Settings({
                     Check now
                   </Button>
                 </div>
-                {error && <Callout>{error}</Callout>}
-                {result && <UpdateResult result={result} busy={busy} onInstall={install} />}
-              </div>
-            </section>
-            <MemorySection />
-          </>
-        ) : (
-          <Callout tone="neutral" icon={Monitor}>
-            Updates and memory settings are available in the desktop app.
-          </Callout>
-        )}
+                {(error || result) && (
+                  <div className="panel-pad">
+                    {error && <Callout>{error}</Callout>}
+                    {result && <UpdateResult result={result} busy={busy} onInstall={install} />}
+                  </div>
+                )}
+              </Panel>
+              <MemorySection />
+            </>
+          ) : (
+            <Callout tone="neutral" icon={Monitor}>
+              Updates and memory settings are available in the desktop app.
+            </Callout>
+          )}
+
+          <Panel title="Keyboard" icon={Keyboard}>
+            <ul className="shortcuts">
+              {SHORTCUTS.map(([keys, what]) => (
+                <li key={what}>
+                  <span>{what}</span>
+                  <span className="shortcut-keys">
+                    {keys.map((k) => (
+                      <Kbd key={k}>{k}</Kbd>
+                    ))}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </Panel>
+        </div>
       </div>
     </>
   );
@@ -206,20 +222,22 @@ function MemorySection() {
     ? "chosen by the GATHER_MEMORY_PROFILE setting"
     : ram && `this computer has ${ram} of memory`;
   return (
-    <section className="card card-pad settings-section">
-      <SectionHead icon={Cpu} title="Memory">
-        {info.profile === "low" ? "Low-memory mode" : "Standard memory mode"}
-        {why && ` — ${why}.`}
-      </SectionHead>
-      <div className="settings-rows">
-        <div className="settings-row">
-          <Badge tone={info.profile === "low" ? "warning" : "accent"}>
-            {info.profile === "low" ? "Low memory" : "Standard"}
-          </Badge>
-          {ram && <span className="hint num">{ram} RAM</span>}
-        </div>
+    <Panel
+      title="Memory"
+      icon={Cpu}
+      actions={
+        <Badge tone={info.profile === "low" ? "warning" : "accent"}>
+          {info.profile === "low" ? "Low memory" : "Standard"}
+        </Badge>
+      }
+    >
+      <div className="panel-pad">
+        <p className="setting-desc-lg">
+          {info.profile === "low" ? "Low-memory mode" : "Standard memory mode"}
+          {why && ` — ${why}.`}
+        </p>
         {info.profile === "low" && (
-          <p className="settings-text">
+          <p className="setting-desc-lg">
             Gather keeps its database and background work small so it runs alongside your other
             apps. By default, files are limited to 32 MB each, and if you use a local AI model
             through Ollama, Gather uses it only for search (embeddings), one request at a time.
@@ -230,7 +248,7 @@ function MemorySection() {
           “low” or “standard”.
         </p>
       </div>
-    </section>
+    </Panel>
   );
 }
 

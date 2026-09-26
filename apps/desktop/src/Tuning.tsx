@@ -1,8 +1,15 @@
 import { useState } from "react";
-import { ChevronRight, History, PauseCircle, RotateCcw, Sparkles } from "lucide-react";
+import {
+  ChevronRight,
+  History,
+  PauseCircle,
+  RotateCcw,
+  SlidersHorizontal,
+  Sparkles,
+} from "lucide-react";
 import { getTuning, resetTuning, type TunedThreshold, type TuningKey } from "./api";
 import { useAsync } from "./hooks/useAsync";
-import { Badge, Button, Callout, PageHeader, Skeleton, When, errorText } from "./ui";
+import { Badge, Button, Callout, Skeleton, Toolbar, When, errorText } from "./ui";
 
 const KEY_LABELS: Record<TuningKey, { title: string; desc: string }> = {
   "admit.hold_below": {
@@ -70,131 +77,143 @@ export default function Tuning() {
   const anyTuned = state?.thresholds.some((t) => t.tuned) ?? false;
 
   const header = (
-    <PageHeader
-      title="Tuning"
-      description="Gather adjusts its own thresholds from your review answers. Here's what it learned, why, and how to undo it."
-      actions={
-        anyTuned && (
-          <Button
-            variant="secondary"
-            size="sm"
-            icon={RotateCcw}
-            onClick={() => reset()}
-            loading={busy === "all"}
-            disabled={busy !== null}
-          >
-            Reset all
-          </Button>
-        )
-      }
-    />
+    <Toolbar title="Tuning" icon={SlidersHorizontal}>
+      {anyTuned && (
+        <Button
+          variant="secondary"
+          size="sm"
+          icon={RotateCcw}
+          onClick={() => reset()}
+          loading={busy === "all"}
+          disabled={busy !== null}
+        >
+          Reset all
+        </Button>
+      )}
+    </Toolbar>
   );
 
   if (tuning.loading && !state) {
     return (
-      <section>
+      <>
         {header}
-        <Skeleton rows={3} variant="card" />
-      </section>
+        <div className="page">
+          <div className="page-inner page-narrow">
+            <Skeleton rows={3} variant="card" />
+          </div>
+        </div>
+      </>
     );
   }
   if (tuning.error || !state) {
     return (
-      <section>
+      <>
         {header}
-        <Callout title="Couldn't load tuning">{tuning.error}</Callout>
-      </section>
+        <div className="page">
+          <div className="page-inner page-narrow">
+            <Callout title="Couldn't load tuning">{tuning.error}</Callout>
+          </div>
+        </div>
+      </>
     );
   }
 
   return (
-    <section>
+    <>
       {header}
-      {state.enabled ? (
-        <Callout tone="accent" icon={Sparkles}>
-          Gather tightens a threshold when fewer than{" "}
-          <strong>{Math.round(state.target_precision * 100)}%</strong> of auto-accepted items hold
-          up, and loosens it only on strong evidence (at least <strong>{state.min_samples}</strong>{" "}
-          answers).
-        </Callout>
-      ) : (
-        <Callout tone="warning" icon={PauseCircle} title="Auto-tuning is paused">
-          GATHER_TUNE_ENABLED=false: the thresholds below are frozen at their current values,
-          learned or default, until it is turned back on or reset.
-        </Callout>
-      )}
-      {error && <Callout>{error}</Callout>}
+      <div className="page">
+        <div className="page-inner page-narrow">
+          <p className="page-lede">
+            Gather adjusts its own thresholds from your review answers. Here's what it learned, why,
+            and how to undo it.
+          </p>
+          {state.enabled ? (
+            <Callout tone="accent" icon={Sparkles}>
+              Gather tightens a threshold when fewer than{" "}
+              <strong>{Math.round(state.target_precision * 100)}%</strong> of auto-accepted items
+              hold up, and loosens it only on strong evidence (at least{" "}
+              <strong>{state.min_samples}</strong> answers).
+            </Callout>
+          ) : (
+            <Callout tone="warning" icon={PauseCircle} title="Auto-tuning is paused">
+              GATHER_TUNE_ENABLED=false: the thresholds below are frozen at their current values,
+              learned or default, until it is turned back on or reset.
+            </Callout>
+          )}
+          {error && <Callout>{error}</Callout>}
 
-      <ul className="thresholds">
-        {state.thresholds.map((t) => {
-          const label = KEY_LABELS[t.key] ?? { title: t.key, desc: "" };
-          return (
-            <li key={t.key} className="card threshold">
-              <div className="threshold-text">
-                <div className="threshold-title">
-                  <h2 className="card-title">{label.title}</h2>
-                  {t.tuned ? <Badge tone="accent">Learned</Badge> : <Badge>Default</Badge>}
-                </div>
-                <p className="card-desc">{label.desc}</p>
-                <code className="threshold-key">{t.key}</code>
-              </div>
-              <div className="threshold-value">
-                <span className="threshold-num num">{t.value.toFixed(2)}</span>
-                {t.tuned && (
-                  <>
-                    <span className="hint num">default {t.default.toFixed(2)}</span>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      icon={RotateCcw}
-                      onClick={() => reset(t.key)}
-                      loading={busy === t.key}
-                      disabled={busy !== null}
-                      className="threshold-reset"
-                      aria-label={`Reset ${label.title.toLowerCase()} to its default`}
-                    >
-                      Reset
-                    </Button>
-                  </>
-                )}
-              </div>
-              <RangeTrack t={t} />
-            </li>
-          );
-        })}
-      </ul>
+          <ul className="thresholds">
+            {state.thresholds.map((t) => {
+              const label = KEY_LABELS[t.key] ?? { title: t.key, desc: "" };
+              return (
+                <li key={t.key} className="panel threshold">
+                  <div className="threshold-text">
+                    <div className="threshold-title">
+                      <h2 className="threshold-name">{label.title}</h2>
+                      {t.tuned ? <Badge tone="accent">Learned</Badge> : <Badge>Default</Badge>}
+                    </div>
+                    <p className="threshold-desc">{label.desc}</p>
+                    <code className="threshold-key">{t.key}</code>
+                  </div>
+                  <div className="threshold-value">
+                    <span className="threshold-num num">{t.value.toFixed(2)}</span>
+                    {t.tuned && (
+                      <>
+                        <span className="hint num">default {t.default.toFixed(2)}</span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          icon={RotateCcw}
+                          onClick={() => reset(t.key)}
+                          loading={busy === t.key}
+                          disabled={busy !== null}
+                          className="threshold-reset"
+                          aria-label={`Reset ${label.title.toLowerCase()} to its default`}
+                        >
+                          Reset
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                  <RangeTrack t={t} />
+                </li>
+              );
+            })}
+          </ul>
 
-      <h2 className="section-label">
-        <History aria-hidden className="section-icon" /> History
-      </h2>
-      {state.history.length === 0 ? (
-        <p className="hint">No changes yet.</p>
-      ) : (
-        <ol className="timeline timeline-lg">
-          {state.history.map((h, i) => (
-            <li key={`${h.created_at}-${i}`}>
-              <When iso={h.created_at} className="timeline-time" />
-              <div>
-                <p>
-                  <strong>{KEY_LABELS[h.key]?.title ?? h.key}</strong>{" "}
-                  <span className="change num">
-                    {h.old_value?.toFixed(2) ?? "default"}
-                    <ChevronRight aria-label="to" />
-                    {h.new_value?.toFixed(2) ?? "default"}
-                  </span>{" "}
-                  <span className="muted">by {h.actor}</span>
-                </p>
-                {Object.keys(h.reason).length > 0 && (
-                  <details className="history">
-                    <summary>Why</summary>
-                    <pre className="evidence">{JSON.stringify(h.reason, null, 2)}</pre>
-                  </details>
-                )}
-              </div>
-            </li>
-          ))}
-        </ol>
-      )}
-    </section>
+          <h2 className="section-label">
+            <History aria-hidden className="section-icon" /> History
+          </h2>
+          {state.history.length === 0 ? (
+            <p className="hint">No changes yet.</p>
+          ) : (
+            <ol className="timeline timeline-lg">
+              {state.history.map((h, i) => (
+                <li key={`${h.created_at}-${i}`}>
+                  <When iso={h.created_at} className="timeline-time" />
+                  <div>
+                    <p>
+                      <strong>{KEY_LABELS[h.key]?.title ?? h.key}</strong>{" "}
+                      <span className="change num">
+                        {h.old_value?.toFixed(2) ?? "default"}
+                        <ChevronRight aria-label="to" />
+                        {h.new_value?.toFixed(2) ?? "default"}
+                      </span>{" "}
+                      <span className="muted">by {h.actor}</span>
+                    </p>
+                    {Object.keys(h.reason).length > 0 && (
+                      <details className="history">
+                        <summary>Why</summary>
+                        <pre className="evidence">{JSON.stringify(h.reason, null, 2)}</pre>
+                      </details>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      </div>
+    </>
   );
 }
