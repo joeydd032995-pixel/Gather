@@ -74,6 +74,31 @@
   flex: 1;
   min-height: 0;
 }
+/* Full view: the graph over the whole window (the window itself goes full
+   screen where it can). Below toasts, the upload tray and dialogs. */
+.graph-view.is-focus {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: var(--bg);
+  animation: scale-in var(--d-3) var(--ease-out) backwards;
+}
+.explorer-toast {
+  position: absolute;
+  left: 50%;
+  bottom: 72px;
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: var(--r-full);
+  transform: translateX(-50%);
+  font-size: var(--t-sm);
+  color: var(--text-2);
+  pointer-events: none;
+  animation: fade-up var(--d-3) var(--ease-out) backwards;
+}
 
 /* lead tiles by tone and file family */
 .lead-warning {

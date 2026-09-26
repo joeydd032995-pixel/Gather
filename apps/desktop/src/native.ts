@@ -8,6 +8,29 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
   return invoke<T>(command, args);
 }
 
+/**
+ * Puts the app window into (or out of) full screen: the native window in the
+ * desktop app, the page in a browser. Resolves to whether anything changed, so
+ * a caller that turned full screen on only undoes its own change.
+ */
+export async function setFullscreen(on: boolean): Promise<boolean> {
+  if (isTauri) {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    const win = getCurrentWindow();
+    if ((await win.isFullscreen()) === on) return false;
+    await win.setFullscreen(on);
+    return true;
+  }
+  if (on) {
+    if (document.fullscreenElement || !document.fullscreenEnabled) return false;
+    await document.documentElement.requestFullscreen();
+    return true;
+  }
+  if (!document.fullscreenElement) return false;
+  await document.exitFullscreen();
+  return true;
+}
+
 /** Start-up state of the bundled database and daemon. */
 export type RuntimeStatus =
   | { state: "starting"; step: string }

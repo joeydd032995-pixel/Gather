@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  ArrowRight,
+  Maximize2,
   Combine,
   FileText,
   GitCompareArrows,
@@ -134,12 +134,17 @@ function GraphPreview({ data, onOpen }: { data: GraphOverview; onOpen: () => voi
   }, [data]);
 
   return (
-    <button type="button" className="preview" onClick={onOpen} aria-label="Open the graph">
+    <button
+      type="button"
+      className="preview"
+      onClick={onOpen}
+      aria-label="Open the graph in full view"
+    >
       <div className="preview-canvas" ref={wrapRef}>
         <canvas ref={canvasRef} aria-hidden />
       </div>
       <span className="preview-cta">
-        Explore the graph <ArrowRight aria-hidden />
+        Open full view <Maximize2 aria-hidden />
       </span>
     </button>
   );
@@ -148,12 +153,20 @@ function GraphPreview({ data, onOpen }: { data: GraphOverview; onOpen: () => voi
 interface OverviewProps {
   ready: boolean;
   onNavigate: (tab: Tab) => void;
+  /** Opens the graph in full view. */
+  onOpenGraph: () => void;
   onOpenFile: (id: string) => void;
   onAddFiles: () => void;
 }
 
 /** The home screen: what Gather holds, what needs you, what came in lately. */
-export default function Overview({ ready, onNavigate, onOpenFile, onAddFiles }: OverviewProps) {
+export default function Overview({
+  ready,
+  onNavigate,
+  onOpenGraph,
+  onOpenFile,
+  onAddFiles,
+}: OverviewProps) {
   const [snap, setSnap] = useState<Snapshot | null>(null);
 
   useEffect(() => {
@@ -312,7 +325,7 @@ export default function Overview({ ready, onNavigate, onOpenFile, onAddFiles }: 
                   }
                 >
                   {snap.graph && snap.graph.entities.length > 0 ? (
-                    <GraphPreview data={snap.graph} onOpen={() => onNavigate("graph")} />
+                    <GraphPreview data={snap.graph} onOpen={onOpenGraph} />
                   ) : (
                     <p className="panel-pad hint">
                       The graph fills in as Gather finds people, places and ideas in your files.

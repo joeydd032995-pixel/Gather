@@ -9,7 +9,17 @@ import {
   forceY,
   type Simulation,
 } from "d3-force";
-import { FileText, Maximize2, Minus, Plus, Search, Waypoints, X } from "lucide-react";
+import {
+  FileText,
+  Maximize2,
+  Minimize2,
+  Minus,
+  Plus,
+  Scan,
+  Search,
+  Waypoints,
+  X,
+} from "lucide-react";
 import { getGraphOverview, type GraphOverview } from "./api";
 import { EntityPanel, FilePanel } from "./graph/Panels";
 import {
@@ -31,6 +41,7 @@ import {
   type View,
 } from "./graph/render";
 import { kindLabel, plural } from "./kinds";
+import { isTauri, setFullscreen } from "./native";
 import { Callout, EmptyState, IconButton, Kbd, Spinner, Toolbar, errorText } from "./ui";
 
 const SIZES = [50, 150, 400];
@@ -47,9 +58,19 @@ const ease = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 
 
 interface GraphProps {
   onOpenFile: (id: string) => void;
+  /** Open straight into full view, as the Overview preview does. */
+  initialFocus?: boolean;
 }
 
-export default function Graph({ onOpenFile }: GraphProps) {
+function isTyping(target: EventTarget | null): boolean {
+  return (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement
+  );
+}
+
+export default function Graph({ onOpenFile, initialFocus = false }: GraphProps) {
   const [size, setSize] = useState(150);
   const [showFiles, setShowFiles] = useState(true);
   const [hiddenKinds, setHiddenKinds] = useState<ReadonlySet<string>>(new Set());
@@ -219,6 +240,64 @@ export default function Graph({ onOpenFile }: GraphProps) {
     },
     [centreOn, requestDraw],
   );
+
+  // ------------------------------------------------------------ full view
+  // Full view gives the graph the whole screen: the app's sidebar and toolbar
+  // step aside and the window goes full screen; both come back on exit.
+  const [focus, setFocus] = useState(initialFocus);
+  const [exitHint, setExitHint] = useState(false);
+
+  useEffect(() => {
+    if (!focus) return;
+    const changed = setFullscreen(true).catch(() => false);
+    setExitHint(true);
+    const hint = setTimeout(() => setExitHint(false), 2600);
+    // A browser leaves full screen on Esc without a keydown; follow it out.
+    const onChange = () => {
+      if (!isTauri && !document.fullscreenElement) changed.then((c) => c && setFocus(false));
+    };
+    document.addEventListener("fullscreenchange", onChange);
+    return () => {
+      clearTimeout(hint);
+      setExitHint(false);
+      document.removeEventListener("fullscreenchange", onChange);
+      changed.then((c) => c && setFullscreen(false).catch(() => {}));
+    };
+  }, [focus]);
+
+  // Reframe once the stage has settled at its new size.
+  const reframe = useRef(() => {});
+  reframe.current = () => {
+    const node = selectedRef.current ? graphRef.current?.byKey.get(selectedRef.current) : undefined;
+    if (node) centreOn(node);
+    else fit();
+  };
+  const focusMounted = useRef(false);
+  useEffect(() => {
+    if (!focusMounted.current) {
+      focusMounted.current = true;
+      return;
+    }
+    const timer = setTimeout(() => reframe.current(), 320);
+    return () => clearTimeout(timer);
+  }, [focus]);
+
+  // F toggles full view; Esc first clears the selection, then leaves full view.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (isTyping(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (document.querySelector('[role="dialog"]')) return;
+      if (e.key === "f" || e.key === "F") {
+        e.preventDefault();
+        setFocus((f) => !f);
+      } else if (e.key === "Escape") {
+        if (selectedRef.current) select(null, false);
+        else if (focus) setFocus(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [focus, select]);
 
   // --------------------------------------------------------------- data
   useEffect(() => {
@@ -589,8 +668,6 @@ export default function Graph({ onOpenFile }: GraphProps) {
         return zoomBy(1 / 1.3);
       case "0":
         return fit();
-      case "Escape":
-        return select(null, false);
       case "/":
         e.preventDefault();
         return searchRef.current?.focus();
@@ -627,6 +704,8 @@ export default function Graph({ onOpenFile }: GraphProps) {
           : undefined
       }
     >
+      <IconButton icon={Maximize2} label="Full view (F)" size="sm" onClick={() => setFocus(true)} />
+      <span className="toolbar-sep" aria-hidden />
       <label className="toolbar-field">
         <span>Show</span>
         <select className="select" value={size} onChange={(e) => setSize(Number(e.target.value))}>
@@ -696,8 +775,8 @@ export default function Graph({ onOpenFile }: GraphProps) {
   };
 
   return (
-    <div className="graph-view">
-      {header}
+    <div className={focus ? "graph-view is-focus" : "graph-view"}>
+      {!focus && header}
       <div className={selectedNode ? "explorer has-drawer" : "explorer"} ref={stageRef}>
         <canvas
           ref={canvasRef}
@@ -708,7 +787,7 @@ export default function Graph({ onOpenFile }: GraphProps) {
           aria-label={`Graph of ${plural(graph?.nodes.length ?? 0, "item")} and ${plural(
             graph?.links.length ?? 0,
             "connection",
-          )}. Arrow keys pan, plus and minus zoom, 0 fits, slash searches.`}
+          )}. Arrow keys pan, plus and minus zoom, 0 fits, slash searches, F toggles full view.`}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
@@ -802,8 +881,21 @@ export default function Graph({ onOpenFile }: GraphProps) {
             onClick={() => zoomBy(1 / 1.35)}
           />
           <span className="explorer-divider-h" aria-hidden />
-          <IconButton icon={Maximize2} label="Fit to window (0)" size="sm" onClick={() => fit()} />
+          <IconButton icon={Scan} label="Fit everything (0)" size="sm" onClick={() => fit()} />
+          <span className="explorer-divider-h" aria-hidden />
+          <IconButton
+            icon={focus ? Minimize2 : Maximize2}
+            label={focus ? "Exit full view (Esc)" : "Full view (F)"}
+            size="sm"
+            onClick={() => setFocus((f) => !f)}
+          />
         </div>
+
+        {focus && exitHint && (
+          <div className="explorer-toast glass" role="status">
+            Press <Kbd>Esc</Kbd> to exit full view
+          </div>
+        )}
 
         {/* legend: also a filter */}
         <div className="explorer-legend glass" role="group" aria-label="Show or hide kinds">

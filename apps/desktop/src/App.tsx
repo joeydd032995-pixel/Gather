@@ -101,9 +101,16 @@ export default function App() {
   const counts = useAttention(health.ready, tab);
   const uploads = useUploads();
 
+  const [graphFocus, setGraphFocus] = useState(false);
   const go = useCallback((next: Tab) => {
     navigated.current = true;
+    setGraphFocus(false);
     setTab(next);
+  }, []);
+  const openGraphFullView = useCallback(() => {
+    navigated.current = true;
+    setGraphFocus(true);
+    setTab("graph");
   }, []);
 
   // In the packaged app, pick up the daemon's bearer token from the OS
@@ -351,6 +358,7 @@ export default function App() {
               <Overview
                 ready={health.ready}
                 onNavigate={go}
+                onOpenGraph={openGraphFullView}
                 onOpenFile={openFile}
                 onAddFiles={addFiles}
               />
@@ -358,7 +366,7 @@ export default function App() {
             {tab === "library" && (
               <Library selected={libraryFile} onSelect={setLibraryFile} onAddFiles={addFiles} />
             )}
-            {tab === "graph" && <Graph onOpenFile={openFile} />}
+            {tab === "graph" && <Graph onOpenFile={openFile} initialFocus={graphFocus} />}
             {tab === "review" && <ReviewTray />}
             {tab === "clusters" && <Clusters />}
             {tab === "photos" && <Photos />}
