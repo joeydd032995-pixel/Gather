@@ -1,97 +1,117 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  checkHealth,
-  setApiToken,
-  uploadFiles,
-  type FileResult,
-  type HealthState,
-} from "./api";
+  ArrowUpRight,
+  Command as CommandIcon,
+  LoaderCircle,
+  Monitor,
+  Moon,
+  Plus,
+  Search,
+  Sun,
+  TriangleAlert,
+} from "lucide-react";
+import { checkHealth, setApiToken, type HealthState } from "./api";
 import Clusters from "./Clusters";
 import Contradictions from "./Contradictions";
 import Entities from "./Entities";
 import Graph from "./Graph";
-import Library from "./Library";
-import Photos from "./Photos";
+import { useAttention } from "./hooks/useAttention";
 import { useRuntime } from "./hooks/useRuntime";
+import { useTheme, type ThemeChoice } from "./hooks/useTheme";
+import Library from "./Library";
+import Logo from "./Logo";
 import { checkForUpdate, getApiToken, getUpdateSettings, isTauri } from "./native";
+import { NAV, NAV_ITEMS, type Tab } from "./nav";
+import Overview from "./Overview";
+import Palette, { type Command } from "./Palette";
+import Photos from "./Photos";
 import ReviewTray from "./ReviewTray";
 import Settings from "./Settings";
 import Tuning from "./Tuning";
+import { Button, Callout, SectionContext } from "./ui";
+import { DropOverlay, FallbackInput, UploadTray, useUploads } from "./uploads";
 
-type Tab =
-  | "upload"
-  | "library"
-  | "graph"
-  | "review"
-  | "clusters"
-  | "photos"
-  | "contradictions"
-  | "entities"
-  | "tuning"
-  | "settings";
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
+const MOD = isMac ? "⌘" : "Ctrl+";
 
-const TABS: { id: Tab; label: string }[] = [
-  { id: "upload", label: "Upload" },
-  { id: "library", label: "Library" },
-  { id: "graph", label: "Graph" },
-  { id: "review", label: "Review" },
-  { id: "clusters", label: "Groups" },
-  { id: "photos", label: "Photos" },
-  { id: "contradictions", label: "Contradictions" },
-  { id: "entities", label: "Entities" },
-  { id: "tuning", label: "Tuning" },
-  { id: "settings", label: "Settings" },
-];
+const THEME_ICONS: Record<ThemeChoice, typeof Sun> = { system: Monitor, light: Sun, dark: Moon };
+const THEME_NEXT: Record<ThemeChoice, ThemeChoice> = {
+  system: "light",
+  light: "dark",
+  dark: "system",
+};
 
-// Native file picker (Tauri dialog plugin). In a plain browser (vite dev
-// outside Tauri) we fall back to a hidden <input type="file">.
-
-/** A file to upload, read only when its turn comes so a large batch never
- *  sits in memory all at once. */
-interface UploadSource {
-  name: string;
-  load: () => Promise<Blob>;
+/** Start-up and failure screens, before the main window is usable. */
+function Splash({ step, error, logDir }: { step?: string; error?: string; logDir?: string }) {
+  return (
+    <div className="splash">
+      <div className="splash-glow" aria-hidden />
+      <div className="splash-card">
+        <Logo size={56} />
+        <h1 className="splash-title">Gather</h1>
+        {error ? (
+          <>
+            <Callout title="Gather couldn't start">{error}</Callout>
+            {logDir && (
+              <p className="hint">
+                Logs are in <code>{logDir}</code>
+              </p>
+            )}
+          </>
+        ) : (
+          <p className="splash-step" role="status" aria-live="polite">
+            <LoaderCircle className="spin" aria-hidden />
+            {step}…
+          </p>
+        )}
+      </div>
+    </div>
+  );
 }
 
-function fromFiles(files: File[]): UploadSource[] {
-  return files.map((file) => ({ name: file.name, load: async () => file }));
-}
-
-async function pickWithNativeDialog(): Promise<UploadSource[]> {
-  const { open } = await import("@tauri-apps/plugin-dialog");
-  const selection = await open({
-    multiple: true,
-    title: "Add documents or photos to Gather",
-    filters: [
-      {
-        name: "Documents & images",
-        extensions: ["pdf", "md", "markdown", "txt", "png", "jpg", "jpeg", "webp", "tiff", "heic"],
-      },
-    ],
-  });
-  if (!selection) return [];
-  const paths = Array.isArray(selection) ? selection : [selection];
-  const { invoke } = await import("@tauri-apps/api/core");
-  return paths.map((path) => ({
-    name: path.split(/[\\/]/).pop() ?? "unnamed",
-    load: async () => new Blob([await invoke<ArrayBuffer>("read_upload_file", { path })]),
-  }));
+function HealthPill({ health }: { health: HealthState }) {
+  const state = health.ready ? "ok" : health.reachable ? "warn" : "down";
+  const label = health.ready ? "Local · ready" : health.reachable ? "Database starting" : "Offline";
+  const detail = health.ready
+    ? "The local daemon and database are running. Everything stays on this computer."
+    : health.reachable
+      ? "The daemon is up but its database isn't ready yet."
+      : "Gather's local daemon isn't reachable. Retrying every 5 seconds.";
+  return (
+    <div className={`health health-${state}`} title={detail} role="status" aria-live="polite">
+      <span className="health-dot" aria-hidden />
+      <span className="health-label">{label}</span>
+    </div>
+  );
 }
 
 export default function App() {
   const runtime = useRuntime();
   const settled = runtime.state === "ready" || runtime.state === "unmanaged";
-  const [tab, setTab] = useState<Tab>("upload");
-  /** The file open in the Library; the graph and upload results set it too. */
+  const [tab, setTab] = useState<Tab>("home");
+  /** The file open in the Library; the graph and uploads set it too. */
   const [libraryFile, setLibraryFile] = useState<string | null>(null);
   const [updateVersion, setUpdateVersion] = useState<string | null>(null);
   const [health, setHealth] = useState<HealthState>({ reachable: false, ready: false });
-  const [dragging, setDragging] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
-  const [results, setResults] = useState<FileResult[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const fallbackInput = useRef<HTMLInputElement>(null);
+  const [checkedHealth, setCheckedHealth] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [theme, setTheme] = useTheme();
+  const mainRef = useRef<HTMLElement>(null);
+  const navigated = useRef(false);
+  const counts = useAttention(health.ready, tab);
+  const uploads = useUploads();
+
+  const [graphFocus, setGraphFocus] = useState(false);
+  const go = useCallback((next: Tab) => {
+    navigated.current = true;
+    setGraphFocus(false);
+    setTab(next);
+  }, []);
+  const openGraphFullView = useCallback(() => {
+    navigated.current = true;
+    setGraphFocus(true);
+    setTab("graph");
+  }, []);
 
   // In the packaged app, pick up the daemon's bearer token from the OS
   // keychain (written by the daemon in GATHER_AUTH_MODE=keychain). Waits for
@@ -124,7 +144,9 @@ export default function App() {
     let cancelled = false;
     const poll = async () => {
       const h = await checkHealth();
-      if (!cancelled) setHealth(h);
+      if (cancelled) return;
+      setHealth(h);
+      setCheckedHealth(true);
     };
     poll();
     const timer = setInterval(poll, 5000);
@@ -134,222 +156,232 @@ export default function App() {
     };
   }, []);
 
-  // One file per request, one at a time: memory stays at one file however
-  // large the batch, and a file that fails doesn't stop the rest.
-  const ingest = useCallback(async (sources: UploadSource[]) => {
-    if (sources.length === 0) return;
-    setBusy(true);
-    setError(null);
-    for (const [i, source] of sources.entries()) {
-      setProgress({ done: i, total: sources.length });
-      try {
-        const blob = await source.load();
-        // A browser File keeps its MIME type, which the daemon uses to
-        // classify files whose extension doesn't say what they are.
-        const file =
-          blob instanceof File ? blob : new File([blob], source.name, { type: blob.type });
-        const response = await uploadFiles([file]);
-        setResults((prev) => [...response.files, ...prev]);
-      } catch (e) {
-        const detail = e instanceof Error ? e.message : String(e);
-        setResults((prev) => [
-          {
-            filename: source.name,
-            kind: null,
-            artifact_id: null,
-            deduplicated: false,
-            status: "rejected",
-            detail,
-            segments: 0,
-          },
-          ...prev,
-        ]);
-      }
-    }
-    setProgress(null);
-    setBusy(false);
-  }, []);
+  // A view change moves focus to its title, so screen readers announce it
+  // and keyboard users start at the top of the new view.
+  useEffect(() => {
+    if (!navigated.current) return;
+    mainRef.current
+      ?.querySelector<HTMLElement>("[data-page-title]")
+      ?.focus({ preventScroll: true });
+  }, [tab]);
 
-  const onDrop = useCallback(
-    (event: React.DragEvent) => {
-      event.preventDefault();
-      setDragging(false);
-      ingest(fromFiles(Array.from(event.dataTransfer.files)));
+  const { pick } = uploads;
+  const addFiles = useCallback(() => {
+    if (health.ready) pick();
+  }, [health.ready, pick]);
+
+  // Global shortcuts: ⌘K palette, ⌘O add files.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const key = e.key.toLowerCase();
+      if (key === "k") {
+        e.preventDefault();
+        setPaletteOpen((open) => !open);
+      } else if (key === "o") {
+        e.preventDefault();
+        addFiles();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [addFiles]);
+
+  // Lets the visual checks in development drive navigation.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    (window as unknown as { __gatherNav?: (t: Tab) => void }).__gatherNav = go;
+  }, [go]);
+
+  const openFile = useCallback(
+    (id: string) => {
+      setLibraryFile(id);
+      go("library");
     },
-    [ingest],
+    [go],
   );
 
-  const onPick = useCallback(async () => {
-    if (isTauri) {
-      try {
-        await ingest(await pickWithNativeDialog());
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      }
-    } else {
-      fallbackInput.current?.click();
-    }
-  }, [ingest]);
+  const commands = useMemo<Command[]>(
+    () => [
+      ...NAV_ITEMS.map((item) => ({
+        id: `go-${item.id}`,
+        group: "Go to",
+        label: item.label,
+        hint: item.hint,
+        icon: item.icon,
+        run: () => go(item.id),
+      })),
+      {
+        id: "add-files",
+        group: "Actions",
+        label: "Add files…",
+        hint: `${MOD}O`,
+        icon: Plus,
+        run: addFiles,
+      },
+      ...(["light", "dark", "system"] as ThemeChoice[]).map((choice) => ({
+        id: `theme-${choice}`,
+        group: "Appearance",
+        label: choice === "system" ? "Match system appearance" : `Use ${choice} appearance`,
+        hint: theme === choice ? "current" : undefined,
+        icon: THEME_ICONS[choice],
+        run: () => setTheme(choice),
+      })),
+    ],
+    [addFiles, go, setTheme, theme],
+  );
 
-  if (runtime.state === "starting" || runtime.state === "failed") {
-    return (
-      <main className="app">
-        <header>
-          <h1>Gather</h1>
-        </header>
-        {runtime.state === "starting" ? (
-          <p className="hint">{runtime.step}…</p>
-        ) : (
-          <>
-            <p className="error">{runtime.message}</p>
-            {runtime.log_dir && <p className="hint">Logs: {runtime.log_dir}</p>}
-          </>
-        )}
-      </main>
-    );
+  if (runtime.state === "starting") return <Splash step={runtime.step} />;
+  if (runtime.state === "failed") {
+    return <Splash error={runtime.message} logDir={runtime.log_dir} />;
   }
 
+  const ThemeIcon = THEME_ICONS[theme];
+  const section = NAV.find((g) => g.items.some((i) => i.id === tab))?.label ?? null;
+
   return (
-    <main className={tab === "library" || tab === "graph" ? "app wide" : "app"}>
-      <header>
-        <h1>Gather</h1>
-        <span
-          className={`health ${health.ready ? "ok" : health.reachable ? "warn" : "down"}`}
-          title={health.ready ? "daemon ready" : health.reachable ? "daemon up, database not ready" : "daemon unreachable"}
-        >
-          {health.ready ? "● local daemon ready" : health.reachable ? "● database not ready" : "○ daemon offline"}
-        </span>
-      </header>
+    <div className="shell">
+      <a className="skip-link" href="#content">
+        Skip to content
+      </a>
 
-      {updateVersion && (
-        <p className="hint">
-          Gather {updateVersion} is available.{" "}
-          <button className="link-button" onClick={() => setTab("settings")}>
-            Update in Settings
-          </button>
-        </p>
-      )}
-
-      <nav className="tabs">
-        {TABS.map((t) => (
+      <aside className="sidebar">
+        <div className="brand">
+          <Logo />
+          <span className="brand-name">Gather</span>
           <button
-            key={t.id}
-            className={tab === t.id ? "tab active" : "tab"}
-            onClick={() => setTab(t.id)}
+            type="button"
+            className="theme-toggle"
+            onClick={() => setTheme(THEME_NEXT[theme])}
+            aria-label={`Appearance: ${theme}. Switch to ${THEME_NEXT[theme]}.`}
+            data-tip={`Appearance: ${theme}`}
+            data-tip-side="bottom"
           >
-            {t.label}
+            <ThemeIcon aria-hidden />
           </button>
-        ))}
-      </nav>
+        </div>
 
-      {tab === "library" && <Library selected={libraryFile} onSelect={setLibraryFile} />}
+        <div className="sidebar-actions">
+          <Button
+            variant="primary"
+            icon={Plus}
+            className="add-button"
+            onClick={addFiles}
+            disabled={!health.ready}
+            aria-label={`Add files (${MOD}O)`}
+          >
+            <span className="add-label">Add files</span>
+          </Button>
+          <button
+            type="button"
+            className="jump"
+            onClick={() => setPaletteOpen(true)}
+            aria-label={`Search or jump to… (${MOD}K)`}
+            data-tip={`Jump to… ${MOD}K`}
+            data-tip-side="right"
+          >
+            <Search aria-hidden />
+            <span className="jump-label">Jump to…</span>
+            <span className="jump-kbd" aria-hidden>
+              {isMac ? <CommandIcon size={10} /> : "Ctrl"}
+              <span>K</span>
+            </span>
+          </button>
+        </div>
 
-      {tab === "graph" && (
-        <Graph
-          onOpenFile={(id) => {
-            setLibraryFile(id);
-            setTab("library");
-          }}
-        />
-      )}
+        <nav className="nav" aria-label="Main">
+          {NAV.map((group) => (
+            <div className="nav-group" key={group.label ?? "top"}>
+              {group.label && <div className="nav-group-label">{group.label}</div>}
+              <ul>
+                {group.items.map((item) => {
+                  const Icon = item.icon;
+                  const count = counts[item.id];
+                  const active = tab === item.id;
+                  return (
+                    <li key={item.id}>
+                      <button
+                        type="button"
+                        className={active ? "nav-item active" : "nav-item"}
+                        aria-current={active ? "page" : undefined}
+                        onClick={() => go(item.id)}
+                        data-tip={item.label}
+                        data-tip-side="right"
+                      >
+                        <Icon className="nav-icon" aria-hidden />
+                        <span className="nav-label">{item.label}</span>
+                        {count !== undefined && count > 0 && (
+                          <span className="nav-count num" aria-label={`${count} waiting`}>
+                            {count > 99 ? "99+" : count}
+                          </span>
+                        )}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ))}
+        </nav>
 
-      {tab === "review" && <ReviewTray />}
+        <div className="sidebar-foot">
+          {updateVersion && (
+            <button type="button" className="update-chip" onClick={() => go("settings")}>
+              <ArrowUpRight aria-hidden />
+              <span>Gather {updateVersion} is available</span>
+            </button>
+          )}
+          <HealthPill health={health} />
+        </div>
+      </aside>
 
-      {tab === "clusters" && <Clusters />}
+      <main id="content" className="main" ref={mainRef}>
+        {checkedHealth && !health.reachable && tab !== "settings" && (
+          <div className="offline-bar">
+            <Callout
+              tone="warning"
+              icon={TriangleAlert}
+              title="Can't reach Gather's local daemon"
+              action={
+                <Button size="sm" onClick={() => checkHealth().then(setHealth)}>
+                  Retry now
+                </Button>
+              }
+            >
+              Nothing is lost; your library is still on disk. Gather retries every few seconds.
+            </Callout>
+          </div>
+        )}
+        <SectionContext.Provider value={section}>
+          <div className="view" key={tab}>
+            {tab === "home" && (
+              <Overview
+                ready={health.ready}
+                onNavigate={go}
+                onOpenGraph={openGraphFullView}
+                onOpenFile={openFile}
+                onAddFiles={addFiles}
+              />
+            )}
+            {tab === "library" && (
+              <Library selected={libraryFile} onSelect={setLibraryFile} onAddFiles={addFiles} />
+            )}
+            {tab === "graph" && <Graph onOpenFile={openFile} initialFocus={graphFocus} />}
+            {tab === "review" && <ReviewTray />}
+            {tab === "clusters" && <Clusters />}
+            {tab === "photos" && <Photos />}
+            {tab === "contradictions" && <Contradictions />}
+            {tab === "entities" && <Entities />}
+            {tab === "tuning" && <Tuning />}
+            {tab === "settings" && <Settings theme={theme} onTheme={setTheme} />}
+          </div>
+        </SectionContext.Provider>
+      </main>
 
-      {tab === "photos" && <Photos />}
-
-      {tab === "tuning" && <Tuning />}
-
-      {tab === "settings" && <Settings />}
-
-      {tab === "contradictions" && <Contradictions />}
-
-      {tab === "entities" && <Entities />}
-
-      {tab === "upload" && (
-      <>
-      <section
-        className={`dropzone ${dragging ? "dragging" : ""}`}
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragging(true);
-        }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={onDrop}
-      >
-        <p>Drag &amp; drop PDFs, markdown, text files, photos or screenshots here</p>
-        <button onClick={onPick} disabled={busy || !health.ready}>
-          {progress
-            ? `Uploading ${progress.done + 1} of ${progress.total}…`
-            : busy
-              ? "Uploading…"
-              : "Choose files…"}
-        </button>
-        <input
-          ref={fallbackInput}
-          type="file"
-          multiple
-          hidden
-          accept=".pdf,.md,.markdown,.txt,.png,.jpg,.jpeg,.webp,.tiff,.heic"
-          onChange={(e) => {
-            ingest(fromFiles(Array.from(e.target.files ?? [])));
-            e.target.value = "";
-          }}
-        />
-      </section>
-
-      {error && <p className="error">{error}</p>}
-      </>
-      )}
-
-      {tab === "upload" && results.length > 0 && (
-        <p className="hint">
-          Gather reads each file in the background. Click a file name to see what it found, or
-          open the Library tab.
-        </p>
-      )}
-
-      {tab === "upload" && results.length > 0 && (
-        <table className="results">
-          <thead>
-            <tr>
-              <th>File</th>
-              <th>Kind</th>
-              <th>Status</th>
-              <th>Segments</th>
-            </tr>
-          </thead>
-          <tbody>
-            {results.map((r, i) => (
-              <tr key={`${r.artifact_id ?? r.filename}-${i}`}>
-                <td>
-                  {r.artifact_id ? (
-                    <button
-                      className="link-button"
-                      title="See what Gather found in this file"
-                      onClick={() => {
-                        setLibraryFile(r.artifact_id);
-                        setTab("library");
-                      }}
-                    >
-                      {r.filename}
-                    </button>
-                  ) : (
-                    r.filename
-                  )}
-                </td>
-                <td>{r.kind ?? "—"}</td>
-                <td className={`status-${r.status}`}>
-                  {r.status}
-                  {r.detail ? ` — ${r.detail}` : ""}
-                </td>
-                <td>{r.segments}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </main>
+      <FallbackInput inputRef={uploads.fallbackInput} onFiles={uploads.addFiles} />
+      <DropOverlay onFiles={uploads.addFiles} enabled={health.ready} />
+      <UploadTray items={uploads.items} onOpen={openFile} onClear={uploads.clear} />
+      {paletteOpen && <Palette commands={commands} onClose={() => setPaletteOpen(false)} />}
+    </div>
   );
 }

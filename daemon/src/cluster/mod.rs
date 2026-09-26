@@ -155,6 +155,28 @@ pub fn cohesion(members: &[usize], edges: &[Edge]) -> f32 {
     intra.iter().sum::<f32>() / intra.len() as f32
 }
 
+/// Whether every pair of `members` is joined by a direct edge (a clique).
+///
+/// Connected components are transitive: A~B and B~C put A and C together
+/// even when A and C share nothing. Callers that act on a whole component
+/// (merging entities, grouping photos as copies of one another) use this to
+/// insist that each member matches every other one, not merely a neighbour.
+/// Pairs and singletons are trivially complete.
+pub fn is_complete(members: &[usize], edges: &[Edge]) -> bool {
+    if members.len() < 3 {
+        return true;
+    }
+    let set: std::collections::HashSet<usize> = members.iter().copied().collect();
+    let mut pairs: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    for e in edges {
+        if set.contains(&e.a) && set.contains(&e.b) {
+            pairs.insert((e.a.min(e.b), e.a.max(e.b)));
+        }
+    }
+    let k = members.len();
+    pairs.len() == k * (k - 1) / 2
+}
+
 const LABEL_STOPWORDS: &[&str] = &[
     "the", "and", "for", "with", "that", "this", "from", "into", "our", "was", "were", "are",
     "you", "your", "his", "her", "its", "their", "not", "but", "all", "any", "can", "has", "have",
@@ -298,5 +320,54 @@ mod tests {
             "the postgres store",
         ];
         assert_eq!(label_from_texts(&texts), "postgres");
+    }
+
+    #[test]
+    fn a_bridged_chain_is_not_complete() {
+        // A-B and B-C but no A-C: one component, not a clique.
+        let edges = [
+            Edge {
+                a: 0,
+                b: 1,
+                sim: 0.95,
+            },
+            Edge {
+                a: 1,
+                b: 2,
+                sim: 0.95,
+            },
+        ];
+        assert!(!is_complete(&[0, 1, 2], &edges));
+        // Adding A-C closes the triangle.
+        let closed = [
+            edges[0],
+            edges[1],
+            Edge {
+                a: 0,
+                b: 2,
+                sim: 0.93,
+            },
+        ];
+        assert!(is_complete(&[0, 1, 2], &closed));
+    }
+
+    #[test]
+    fn pairs_and_singletons_are_complete_and_outside_edges_are_ignored() {
+        let edges = [
+            Edge {
+                a: 0,
+                b: 1,
+                sim: 0.9,
+            },
+            Edge {
+                a: 1,
+                b: 5,
+                sim: 0.9,
+            },
+        ];
+        assert!(is_complete(&[0, 1], &edges));
+        assert!(is_complete(&[3], &edges));
+        // An edge leaving the group doesn't count towards completeness.
+        assert!(!is_complete(&[0, 1, 2], &edges));
     }
 }

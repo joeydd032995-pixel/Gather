@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "Gather — local knowledge daemon",
-        "width": 900,
-        "height": 640,
+        "width": 1200,
+        "height": 800,
         "minWidth": 640,
         "minHeight": 480,
         "dragDropEnabled": false

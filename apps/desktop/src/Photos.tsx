@@ -1,81 +1,76 @@
 import { useState } from "react";
+import { ArrowLeft, Images, Star } from "lucide-react";
 import { getCluster, type ClusterKind, type ClusterSummary } from "./api";
 import { useAsync } from "./hooks/useAsync";
 import { usePagedClusters } from "./hooks/usePagedClusters";
+import { plural } from "./kinds";
 import Thumbnail from "./Thumbnail";
+import { Badge, Button, Callout, EmptyState, IconButton, Segmented, Toolbar } from "./ui";
 
-const KINDS: { kind: ClusterKind; label: string; empty: string }[] = [
+const KINDS: { value: ClusterKind; label: string; empty: string }[] = [
   {
-    kind: "album",
+    value: "album",
     label: "Albums",
-    empty: "No albums yet. Albums form from photos with EXIF capture times.",
+    empty: "Albums form on their own from photos with EXIF capture times.",
   },
+  { value: "photo_dup", label: "Duplicates", empty: "No near-duplicate photos found." },
   {
-    kind: "photo_dup",
-    label: "Duplicates",
-    empty: "No near-duplicate photos found.",
-  },
-  {
-    kind: "photo_topic",
+    value: "photo_topic",
     label: "Visual topics",
-    empty: "No visual topics. They need a local vision model (GATHER_OLLAMA_VISION_MODEL).",
+    empty: "Visual topics need a local vision model (GATHER_OLLAMA_VISION_MODEL).",
   },
 ];
 
-const PREVIEW_SIZE = 96;
-const COVER_SIZE = 160;
-/** Thumbnails shown per expanded group before "Show more" (each is a local decode). */
+/** Thumbnails shown per open group before "Show more" (each is a local decode). */
 const PHOTOS_PER_PAGE = 48;
 
 function GroupPhotos({ cluster }: { cluster: ClusterSummary }) {
   const detail = useAsync(() => getCluster(cluster.id), [cluster.id]);
   const [shown, setShown] = useState(PHOTOS_PER_PAGE);
-  if (detail.loading) return <p className="prov-empty">Loading…</p>;
-  if (detail.error) return <p className="error">{detail.error}</p>;
   const members = detail.data?.members ?? [];
   // Only a duplicate group's representative is its sharpest copy; for albums
   // and topics it is just the first photo, so it gets no badge.
   const isDuplicateGroup = cluster.kind === "photo_dup";
+  if (detail.error) return <Callout>{detail.error}</Callout>;
   return (
     <>
-      <div className="photo-grid">
-        {members.slice(0, shown).map((m) => (
-          <figure key={m.member_id} className="photo">
-            <Thumbnail imageId={m.member_id} alt={m.filename ?? "photo"} size={PREVIEW_SIZE} />
-            <figcaption>
-              {isDuplicateGroup && m.member_id === cluster.representative_id && (
-                <span className="prov-badge">best</span>
-              )}
-              {m.caption ?? m.filename ?? ""}
-            </figcaption>
-          </figure>
-        ))}
-      </div>
+      {isDuplicateGroup && (
+        <p className="hint album-note">The sharpest copy is marked best. Nothing was deleted.</p>
+      )}
+      <ul className="photo-grid">
+        {detail.loading && !detail.data
+          ? Array.from({ length: Math.min(cluster.size, 12) }, (_, i) => (
+              <li key={i}>
+                <div className="thumb thumb-loading" />
+              </li>
+            ))
+          : members.slice(0, shown).map((m) => {
+              const best = isDuplicateGroup && m.member_id === cluster.representative_id;
+              return (
+                <li key={m.member_id}>
+                  <figure className={best ? "photo best" : "photo"}>
+                    <Thumbnail imageId={m.member_id} alt={m.caption ?? m.filename ?? "photo"} />
+                    {best && (
+                      <Badge tone="accent" icon={Star} className="photo-best">
+                        Best
+                      </Badge>
+                    )}
+                    <figcaption title={m.caption ?? m.filename ?? ""}>
+                      {m.caption ?? m.filename ?? ""}
+                    </figcaption>
+                  </figure>
+                </li>
+              );
+            })}
+      </ul>
       {members.length > shown && (
-        <button className="load-more" onClick={() => setShown((n) => n + PHOTOS_PER_PAGE)}>
-          Show more ({members.length - shown} left)
-        </button>
+        <div className="list-more">
+          <Button onClick={() => setShown((n) => n + PHOTOS_PER_PAGE)}>
+            Show more · {members.length - shown} left
+          </Button>
+        </div>
       )}
     </>
-  );
-}
-
-function PhotoGroup({ cluster }: { cluster: ClusterSummary }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <li className="photo-group">
-      <button className="photo-cover" onClick={() => setOpen((o) => !o)}>
-        {cluster.representative_id ? (
-          <Thumbnail imageId={cluster.representative_id} alt={cluster.label} size={COVER_SIZE} />
-        ) : (
-          <div className="thumb" style={{ width: COVER_SIZE, height: COVER_SIZE }} />
-        )}
-        <span className="photo-label">
-          {cluster.label} · {cluster.size}
-        </span>
-      </button>
-      {open && <GroupPhotos cluster={cluster} />}
-    </li>
   );
 }
 
@@ -83,37 +78,81 @@ function PhotoGroup({ cluster }: { cluster: ClusterSummary }) {
  *  grouped with the sharpest copy marked "best". */
 export default function Photos() {
   const [kind, setKind] = useState<ClusterKind>("album");
+  const [open, setOpen] = useState<ClusterSummary | null>(null);
   const groups = usePagedClusters(kind);
-  const current = KINDS.find((k) => k.kind === kind);
+  const current = KINDS.find((k) => k.value === kind);
+
+  if (open) {
+    return (
+      <>
+        <Toolbar title={open.label} icon={Images} count={open.size}>
+          <IconButton icon={ArrowLeft} label="All groups" size="sm" onClick={() => setOpen(null)} />
+        </Toolbar>
+        <div className="page">
+          <div className="page-inner gallery">
+            <GroupPhotos cluster={open} />
+          </div>
+        </div>
+      </>
+    );
+  }
 
   return (
-    <section>
-      <nav className="subtabs">
-        {KINDS.map((k) => (
-          <button
-            key={k.kind}
-            className={kind === k.kind ? "tab active" : "tab"}
-            onClick={() => setKind(k.kind)}
-          >
-            {k.label}
-          </button>
-        ))}
-      </nav>
-      {groups.error && <p className="error">{groups.error}</p>}
-      {!groups.loading && groups.items.length === 0 && (
-        <p className="prov-empty">{current?.empty}</p>
+    <>
+      <Toolbar title="Photos" icon={Images} count={groups.items.length || undefined}>
+        <Segmented label="Photo grouping" options={KINDS} value={kind} onChange={setKind} />
+      </Toolbar>
+      {!groups.loading && !groups.error && groups.items.length === 0 ? (
+        <EmptyState icon={Images} title={`No ${current?.label.toLowerCase() ?? "groups"} yet`}>
+          {current?.empty}
+        </EmptyState>
+      ) : (
+        <div className="page">
+          <div className="page-inner gallery">
+            {groups.error && <Callout title="Couldn't load photos">{groups.error}</Callout>}
+            <ul className="album-grid">
+              {groups.loading && groups.items.length === 0
+                ? Array.from({ length: 6 }, (_, i) => (
+                    <li key={i}>
+                      <div className="album-cover">
+                        <div className="thumb thumb-loading" />
+                      </div>
+                    </li>
+                  ))
+                : groups.items.map((c, i) => (
+                    <li key={c.id} style={{ animationDelay: `${Math.min(i, 8) * 40}ms` }}>
+                      <button
+                        type="button"
+                        className="album-card"
+                        data-album
+                        onClick={() => setOpen(c)}
+                      >
+                        <span className="album-cover">
+                          {c.representative_id ? (
+                            <Thumbnail imageId={c.representative_id} alt="" />
+                          ) : (
+                            <span className="thumb" />
+                          )}
+                          <span className="album-shade" aria-hidden />
+                          <span className="album-caption">
+                            <span className="album-label">{c.label}</span>
+                            <span className="album-count">{plural(c.size, "photo")}</span>
+                          </span>
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+            </ul>
+            {groups.hasMore && (
+              <div className="list-more">
+                <Button onClick={groups.loadMore} loading={groups.loading}>
+                  Load more
+                </Button>
+              </div>
+            )}
+          </div>
+        </div>
       )}
-      <ul className="photo-groups">
-        {groups.items.map((c) => (
-          <PhotoGroup key={c.id} cluster={c} />
-        ))}
-      </ul>
-      {groups.loading && <p>Loading…</p>}
-      {groups.hasMore && !groups.loading && (
-        <button className="load-more" onClick={groups.loadMore}>
-          Load more
-        </button>
-      )}
-    </section>
+    </>
   );
 }

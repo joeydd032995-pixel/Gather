@@ -112,8 +112,12 @@ each through the conservative gate above, supplying *both* signals when they exi
 takes components of the **Auto** edges only:
 
 - Each component is **one merge decision**, not one per pair.
+- A component merges only if **every pair** in it cleared the Auto bar. A chain (A~B and B~C
+  but not A~C) would otherwise fold unrelated entities together through one bridging name, so
+  its pairs are parked in the review tray one by one instead, each shown as a possible
+  duplicate you can merge or mark as different.
 - Components larger than `GATHER_CLUSTER_MAX_COMPONENT` are parked for review instead of
-  merged wholesale (the chaining guard).
+  merged wholesale.
 - The survivor is the most specific entity: a typed entity (e.g. `person`) beats an
   extraction-created `other`, then the longest name wins.
 
@@ -229,9 +233,12 @@ deleted**. A background worker (`GATHER_PHOTO_*`) runs three steps:
    is pure Rust (JPEG, PNG, WebP, TIFF, GIF, BMP) with size and allocation limits. Formats it
    can't decode, such as HEIC, get no hash and are simply left out of duplicate grouping.
 2. **Regroup** (whenever new photos have been prepared) over the whole library:
-   - **Near-duplicates**: photos within `GATHER_PHOTO_DUP_MAX_DISTANCE` bits, transitively.
-     Candidates come from banding the hash into `distance + 1` chunks: two hashes that close
-     must match exactly on at least one chunk, so only photos sharing a chunk are compared. The
+   - **Near-duplicates**: photos within `GATHER_PHOTO_DUP_MAX_DISTANCE` bits of *every* other
+     photo in their group. Candidates come from banding the hash into `distance + 1` chunks: two
+     hashes that close must match exactly on at least one chunk, so only photos sharing a chunk
+     are compared. Linked photos that only form a chain (A near B, B near C, A far from C) are
+     split into groups whose members all match each other, so one in-between shot can't tie two
+     different scenes together. The
      sharpest copy (then the earliest) becomes the group's representative.
    - **Albums**: shots sorted by EXIF capture time, cut when the gap exceeds
      `GATHER_PHOTO_ALBUM_GAP_HOURS` or two located shots are more than

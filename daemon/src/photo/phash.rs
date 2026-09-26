@@ -106,13 +106,17 @@ fn band_value(hash: u64, (start, width): (u32, u32)) -> u64 {
     }
 }
 
-/// Group photos whose hashes are within `max_distance` bits (transitively).
+/// Group photos that are near-duplicates of each other: every photo in a group
+/// is within `max_distance` bits of every other one.
 ///
 /// Candidate pairs come from banding: split the hash into `max_distance + 1`
 /// chunks; two hashes differing in at most `max_distance` bits must agree
 /// exactly on at least one chunk (pigeonhole), so only photos sharing a bucket
-/// are compared. Returns groups of 2+ indices, each ascending, in order of
-/// their smallest member.
+/// are compared. Linked photos are first gathered transitively; a gathering
+/// that is only a chain (A near B, B near C, A far from C) is then split into
+/// groups whose members all match each other, so one in-between photo can't
+/// tie two different shots together. Returns groups of 2+ indices, each
+/// ascending, in order of their smallest member.
 pub fn near_duplicate_groups(hashes: &[u64], max_distance: u32) -> Vec<Vec<usize>> {
     let mut uf = UnionFind::new(hashes.len());
     for band in band_ranges(max_distance + 1) {
@@ -131,10 +135,43 @@ pub fn near_duplicate_groups(hashes: &[u64], max_distance: u32) -> Vec<Vec<usize
         }
     }
     let comp: Vec<usize> = (0..hashes.len()).map(|i| uf.find(i)).collect();
-    crate::cluster::grouped(&comp)
-        .into_iter()
-        .filter(|g| g.len() >= 2)
-        .collect()
+    let near = |i: usize, j: usize| hamming(hashes[i], hashes[j]) <= max_distance;
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for component in crate::cluster::grouped(&comp) {
+        if component.len() < 2 {
+            continue;
+        }
+        let complete = component
+            .iter()
+            .enumerate()
+            .all(|(p, &i)| component[p + 1..].iter().all(|&j| near(i, j)));
+        if complete {
+            groups.push(component);
+            continue;
+        }
+        // Greedy and deterministic: each still-unplaced photo, in index order,
+        // starts a group that takes every later photo near all its members.
+        let mut placed = vec![false; component.len()];
+        for start in 0..component.len() {
+            if placed[start] {
+                continue;
+            }
+            placed[start] = true;
+            let mut group = vec![component[start]];
+            for next in start + 1..component.len() {
+                let j = component[next];
+                if !placed[next] && group.iter().all(|&i| near(i, j)) {
+                    placed[next] = true;
+                    group.push(j);
+                }
+            }
+            if group.len() >= 2 {
+                groups.push(group);
+            }
+        }
+    }
+    groups.sort_by_key(|g| g[0]);
+    groups
 }
 
 #[cfg(test)]
@@ -151,13 +188,24 @@ mod tests {
     }
 
     #[test]
-    fn groups_within_distance_transitively_and_skips_far_hashes() {
+    fn groups_mutual_near_duplicates_and_skips_far_hashes() {
+        let a = 0xF0F0_F0F0_F0F0_F0F0u64;
+        let b = a ^ 0b111; // 3 bits from a
+        let c = a ^ (0b11 << 20); // 2 bits from a, 5 from b
+        let far = !a;
+        let groups = near_duplicate_groups(&[a, far, b, c], 5);
+        assert_eq!(groups, vec![vec![0, 2, 3]]);
+    }
+
+    #[test]
+    fn a_chain_through_one_photo_does_not_join_the_ends() {
         let a = 0xF0F0_F0F0_F0F0_F0F0u64;
         let b = a ^ 0b111; // 3 bits from a
         let c = b ^ (0b111 << 20); // 3 bits from b, 6 from a
-        let far = !a;
-        let groups = near_duplicate_groups(&[a, far, b, c], 3);
-        assert_eq!(groups, vec![vec![0, 2, 3]]);
+                                   // b is near both, but a and c are too far apart to be copies of one
+                                   // shot: a keeps b, and c is left on its own rather than chained in.
+        let groups = near_duplicate_groups(&[a, b, c], 3);
+        assert_eq!(groups, vec![vec![0, 1]]);
     }
 
     #[test]

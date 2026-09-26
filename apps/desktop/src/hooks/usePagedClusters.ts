@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { listClusters, type ClusterKind, type ClusterSummary } from "../api";
+import { errorText } from "../ui";
 
 const PAGE_SIZE = 50;
 
@@ -29,7 +30,7 @@ export function usePagedClusters(kind: ClusterKind): PagedClusters {
         setHasMore(page.length === PAGE_SIZE);
         setError(null);
       } catch (e) {
-        if (!isCancelled()) setError(e instanceof Error ? e.message : String(e));
+        if (!isCancelled()) setError(errorText(e));
       } finally {
         if (!isCancelled()) setLoading(false);
       }

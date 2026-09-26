@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
+import { ImageOff } from "lucide-react";
 import { fetchThumbnailUrl } from "./api";
 
 interface ThumbnailProps {
   imageId: string;
   alt: string;
+  /** Square size in pixels; omitted, the thumbnail fills its container. */
   size?: number;
 }
 
@@ -15,7 +17,7 @@ const PRELOAD_MARGIN = "200px";
  * costs the daemon a full image decode, so it is only requested once the
  * placeholder is (nearly) on screen.
  */
-export default function Thumbnail({ imageId, alt, size = 128 }: ThumbnailProps) {
+export default function Thumbnail({ imageId, alt, size }: ThumbnailProps) {
   const placeholder = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
   const [url, setUrl] = useState<string | null>(null);
@@ -56,14 +58,15 @@ export default function Thumbnail({ imageId, alt, size = 128 }: ThumbnailProps) 
     };
   }, [imageId, visible]);
 
-  const style = { width: size, height: size };
+  const style = size ? { width: size, height: size } : undefined;
   if (failed) {
     return (
-      <div className="thumb thumb-missing" style={style} title="preview unavailable">
-        ?
+      <div className="thumb thumb-missing" style={style} title="Preview unavailable">
+        <ImageOff aria-hidden />
+        <span className="visually-hidden">{alt}: preview unavailable</span>
       </div>
     );
   }
-  if (!url) return <div ref={placeholder} className="thumb" style={style} />;
-  return <img className="thumb" style={style} src={url} alt={alt} />;
+  if (!url) return <div ref={placeholder} className="thumb thumb-loading" style={style} />;
+  return <img className="thumb thumb-ready" style={style} src={url} alt={alt} decoding="async" />;
 }

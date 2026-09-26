@@ -1,0 +1,623 @@
+/* ==================================================================== shell */
+.shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ================================================================== sidebar */
+.sidebar {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  padding: 12px 10px 10px;
+  background:
+    radial-gradient(120% 40% at 0% 0%, var(--accent-soft), transparent 60%), var(--sidebar);
+  border-right: 1px solid var(--border);
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 32px;
+  padding: 0 4px 0 6px;
+}
+.logo {
+  flex-shrink: 0;
+  filter: drop-shadow(0 2px 6px var(--accent-glow));
+}
+.brand-name {
+  flex: 1;
+  font-size: var(--t-md);
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+.theme-toggle {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-3);
+}
+.theme-toggle:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.theme-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+.theme-toggle svg {
+  width: 15px;
+  height: 15px;
+}
+
+.sidebar-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.add-button {
+  width: 100%;
+  justify-content: flex-start;
+  padding-left: 10px;
+}
+.jump {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 8px 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--hover);
+  color: var(--text-3);
+  font-size: var(--t-sm);
+  transition:
+    border-color var(--d-1),
+    background var(--d-1);
+}
+.jump:hover {
+  border-color: var(--border-strong);
+  background: var(--active);
+  color: var(--text-2);
+}
+.jump:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+.jump > svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.jump-label {
+  flex: 1;
+  text-align: left;
+}
+.jump-kbd {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-family: var(--font-mono);
+  font-size: var(--t-2xs);
+  color: var(--text-3);
+}
+
+.nav {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0 -4px;
+  padding: 0 4px;
+}
+.nav-group + .nav-group {
+  margin-top: 14px;
+}
+.nav-group-label {
+  padding: 0 10px 4px;
+  font-size: var(--t-2xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.nav-group ul {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.nav-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 30px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-2);
+  font-weight: 500;
+  text-align: left;
+  transition:
+    background var(--d-1),
+    color var(--d-1);
+}
+.nav-item[data-tip]::after {
+  display: none;
+}
+.nav-item:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.nav-item:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--focus);
+}
+.nav-item.active {
+  background: var(--active);
+  color: var(--text);
+  font-weight: 600;
+}
+.nav-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  stroke-width: 1.8;
+  color: var(--text-3);
+  transition: color var(--d-1);
+}
+.nav-item:hover .nav-icon {
+  color: var(--text-2);
+}
+.nav-item.active .nav-icon {
+  color: var(--accent-text);
+}
+.nav-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nav-count {
+  min-width: 18px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent-soft-2);
+  color: var(--accent-text);
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 17px;
+  text-align: center;
+}
+
+.sidebar-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.update-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: var(--r-sm);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: var(--t-xs);
+  font-weight: 600;
+  text-align: left;
+}
+.update-chip svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.health {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  font-size: var(--t-xs);
+  color: var(--text-3);
+}
+.health-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  color: var(--success);
+  background: currentColor;
+}
+.health-ok .health-dot {
+  animation: pulse-ring 2.6s ease-out infinite;
+}
+.health-warn .health-dot {
+  color: var(--warning);
+}
+.health-down .health-dot {
+  color: var(--danger);
+}
+.health-label {
+  white-space: nowrap;
+}
+
+/* Narrow windows keep an icon rail; labels stay available to assistive
+   tech and appear as tooltips. */
+@media (max-width: 940px) {
+  .sidebar {
+    padding: 12px 8px 10px;
+    align-items: stretch;
+  }
+  .brand {
+    justify-content: center;
+    padding: 0;
+  }
+  .brand-name,
+  .jump-label,
+  .jump-kbd,
+  .nav-label,
+  .health-label,
+  .add-label,
+  .update-chip span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+  }
+  .theme-toggle {
+    display: none;
+  }
+  .add-button,
+  .jump {
+    justify-content: center;
+    padding: 0;
+  }
+  .nav-group-label {
+    height: 1px;
+    margin: 0 6px 8px;
+    padding: 0;
+    overflow: hidden;
+    background: var(--border);
+    color: transparent;
+  }
+  .nav-group + .nav-group {
+    margin-top: 8px;
+  }
+  .nav-item {
+    justify-content: center;
+    padding: 0;
+    height: 36px;
+  }
+  .nav-item[data-tip]::after {
+    display: block;
+  }
+  .nav-count {
+    position: absolute;
+    top: 1px;
+    right: 1px;
+    min-width: 15px;
+    height: 15px;
+    line-height: 15px;
+    padding: 0 3px;
+    font-size: 9px;
+    background: var(--accent);
+    color: var(--accent-fg);
+  }
+  .health {
+    justify-content: center;
+    padding: 6px 0;
+  }
+}
+
+/* ===================================================================== main */
+.main {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  animation: fade-in var(--d-2) ease backwards;
+}
+/* A scrolling page (Overview, Tuning, Settings) under the toolbar. */
+.page {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.page-inner {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: var(--s-6) var(--s-8) var(--s-12);
+}
+.page-narrow {
+  max-width: 760px;
+}
+.offline-bar {
+  padding: 10px 16px 0;
+}
+
+/* ================================================================ drop target */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+  backdrop-filter: blur(8px) saturate(1.2);
+  animation: fade-in var(--d-2) ease backwards;
+}
+.drop-overlay::before {
+  content: "";
+  position: absolute;
+  inset: 14px;
+  border: 1.5px dashed var(--accent);
+  border-radius: 22px;
+  opacity: 0.7;
+}
+.drop-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+  animation: scale-in var(--d-3) var(--ease-spring) backwards;
+}
+.drop-art {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 140px;
+  height: 140px;
+  margin-bottom: 8px;
+}
+.drop-wave {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent);
+  animation: ripple 1.8s var(--ease-out) infinite;
+}
+.drop-wave.w2 {
+  animation-delay: 0.9s;
+}
+.drop-core {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 20px;
+  background: linear-gradient(180deg, var(--accent-2), var(--accent));
+  color: var(--accent-fg);
+  box-shadow:
+    0 16px 40px -8px var(--accent-glow),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+.drop-core svg {
+  width: 28px;
+  height: 28px;
+}
+.drop-title {
+  font-size: var(--t-2xl);
+  font-weight: 600;
+  letter-spacing: -0.025em;
+}
+.drop-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-3);
+}
+.drop-sub svg {
+  width: 14px;
+  height: 14px;
+  color: var(--success);
+}
+
+/* ============================================================== upload tray */
+.tray {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 45;
+  width: min(380px, calc(100vw - 32px));
+  border-radius: var(--r-lg);
+  border: 1px solid var(--border-strong);
+  background: color-mix(in srgb, var(--raised) 94%, transparent);
+  backdrop-filter: blur(20px) saturate(1.4);
+  box-shadow: var(--shadow-3), var(--inner-hi);
+  overflow: hidden;
+  animation: slide-up var(--d-3) var(--ease-spring) backwards;
+}
+.tray-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 8px 10px 12px;
+}
+.tray-status {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--success-soft);
+  color: var(--success);
+  flex-shrink: 0;
+}
+.tray-status.busy {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+.tray-status svg {
+  width: 15px;
+  height: 15px;
+}
+.tray-title {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  line-height: 1.3;
+}
+.tray-toggle svg {
+  transition: transform var(--d-2) var(--ease-out);
+}
+.tray-toggle.collapsed svg {
+  transform: rotate(180deg);
+}
+.tray-progress {
+  height: 2px;
+  background: var(--border);
+}
+.tray-progress span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width var(--d-3) var(--ease-out);
+}
+.tray-list {
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px;
+}
+.tray-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  animation: fade-in var(--d-2) ease backwards;
+}
+.tray-item:hover {
+  background: var(--hover);
+}
+.tray-file {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  background: var(--active);
+  color: var(--text-2);
+  flex-shrink: 0;
+}
+.tray-file svg {
+  width: 14px;
+  height: 14px;
+}
+.tray-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.tray-name {
+  font-weight: 550;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tray-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--t-xs);
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.tray-meta svg {
+  width: 11px;
+  height: 11px;
+  flex-shrink: 0;
+}
+.tray-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tone-success svg {
+  color: var(--success);
+}
+.tone-warning svg {
+  color: var(--warning);
+}
+.tone-danger {
+  color: var(--danger);
+}
+.tone-accent svg {
+  color: var(--accent-text);
+}
+
+/* =================================================================== splash */
+.splash {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: var(--s-6);
+  overflow: hidden;
+  background: var(--bg);
+}
+.splash-glow {
+  position: absolute;
+  width: 70vmax;
+  height: 70vmax;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--accent-glow), transparent 60%);
+  animation: drift 12s ease-in-out infinite;
+}
+.splash-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-3);
+  width: min(460px, 100%);
+  text-align: center;
+  animation: scale-in 500ms var(--ease-out) backwards;
+}
+.splash-card .callout {
+  text-align: left;
+  width: 100%;
+}
+.splash-title {
+  font-size: var(--t-3xl);
+  font-weight: 650;
+  letter-spacing: -0.04em;
+}
+.splash-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-2);
+}
+.splash-step svg {
+  width: 15px;
+  height: 15px;
+  color: var(--accent-text);
+}
