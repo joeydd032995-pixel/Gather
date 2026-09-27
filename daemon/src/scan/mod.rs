@@ -153,6 +153,13 @@ pub async fn run_one_scan(
         // CONFLICT below), and a crash before commit leaves the row unscanned
         // for a later pass — so the marker never gets set without the work.
         let mut tx = pool.begin().await?;
+        // Scanners write the same pairs (certificate, contradiction,
+        // supersession) from either side and in any order, which can
+        // deadlock two of them. The write phase is short, so concurrent
+        // scanners take turns here; scoring above still runs in parallel.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('gather.scan.write'))")
+            .execute(&mut *tx)
+            .await?;
         let claimed: Option<(Uuid,)> = sqlx::query_as(
             r#"
             SELECT id FROM atomic_units
