@@ -16,6 +16,7 @@ pub mod certificate;
 pub mod contradiction;
 pub mod drift;
 pub mod eval;
+pub mod explained;
 pub mod identity;
 pub mod modality;
 pub mod photo;

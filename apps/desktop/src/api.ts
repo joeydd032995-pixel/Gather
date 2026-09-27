@@ -655,3 +655,46 @@ export function retractArtifact(
 ): Promise<RetractionReport> {
   return postJson(`/artifacts/${id}/retract`, { reason: reason || null, delete: del });
 }
+
+// --- Explained away: flagged pairs Gather decided aren't contradictions ----
+
+export interface ExplainedClaim {
+  id: string;
+  statement: string;
+  status: string;
+  valid_from: string | null;
+  superseded_by_unit_id: string | null;
+}
+
+export interface ExplainedAway {
+  certificate_id: string;
+  unit_a: ExplainedClaim;
+  unit_b: ExplainedClaim;
+  /** Why it wasn't reported, in plain language. */
+  reasons: { code: string; text: string }[];
+  explanation: string;
+  detection_method: string;
+  score: number;
+  decided_at: string;
+}
+
+export function listExplainedAway(limit = 100): Promise<{ items: ExplainedAway[]; total: number }> {
+  return getJson(`/contradictions/explained-away?limit=${limit}`);
+}
+
+/** "This is a real conflict": reported, and never explained away again. */
+export function confirmExplainedAway(
+  certificateId: string,
+  note?: string,
+): Promise<{ contradiction_id: string; supersessions_reverted: number }> {
+  return postJson(`/contradictions/explained-away/${certificateId}/confirm`, {
+    note: note || null,
+  });
+}
+
+/** "The explanation is right": the pair counts as not a conflict. */
+export function agreeExplainedAway(certificateId: string, note?: string): Promise<unknown> {
+  return postJson(`/contradictions/explained-away/${certificateId}/agree`, {
+    note: note || null,
+  });
+}

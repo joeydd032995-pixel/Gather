@@ -21,7 +21,7 @@ use crate::config::Config;
 use crate::extract::ollama::OllamaClient;
 use crate::safety::contradiction::{evaluate, Claim, ContradictionContext};
 use crate::safety::temporal::{TemporalPolicy, TimeScope};
-use crate::safety::{store, InferenceDecision};
+use crate::safety::{explained, store, InferenceDecision};
 use score::{score_pair, UnitFacts};
 
 /// A unit as the scanner sees it: the scorer's facts plus time and model.
@@ -153,6 +153,13 @@ pub async fn run_one_scan(
         // CONFLICT below), and a crash before commit leaves the row unscanned
         // for a later pass — so the marker never gets set without the work.
         let mut tx = pool.begin().await?;
+        // Scanners write the same pairs (certificate, contradiction,
+        // supersession) from either side and in any order, which can
+        // deadlock two of them. The write phase is short, so concurrent
+        // scanners take turns here; scoring above still runs in parallel.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('gather.scan.write'))")
+            .execute(&mut *tx)
+            .await?;
         let claimed: Option<(Uuid,)> = sqlx::query_as(
             r#"
             SELECT id FROM atomic_units
@@ -400,10 +407,39 @@ async fn record_conflict(
     .bind(b.facts.id)
     .fetch_optional(&mut **tx)
     .await?;
+    // A person's verdict on a pair Gather explained away is final: a
+    // confirmed conflict is never explained away again (only brought back
+    // if the safety layer withdrew it), and "not a conflict" blocks.
+    let verdict = explained::verdict(tx, a.facts.id, b.facts.id).await?;
+    if verdict.as_deref() == Some(explained::CONFIRMED) {
+        let reopened = sqlx::query_scalar::<_, Uuid>(
+            "UPDATE contradictions SET status = 'open', resolved_at = NULL, resolved_by = NULL, \
+               resolution_note = NULL \
+             WHERE unit_a_id = $1 AND unit_b_id = $2 AND status = 'dismissed' \
+               AND resolved_by = 'safety' RETURNING id",
+        )
+        .bind(a.facts.id)
+        .bind(b.facts.id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if let Some(id) = reopened {
+            sqlx::query(
+                "INSERT INTO contradiction_audit \
+                   (contradiction_id, action, actor, from_status, to_status, note) \
+                 VALUES ($1, 'reopen', 'scanner', 'dismissed', 'open', $2)",
+            )
+            .bind(id)
+            .bind("the claim it rested on was restored")
+            .execute(&mut **tx)
+            .await?;
+        }
+        return Ok(reopened.is_some());
+    }
     let user_rejected = matches!(
         &existing,
         Some((_, status, by)) if (status == "dismissed" || status == "both_valid")
             && by.as_deref() != Some("safety")
+            && by.as_deref() != Some(explained::AGREED_BY)
     );
     let targets: Vec<Uuid> = a
         .facts
@@ -419,6 +455,7 @@ async fn record_conflict(
             BTreeMap::new()
         },
         user_rejected,
+        user_agreed_compatible: verdict.as_deref() == Some(explained::NOT_CONFLICT),
         policy: *policy,
         sources_a: unit_artifacts(tx, a.facts.id).await?,
         sources_b: unit_artifacts(tx, b.facts.id).await?,

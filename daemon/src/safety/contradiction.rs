@@ -86,6 +86,9 @@ pub struct ContradictionContext {
     pub part_of: BTreeMap<Uuid, Vec<Uuid>>,
     /// A person already resolved this pair as "both valid" or "not a conflict".
     pub user_rejected: bool,
+    /// A person agreed with the reason this pair was explained away. It is
+    /// never reported, but a supersession that reason implies still applies.
+    pub user_agreed_compatible: bool,
     pub policy: TemporalPolicy,
     /// Artifacts behind each claim (for the certificate).
     pub sources_a: Vec<Uuid>,
@@ -318,7 +321,7 @@ pub fn evaluate(a: Claim, b: Claim, conflict: &Conflict, ctx: &ContradictionCont
     };
     preds.push(check(
         "no_user_rejection",
-        !ctx.user_rejected,
+        !ctx.user_rejected && !ctx.user_agreed_compatible,
         ReasonCode::UserRejectionExists,
         Value::Null,
     ));

@@ -872,6 +872,12 @@ async fn the_migration_is_reversible() {
     };
     assert!(exists(pool.clone()).await);
     sqlx::raw_sql(include_str!(
+        "../migrations-down/0015_explained_away.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
         "../migrations-down/0014_semantic_safety.down.sql"
     ))
     .execute(&pool)
@@ -887,6 +893,10 @@ async fn the_migration_is_reversible() {
     .unwrap();
     assert!(!column);
     sqlx::raw_sql(include_str!("../migrations/0014_semantic_safety.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0015_explained_away.sql"))
         .execute(&pool)
         .await
         .unwrap();
@@ -1059,5 +1069,257 @@ async fn restoring_a_rejected_claim_brings_its_contradiction_back() {
         status(state.clone()).await,
         "open",
         "the conflict holds again"
+    );
+}
+
+/// Two statements of the same rent three years apart: Gather reads a change
+/// of state, not a contradiction. Returns (older, newer).
+async fn explained_pair(state: &AppState, app: &axum::Router, tag: &str) -> (Uuid, Uuid) {
+    let m = &Uuid::new_v4().simple().to_string()[..8];
+    ingest(
+        app,
+        &format!("{tag}-{m}-a"),
+        &format!("My {tag}{m} rent is $1200 per month."),
+        "2023-01-01T10:00:00Z",
+    )
+    .await;
+    ingest(
+        app,
+        &format!("{tag}-{m}-b"),
+        &format!("My {tag}{m} rent is $1500 per month."),
+        "2026-01-01T10:00:00Z",
+    )
+    .await;
+    drain(state).await;
+    (
+        unit_like(state, &format!("{tag}{m} rent is $1200")).await,
+        unit_like(state, &format!("{tag}{m} rent is $1500")).await,
+    )
+}
+
+async fn explained_away(app: &axum::Router, unit: Uuid) -> Option<Value> {
+    let (status, body) = call(
+        app,
+        Method::GET,
+        "/contradictions/explained-away?limit=200",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["total"].as_i64().unwrap() >= body["items"].as_array().unwrap().len() as i64);
+    body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["unit_a"]["id"] == json!(unit) || i["unit_b"]["id"] == json!(unit))
+        .cloned()
+}
+
+async fn rescan(state: &AppState, units: &[Uuid]) {
+    sqlx::query("UPDATE atomic_units SET contradiction_scanned_at = NULL WHERE id = ANY($1)")
+        .bind(units)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    drain(state).await;
+}
+
+async fn unit_status(state: &AppState, id: Uuid) -> String {
+    sqlx::query_scalar("SELECT status::text FROM atomic_units WHERE id = $1")
+        .bind(id)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn confirming_an_explained_away_pair_reports_it_for_good() {
+    let _guard = LOCK.lock().await;
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let app = routes::build_router(state.clone());
+    let (older, newer) = explained_pair(&state, &app, "Upsilon").await;
+    assert_eq!(unit_status(&state, older).await, "superseded");
+
+    let item = explained_away(&app, older)
+        .await
+        .expect("listed for review");
+    assert!(item["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["code"] == "TEMPORAL_SUCCESSION" && !r["text"].as_str().unwrap().is_empty()));
+    assert_eq!(item["detection_method"], "rule:numeric-mismatch");
+    let cert = item["certificate_id"].as_str().unwrap().to_string();
+
+    let (s, body) = call(
+        &app,
+        Method::POST,
+        &format!("/contradictions/explained-away/{cert}/confirm"),
+        Some(json!({"note": "both are this year's rent"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["supersessions_reverted"], 1);
+    let id = body["contradiction_id"].as_str().unwrap().to_string();
+    let (s, detail) = call(&app, Method::GET, &format!("/contradictions/{id}"), None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(detail["status"], "open");
+    assert_eq!(
+        unit_status(&state, older).await,
+        "active",
+        "a real conflict means the older claim was never replaced"
+    );
+    let sup = certificates(&app, &format!("subject_id={older}&kind=fact_supersession")).await;
+    assert_eq!(sup[0]["outcome"], "retracted");
+    let blocked = certificates(&app, &format!("subject_id={older}&kind=contradiction")).await;
+    assert!(blocked
+        .iter()
+        .all(|c| c["outcome"] != "blocked" || c["superseded_at"] != Value::Null));
+    assert!(explained_away(&app, older).await.is_none(), "reviewed");
+
+    // Once reviewed, the same certificate can't be decided again.
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        &format!("/contradictions/explained-away/{cert}/agree"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // A later scan of the same pair keeps the person's verdict.
+    rescan(&state, &[older, newer]).await;
+    let (_, detail) = call(&app, Method::GET, &format!("/contradictions/{id}"), None).await;
+    assert_eq!(detail["status"], "open");
+    assert_eq!(unit_status(&state, older).await, "active");
+    assert!(explained_away(&app, older).await.is_none());
+}
+
+#[tokio::test]
+async fn agreeing_with_an_explanation_takes_the_pair_off_the_list() {
+    let _guard = LOCK.lock().await;
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let app = routes::build_router(state.clone());
+    let (older, newer) = explained_pair(&state, &app, "Phi").await;
+    let item = explained_away(&app, newer)
+        .await
+        .expect("listed for review");
+    let cert = item["certificate_id"].as_str().unwrap().to_string();
+    // An open contradiction left over from an earlier reading of the pair.
+    let stale: Uuid = sqlx::query_scalar(
+        "INSERT INTO contradictions (unit_a_id, unit_b_id, score, detection_method, explanation) \
+         VALUES (LEAST($1::uuid, $2::uuid), GREATEST($1::uuid, $2::uuid), 0.5, 'rule:stale', \
+                 'from an earlier reading') RETURNING id",
+    )
+    .bind(older)
+    .bind(newer)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    let (s, body) = call(
+        &app,
+        Method::POST,
+        &format!("/contradictions/explained-away/{cert}/agree"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["contradictions_closed"], 1);
+    let (_, detail) = call(&app, Method::GET, &format!("/contradictions/{stale}"), None).await;
+    assert_eq!(detail["status"], "both_valid", "agreeing closes it");
+    assert!(explained_away(&app, older).await.is_none());
+    assert_eq!(
+        unit_status(&state, older).await,
+        "superseded",
+        "history kept"
+    );
+
+    rescan(&state, &[older, newer]).await;
+    let contradictions: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM contradictions WHERE unit_a_id IN ($1, $2) \
+           AND unit_b_id IN ($1, $2) AND status = 'open'",
+    )
+    .bind(older)
+    .bind(newer)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(contradictions, 0);
+    assert!(
+        explained_away(&app, older).await.is_none(),
+        "stays reviewed"
+    );
+    let user = certificates(&app, &format!("subject_id={older}&kind=user_decision")).await;
+    assert!(user
+        .iter()
+        .any(|c| c["rule_id"] == "user.contradiction_not_conflict"));
+
+    // The agreed change of state still applies after the newer claim is
+    // rejected and restored: the older one is superseded again.
+    for action in ["reject", "restore"] {
+        let (s, _) = call(
+            &app,
+            Method::POST,
+            &format!("/units/{newer}/{action}"),
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+    }
+    assert_eq!(unit_status(&state, older).await, "active");
+    drain(&state).await;
+    assert_eq!(
+        unit_status(&state, older).await,
+        "superseded",
+        "the agreed succession is re-derived"
+    );
+    assert!(explained_away(&app, older).await.is_none());
+
+    // Changing your mind later is still possible from the certificate the
+    // rescan left in force.
+    let live = certificates(
+        &app,
+        &format!("subject_id={older}&kind=contradiction&outcome=blocked&live=true"),
+    )
+    .await;
+    let cert = live[0]["id"].as_str().unwrap();
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        &format!("/contradictions/explained-away/{cert}/confirm"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let open: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM contradictions WHERE unit_a_id IN ($1, $2) \
+           AND unit_b_id IN ($1, $2) AND status = 'open'",
+    )
+    .bind(older)
+    .bind(newer)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(open, 1);
+    let (_, detail) = call(&app, Method::GET, &format!("/contradictions/{stale}"), None).await;
+    assert_eq!(detail["detection_method"], "rule:numeric-mismatch");
+    assert!(detail["explanation"]
+        .as_str()
+        .unwrap()
+        .starts_with("You marked"));
+    let verdicts = certificates(
+        &app,
+        &format!("subject_id={older}&kind=user_decision&live=true"),
+    )
+    .await;
+    assert!(
+        verdicts
+            .iter()
+            .all(|c| c["rule_id"] != "user.contradiction_not_conflict"),
+        "the earlier verdict is superseded"
     );
 }

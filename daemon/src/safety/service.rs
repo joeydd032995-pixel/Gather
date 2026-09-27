@@ -259,44 +259,49 @@ async fn revert_supersessions(conn: &mut PgConnection, units: &[Uuid]) -> Result
     let mut reverted = 0;
     for r in rows {
         let scope: Value = r.get("scope");
-        let (Some(older), Some(newer)) = (
-            scope
-                .get("older")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse::<Uuid>().ok()),
-            scope
-                .get("newer")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse::<Uuid>().ok()),
-        ) else {
-            continue;
-        };
-        if !units.contains(&newer) {
-            continue;
+        if scope_uuid(&scope, "newer").is_some_and(|n| units.contains(&n)) {
+            reverted += undo_supersession(conn, &scope).await?;
         }
-        let previous_valid_to = scope
-            .get("previous_valid_to")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<chrono::DateTime<chrono::Utc>>().ok());
-        reverted += sqlx::query(
-            "UPDATE atomic_units SET status = 'active', superseded_by_unit_id = NULL, \
-               valid_to = $3, contradiction_scanned_at = NULL \
-             WHERE id = $1 AND status = 'superseded' AND superseded_by_unit_id = $2",
-        )
-        .bind(older)
-        .bind(newer)
-        .bind(previous_valid_to)
-        .execute(&mut *conn)
-        .await?
-        .rows_affected();
-        sqlx::query(
-            "UPDATE relationships SET status = 'active' \
-             WHERE atomic_unit_id = $1 AND status = 'superseded'",
-        )
-        .bind(older)
-        .execute(&mut *conn)
-        .await?;
     }
+    Ok(reverted)
+}
+
+fn scope_uuid(scope: &Value, key: &str) -> Option<Uuid> {
+    scope.get(key)?.as_str()?.parse().ok()
+}
+
+/// Make the older claim of one recorded supersession current again, with
+/// the `valid_to` it had before. Returns 1 if it was still superseded.
+pub(crate) async fn undo_supersession(
+    conn: &mut PgConnection,
+    scope: &Value,
+) -> Result<u64, ApiError> {
+    let (Some(older), Some(newer)) = (scope_uuid(scope, "older"), scope_uuid(scope, "newer"))
+    else {
+        return Ok(0);
+    };
+    let previous_valid_to = scope
+        .get("previous_valid_to")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<chrono::DateTime<chrono::Utc>>().ok());
+    let reverted = sqlx::query(
+        "UPDATE atomic_units SET status = 'active', superseded_by_unit_id = NULL, \
+           valid_to = $3, contradiction_scanned_at = NULL \
+         WHERE id = $1 AND status = 'superseded' AND superseded_by_unit_id = $2",
+    )
+    .bind(older)
+    .bind(newer)
+    .bind(previous_valid_to)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    sqlx::query(
+        "UPDATE relationships SET status = 'active' \
+         WHERE atomic_unit_id = $1 AND status = 'superseded'",
+    )
+    .bind(older)
+    .execute(&mut *conn)
+    .await?;
     Ok(reverted)
 }
 
