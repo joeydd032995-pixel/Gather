@@ -188,7 +188,8 @@ with the reason in plain language. Each one can be settled by hand:
   the pair as a contradiction (`certainty = user_confirmed`), undoes a supersession the rule
   applied between the two claims, and withdraws the blocked certificate.
 - **Explanation is right** (`…/agree`) takes the pair off the list and counts as "not a
-  conflict" from then on.
+  conflict" from then on. An open contradiction left from an earlier reading of the pair is
+  closed. A change of state the explanation names (a supersession) still applies.
 
 Both verdicts are user decisions (`semantic_user_decisions`, kinds `contradiction_confirmed` /
 `contradiction_not_conflict`), each with a `user_decision` certificate, and later scans

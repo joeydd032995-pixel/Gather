@@ -435,12 +435,12 @@ async fn record_conflict(
         }
         return Ok(reopened.is_some());
     }
-    let user_rejected = verdict.as_deref() == Some(explained::NOT_CONFLICT)
-        || matches!(
-            &existing,
-            Some((_, status, by)) if (status == "dismissed" || status == "both_valid")
-                && by.as_deref() != Some("safety")
-        );
+    let user_rejected = matches!(
+        &existing,
+        Some((_, status, by)) if (status == "dismissed" || status == "both_valid")
+            && by.as_deref() != Some("safety")
+            && by.as_deref() != Some(explained::AGREED_BY)
+    );
     let targets: Vec<Uuid> = a
         .facts
         .assignments
@@ -455,6 +455,7 @@ async fn record_conflict(
             BTreeMap::new()
         },
         user_rejected,
+        user_agreed_compatible: verdict.as_deref() == Some(explained::NOT_CONFLICT),
         policy: *policy,
         sources_a: unit_artifacts(tx, a.facts.id).await?,
         sources_b: unit_artifacts(tx, b.facts.id).await?,

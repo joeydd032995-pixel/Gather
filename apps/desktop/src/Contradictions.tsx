@@ -256,6 +256,8 @@ function Detail({ id, onResolved }: { id: string; onResolved: (label: string) =>
 
 type Mode = "open" | "explained";
 
+const PAGE = 100;
+
 /** A flagged pair Gather decided isn't a contradiction, for a spot-check. */
 function ExplainedDetail({
   item,
@@ -432,6 +434,9 @@ export default function Contradictions() {
     total: number;
   } | null>(null);
   const [picked, setPicked] = useState<string | null>(null);
+  const [explainedError, setExplainedError] = useState<string | null>(null);
+  // How many explained-away pairs to load; "Show more" raises it.
+  const [shown, setShown] = useState(PAGE);
 
   const refresh = useCallback(
     () =>
@@ -442,11 +447,14 @@ export default function Contradictions() {
             setError(null);
           })
           .catch((e) => setError(errorText(e))),
-        listExplainedAway()
-          .then(setExplained)
-          .catch((e) => setError(errorText(e))),
+        listExplainedAway(shown)
+          .then((page) => {
+            setExplained(page);
+            setExplainedError(null);
+          })
+          .catch((e) => setExplainedError(errorText(e))),
       ]),
-    [],
+    [shown],
   );
 
   useEffect(() => {
@@ -502,8 +510,13 @@ export default function Contradictions() {
           <Callout title="Couldn't load contradictions">{error}</Callout>
         </div>
       )}
+      {mode === "explained" && explainedError && (
+        <div className="view-callout">
+          <Callout title="Couldn't load explained-away pairs">{explainedError}</Callout>
+        </div>
+      )}
       {mode === "explained" ? (
-        explained !== null && explained.items.length === 0 && !error ? (
+        explained !== null && explained.items.length === 0 && !explainedError ? (
           <EmptyState icon={CircleCheck} tone="success" title="Nothing to check">
             When Gather decides two statements that look contradictory can both be true, the pair
             shows up here with the reason, so you can check it.
@@ -518,9 +531,20 @@ export default function Contradictions() {
             }
             list={
               explained === null ? (
-                <Skeleton rows={5} />
+                explainedError ? null : (
+                  <Skeleton rows={5} />
+                )
               ) : (
-                <ExplainedList items={explained.items} selected={picked} onSelect={setPicked} />
+                <>
+                  <ExplainedList items={explained.items} selected={picked} onSelect={setPicked} />
+                  {explained.items.length < explained.total && (
+                    <div className="list-more">
+                      <Button variant="ghost" onClick={() => setShown((n) => n + PAGE)}>
+                        Show more · {explained.total - explained.items.length} left
+                      </Button>
+                    </div>
+                  )}
+                </>
               )
             }
             detail={

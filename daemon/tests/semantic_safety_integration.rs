@@ -1209,6 +1209,17 @@ async fn agreeing_with_an_explanation_takes_the_pair_off_the_list() {
         .await
         .expect("listed for review");
     let cert = item["certificate_id"].as_str().unwrap().to_string();
+    // An open contradiction left over from an earlier reading of the pair.
+    let stale: Uuid = sqlx::query_scalar(
+        "INSERT INTO contradictions (unit_a_id, unit_b_id, score, detection_method, explanation) \
+         VALUES (LEAST($1::uuid, $2::uuid), GREATEST($1::uuid, $2::uuid), 0.5, 'rule:stale', \
+                 'from an earlier reading') RETURNING id",
+    )
+    .bind(older)
+    .bind(newer)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
     let (s, body) = call(
         &app,
         Method::POST,
@@ -1217,6 +1228,9 @@ async fn agreeing_with_an_explanation_takes_the_pair_off_the_list() {
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["contradictions_closed"], 1);
+    let (_, detail) = call(&app, Method::GET, &format!("/contradictions/{stale}"), None).await;
+    assert_eq!(detail["status"], "both_valid", "agreeing closes it");
     assert!(explained_away(&app, older).await.is_none());
     assert_eq!(
         unit_status(&state, older).await,
@@ -1226,7 +1240,8 @@ async fn agreeing_with_an_explanation_takes_the_pair_off_the_list() {
 
     rescan(&state, &[older, newer]).await;
     let contradictions: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM contradictions WHERE unit_a_id IN ($1, $2) AND unit_b_id IN ($1, $2)",
+        "SELECT count(*) FROM contradictions WHERE unit_a_id IN ($1, $2) \
+           AND unit_b_id IN ($1, $2) AND status = 'open'",
     )
     .bind(older)
     .bind(newer)
@@ -1242,6 +1257,27 @@ async fn agreeing_with_an_explanation_takes_the_pair_off_the_list() {
     assert!(user
         .iter()
         .any(|c| c["rule_id"] == "user.contradiction_not_conflict"));
+
+    // The agreed change of state still applies after the newer claim is
+    // rejected and restored: the older one is superseded again.
+    for action in ["reject", "restore"] {
+        let (s, _) = call(
+            &app,
+            Method::POST,
+            &format!("/units/{newer}/{action}"),
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+    }
+    assert_eq!(unit_status(&state, older).await, "active");
+    drain(&state).await;
+    assert_eq!(
+        unit_status(&state, older).await,
+        "superseded",
+        "the agreed succession is re-derived"
+    );
+    assert!(explained_away(&app, older).await.is_none());
 
     // Changing your mind later is still possible from the certificate the
     // rescan left in force.
@@ -1269,4 +1305,21 @@ async fn agreeing_with_an_explanation_takes_the_pair_off_the_list() {
     .await
     .unwrap();
     assert_eq!(open, 1);
+    let (_, detail) = call(&app, Method::GET, &format!("/contradictions/{stale}"), None).await;
+    assert_eq!(detail["detection_method"], "rule:numeric-mismatch");
+    assert!(detail["explanation"]
+        .as_str()
+        .unwrap()
+        .starts_with("You marked"));
+    let verdicts = certificates(
+        &app,
+        &format!("subject_id={older}&kind=user_decision&live=true"),
+    )
+    .await;
+    assert!(
+        verdicts
+            .iter()
+            .all(|c| c["rule_id"] != "user.contradiction_not_conflict"),
+        "the earlier verdict is superseded"
+    );
 }

@@ -29,6 +29,10 @@ use crate::error::ApiError;
 
 pub const CONFIRMED: &str = "contradiction_confirmed";
 pub const NOT_CONFLICT: &str = "contradiction_not_conflict";
+/// `resolved_by` on a contradiction closed by agreeing with its explanation:
+/// "not a conflict", but the change of state the explanation names still
+/// holds (unlike a plain "both valid").
+pub const AGREED_BY: &str = "explained-away";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ClaimView {
@@ -92,7 +96,7 @@ pub async fn list(pool: &PgPool, limit: i64, offset: i64) -> Result<ExplainedAwa
         pending_from!(),
         " ORDER BY c.created_at DESC, c.id LIMIT $1 OFFSET $2"
     ))
-    .bind(limit.clamp(1, 200))
+    .bind(limit.clamp(1, 1000))
     .bind(offset.max(0))
     .fetch_all(pool)
     .await?;
@@ -201,6 +205,14 @@ pub async fn confirm(pool: &PgPool, cert: Uuid, note: Option<String>) -> Result<
     .execute(&mut *tx)
     .await?;
     decide(&mut tx, CONFIRMED, &p, &note).await?;
+    let earlier: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM inference_certificates \
+         WHERE rule_id = 'user.contradiction_not_conflict' AND conclusion_key = $1 \
+           AND superseded_at IS NULL AND retracted_at IS NULL",
+    )
+    .bind(format!("user-not-contradiction:{}:{}", p.lo, p.hi))
+    .fetch_all(&mut *tx)
+    .await?;
     let event = store::record(
         &mut tx,
         &user_decision(
@@ -231,6 +243,7 @@ pub async fn confirm(pool: &PgPool, cert: Uuid, note: Option<String>) -> Result<
         undone.push(r.get::<Uuid, _>("id"));
     }
     let reason = "you marked these statements as a real conflict";
+    store::withdraw(&mut tx, &earlier, Outcome::Superseded, reason, Some(event)).await?;
     store::withdraw(&mut tx, &undone, Outcome::Retracted, reason, Some(event)).await?;
     store::withdraw(&mut tx, &[cert], Outcome::Superseded, reason, Some(event)).await?;
 
@@ -251,7 +264,9 @@ pub async fn confirm(pool: &PgPool, cert: Uuid, note: Option<String>) -> Result<
          VALUES ($1, $2, $3, $4, $5, $6, $7, 'user_confirmed') \
          ON CONFLICT (unit_a_id, unit_b_id) DO UPDATE SET status = 'open', resolved_at = NULL, \
            resolved_by = NULL, resolution_note = NULL, certificate_id = EXCLUDED.certificate_id, \
-           certainty = 'user_confirmed' \
+           certainty = 'user_confirmed', score = EXCLUDED.score, \
+           detection_method = EXCLUDED.detection_method, explanation = EXCLUDED.explanation, \
+           alignment = EXCLUDED.alignment \
          RETURNING id, (SELECT s FROM prev)",
     )
     .bind(p.lo)
@@ -287,6 +302,33 @@ pub async fn agree(pool: &PgPool, cert: Uuid, note: Option<String>) -> Result<Va
     let mut tx = pool.begin().await?;
     let p = pending(&mut tx, cert).await?;
     decide(&mut tx, NOT_CONFLICT, &p, &note).await?;
+    // A pair can still have an open contradiction from an earlier reading
+    // (before an edit changed its time or scope); the verdict closes it.
+    let resolution = match &note {
+        Some(n) if !n.trim().is_empty() => format!("You agreed this is not a conflict: {n}"),
+        _ => "You agreed this is not a conflict.".to_string(),
+    };
+    let closed: Vec<Uuid> = sqlx::query_scalar(
+        "UPDATE contradictions SET status = 'both_valid', resolved_at = now(), \
+           resolved_by = $3, resolution_note = $4 \
+         WHERE unit_a_id = $1 AND unit_b_id = $2 AND status = 'open' RETURNING id",
+    )
+    .bind(p.lo)
+    .bind(p.hi)
+    .bind(AGREED_BY)
+    .bind(&resolution)
+    .fetch_all(&mut *tx)
+    .await?;
+    for id in &closed {
+        sqlx::query(
+            "INSERT INTO contradiction_audit (contradiction_id, action, actor, from_status, \
+               to_status, note) VALUES ($1, 'resolve', 'local-user', 'open', 'both_valid', $2)",
+        )
+        .bind(id)
+        .bind(&resolution)
+        .execute(&mut *tx)
+        .await?;
+    }
     let event = store::record(
         &mut tx,
         &user_decision(
@@ -298,8 +340,11 @@ pub async fn agree(pool: &PgPool, cert: Uuid, note: Option<String>) -> Result<Va
         ),
     )
     .await?;
+    if let Some(id) = closed.first() {
+        store::set_conclusion(&mut tx, event, *id).await?;
+    }
     tx.commit().await?;
-    Ok(json!({ "certificate": event }))
+    Ok(json!({ "certificate": event, "contradictions_closed": closed.len() }))
 }
 
 /// The person's standing verdict on a pair, if any.

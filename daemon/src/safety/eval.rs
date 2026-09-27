@@ -664,6 +664,7 @@ fn run_claims(fx: &Fixture, tally: &mut Tally, failures: &mut Vec<String>) -> Va
         let ctx = ContradictionContext {
             part_of: part_of.clone(),
             user_rejected: check.user_rejected,
+            user_agreed_compatible: false,
             policy: TemporalPolicy::default(),
             sources_a: ua.sources.iter().map(|s| fid(s)).collect(),
             sources_b: ub.sources.iter().map(|s| fid(s)).collect(),
