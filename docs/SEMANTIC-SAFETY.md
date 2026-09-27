@@ -177,6 +177,24 @@ the contradiction: nothing is reported, and the certificate says why. Missing in
 **routes to review**: the contradiction is reported with `certainty = needs_review`. Only a
 fully aligned pair is reported as `aligned`.
 
+#### Explained away: reviewing blocked pairs
+
+A block rests on what was extracted, so a misread date or place can turn a real conflict into
+"history". Every blocked pair a person hasn't already resolved is listed under
+**Contradictions → Explained away** in the desktop app (`GET /contradictions/explained-away`),
+with the reason in plain language. Each one can be settled by hand:
+
+- **It's a real conflict** (`POST /contradictions/explained-away/{certificate}/confirm`) opens
+  the pair as a contradiction (`certainty = user_confirmed`), undoes a supersession the rule
+  applied between the two claims, and withdraws the blocked certificate.
+- **Explanation is right** (`…/agree`) takes the pair off the list and counts as "not a
+  conflict" from then on.
+
+Both verdicts are user decisions (`semantic_user_decisions`, kinds `contradiction_confirmed` /
+`contradiction_not_conflict`), each with a `user_decision` certificate, and later scans
+respect them. A confirmed pair is never explained away or superseded again. It only comes
+back automatically if the safety layer withdrew it (a claim was rejected, then restored).
+
 ### Temporal semantics
 
 Time is kept in separate fields:
@@ -297,6 +315,8 @@ REST (under `/api/v1`, see [API.md](API.md#semantic-safety)) and the gRPC `Safet
 - `GET /certificates?reason=CHAINED_SIMILARITY&outcome=needs_review&live=true` — review-routed
   (or `outcome=blocked`) candidates by reason code.
 - `GET /safety/summary` — counts by outcome and by reason.
+- `GET /contradictions/explained-away` — blocked contradiction pairs waiting for a
+  spot-check, and `POST …/{certificate}/confirm|agree` to settle one (REST only).
 
 The desktop app shows the certificate summary ("Why?") in the entity, group, photo-group,
 contradiction and review detail views, in plain language: *Not merged automatically: these
@@ -391,6 +411,11 @@ daemon, run the down script with `psql -v ON_ERROR_STOP=1 -f …`, `DELETE FROM
 _sqlx_migrations WHERE version = 14`, and start the previous binary. Certificates, photo
 "not a duplicate" decisions and declared derivations are lost; nothing else is. The
 integration suite applies up → down → up on a scratch database.
+
+`0015_explained_away.sql` only widens the `semantic_user_decisions.kind` check to allow the
+two contradiction verdicts. Its reverse, `migrations-down/0015_explained_away.down.sql`,
+deletes those verdicts and restores the check. Run it before the 0014 down script, then
+`DELETE FROM _sqlx_migrations WHERE version = 15`. Contradictions you confirmed stay open.
 
 ## Behaviour that changed
 

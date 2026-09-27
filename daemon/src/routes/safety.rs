@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::error::ApiError;
+use crate::safety::explained;
 use crate::safety::service::{self, RetractionReport};
 use crate::safety::store::{self, CertificateFilter, CertificateView};
 use crate::AppState;
@@ -181,4 +182,48 @@ pub async fn not_duplicate(
         "other_id": req.other_id,
         "certificate": event,
     })))
+}
+
+#[derive(Deserialize, Default)]
+pub struct PageQuery {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// GET /contradictions/explained-away — flagged pairs Gather decided are not
+/// contradictions, with the reason, for a person to spot-check.
+pub async fn list_explained_away(
+    State(state): State<AppState>,
+    Query(q): Query<PageQuery>,
+) -> Result<Json<explained::ExplainedAwayPage>, ApiError> {
+    Ok(Json(
+        explained::list(&state.pool, q.limit.unwrap_or(100), q.offset.unwrap_or(0)).await?,
+    ))
+}
+
+#[derive(Deserialize, Default)]
+pub struct VerdictRequest {
+    pub note: Option<String>,
+}
+
+/// POST /contradictions/explained-away/{certificate}/confirm — "this is a
+/// real conflict": report it, and never explain it away again.
+pub async fn confirm_explained_away(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    body: Option<Json<VerdictRequest>>,
+) -> Result<Json<Value>, ApiError> {
+    let note = body.and_then(|b| b.0.note);
+    Ok(Json(explained::confirm(&state.pool, id, note).await?))
+}
+
+/// POST /contradictions/explained-away/{certificate}/agree — "the
+/// explanation is right": the pair counts as not a conflict.
+pub async fn agree_explained_away(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    body: Option<Json<VerdictRequest>>,
+) -> Result<Json<Value>, ApiError> {
+    let note = body.and_then(|b| b.0.note);
+    Ok(Json(explained::agree(&state.pool, id, note).await?))
 }

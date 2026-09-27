@@ -203,6 +203,9 @@ Entity kinds: `person`, `organization`, `project`, `tool`, `concept`, `location`
 | GET | `/contradictions/{id}` | Detail: both units, score, detection method, explanation, audit trail |
 | POST | `/contradictions/{id}/resolve` | `{ "resolution": "resolved_a", "note": "…", "actor": "…" }` |
 | POST | `/contradictions/{id}/annotations` | `{ "note": "…" }` |
+| GET | `/contradictions/explained-away` | Pairs that looked contradictory but were not reported, with the reason (`TEMPORAL_SUCCESSION`, `CONTEXT_SCOPE_MISMATCH`, …). Query: `limit`, `offset`. Returns `{ items, total }` |
+| POST | `/contradictions/explained-away/{certificate}/confirm` | "It's a real conflict": `{ "note": "…" }` (optional). Opens the contradiction, undoes a supersession between the two claims, and keeps later scans from explaining it away. Returns `{ contradiction_id, certificate, supersessions_reverted }` |
+| POST | `/contradictions/explained-away/{certificate}/agree` | "The explanation is right": `{ "note": "…" }` (optional). The pair counts as not a conflict. `404` once a pair has been reviewed |
 
 Resolving as `resolved_a` / `resolved_b` supersedes the losing unit, closes its validity window
 and deactivates the relationships it asserted.

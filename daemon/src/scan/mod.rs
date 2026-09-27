@@ -21,7 +21,7 @@ use crate::config::Config;
 use crate::extract::ollama::OllamaClient;
 use crate::safety::contradiction::{evaluate, Claim, ContradictionContext};
 use crate::safety::temporal::{TemporalPolicy, TimeScope};
-use crate::safety::{store, InferenceDecision};
+use crate::safety::{explained, store, InferenceDecision};
 use score::{score_pair, UnitFacts};
 
 /// A unit as the scanner sees it: the scorer's facts plus time and model.
@@ -400,11 +400,40 @@ async fn record_conflict(
     .bind(b.facts.id)
     .fetch_optional(&mut **tx)
     .await?;
-    let user_rejected = matches!(
-        &existing,
-        Some((_, status, by)) if (status == "dismissed" || status == "both_valid")
-            && by.as_deref() != Some("safety")
-    );
+    // A person's verdict on a pair Gather explained away is final: a
+    // confirmed conflict is never explained away again (only brought back
+    // if the safety layer withdrew it), and "not a conflict" blocks.
+    let verdict = explained::verdict(tx, a.facts.id, b.facts.id).await?;
+    if verdict.as_deref() == Some(explained::CONFIRMED) {
+        let reopened = sqlx::query_scalar::<_, Uuid>(
+            "UPDATE contradictions SET status = 'open', resolved_at = NULL, resolved_by = NULL, \
+               resolution_note = NULL \
+             WHERE unit_a_id = $1 AND unit_b_id = $2 AND status = 'dismissed' \
+               AND resolved_by = 'safety' RETURNING id",
+        )
+        .bind(a.facts.id)
+        .bind(b.facts.id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if let Some(id) = reopened {
+            sqlx::query(
+                "INSERT INTO contradiction_audit \
+                   (contradiction_id, action, actor, from_status, to_status, note) \
+                 VALUES ($1, 'reopen', 'scanner', 'dismissed', 'open', $2)",
+            )
+            .bind(id)
+            .bind("the claim it rested on was restored")
+            .execute(&mut **tx)
+            .await?;
+        }
+        return Ok(reopened.is_some());
+    }
+    let user_rejected = verdict.as_deref() == Some(explained::NOT_CONFLICT)
+        || matches!(
+            &existing,
+            Some((_, status, by)) if (status == "dismissed" || status == "both_valid")
+                && by.as_deref() != Some("safety")
+        );
     let targets: Vec<Uuid> = a
         .facts
         .assignments

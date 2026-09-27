@@ -77,6 +77,18 @@ pub fn build_router(state: AppState) -> Router {
         // contradiction review
         .route("/contradictions", get(contradictions::list_contradictions))
         .route(
+            "/contradictions/explained-away",
+            get(safety::list_explained_away),
+        )
+        .route(
+            "/contradictions/explained-away/{id}/confirm",
+            post(safety::confirm_explained_away),
+        )
+        .route(
+            "/contradictions/explained-away/{id}/agree",
+            post(safety::agree_explained_away),
+        )
+        .route(
             "/contradictions/{id}",
             get(contradictions::get_contradiction),
         )
