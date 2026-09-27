@@ -126,6 +126,16 @@ See [AUTONOMOUS-PIPELINE.md](AUTONOMOUS-PIPELINE.md).
 | `GATHER_CLUSTER_THRESHOLD` | `0.5` | 0–1 | Minimum edge similarity. **Validated** |
 | `GATHER_CLUSTER_MAX_COMPONENT` | `50` | 2–10000 | Components larger than this are too diffuse to auto-label or auto-merge. Such entity components are parked for review instead |
 
+## Semantic safety
+
+See [SEMANTIC-SAFETY.md](SEMANTIC-SAFETY.md).
+
+| Variable | Default | Range | Description |
+|---|---|---|---|
+| `GATHER_SAFETY_HUB_DEGREE` | `3` | 2–1000 | An entity (or photo) with at least this many auto-strength matches that mostly don't match each other is a generic hub: it is never merged or grouped automatically and gets one review item instead |
+| `GATHER_SAFETY_SUCCESSION_DAYS` | `30` | 1–3650 | Two present-tense statements of state asserted at least this many days apart describe successive states: the later one supersedes the earlier (kept as history) instead of contradicting it |
+| `GATHER_SAFETY_SAME_MOMENT_HOURS` | `24` | 0–720 | Present-tense statements asserted within this window describe the same moment and may contradict. Between the two windows the time relation is unknown and a conflict is reported for review only |
+
 ## Active learning & auto-tuning
 
 See [AUTONOMOUS-PIPELINE.md](AUTONOMOUS-PIPELINE.md#active-learning-and-auto-tuning).

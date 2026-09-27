@@ -1,0 +1,45 @@
+{
+  "id": "modality-chicago",
+  "category": "modality",
+  "description": "Completed event, plan, possibility, rejection, condition and consideration stay distinct; 'not' is never dropped; only the completed event asserts a present fact.",
+  "statements": [
+    {
+      "text": "I moved to Chicago",
+      "modality": "actual",
+      "positive_fact": true
+    },
+    {
+      "text": "I plan to move to Chicago",
+      "modality": "planned"
+    },
+    {
+      "text": "I might move to Chicago",
+      "modality": "possible"
+    },
+    {
+      "text": "I decided not to move to Chicago",
+      "modality": "rejected"
+    },
+    {
+      "text": "If I move to Chicago, I will buy a bike",
+      "modality": "conditional"
+    },
+    {
+      "text": "I considered moving to Chicago",
+      "modality": "considered"
+    },
+    {
+      "text": "I use Redis",
+      "modality": "actual",
+      "positive_fact": true
+    },
+    {
+      "text": "I do not use Redis",
+      "modality": "actual",
+      "negated": true
+    }
+  ],
+  "expect": {
+    "distinct_propositions": 8
+  }
+}

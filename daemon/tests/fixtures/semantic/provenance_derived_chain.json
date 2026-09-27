@@ -1,0 +1,44 @@
+{
+  "id": "provenance-derived-chain",
+  "category": "provenance",
+  "description": "original email -> copied note -> generated summary -> exported markdown -> re-ingested export all repeat one claim: one source family, no added confidence.",
+  "sources": [
+    {
+      "artifact": "email"
+    },
+    {
+      "artifact": "note",
+      "fingerprint": "note-text"
+    },
+    {
+      "artifact": "summary"
+    },
+    {
+      "artifact": "export",
+      "fingerprint": "export-text"
+    },
+    {
+      "artifact": "reingest",
+      "fingerprint": "export-text"
+    }
+  ],
+  "derivations": [
+    [
+      "note",
+      "email"
+    ],
+    [
+      "summary",
+      "note"
+    ],
+    [
+      "export",
+      "summary"
+    ]
+  ],
+  "base_confidence": 0.6,
+  "expect": {
+    "independent_sources": 1,
+    "derived_chain": true
+  }
+}

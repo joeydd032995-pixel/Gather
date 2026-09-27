@@ -16,6 +16,7 @@ pub mod export;
 pub mod ingest;
 pub mod pipeline;
 pub mod query;
+pub mod safety;
 
 /// Generated protobuf/tonic types for `package gather.v1`.
 pub mod pb {
@@ -35,6 +36,7 @@ use pb::feedback_service_server::FeedbackServiceServer;
 use pb::ingest_service_server::IngestServiceServer;
 use pb::photo_service_server::PhotoServiceServer;
 use pb::query_service_server::QueryServiceServer;
+use pb::safety_service_server::SafetyServiceServer;
 use pb::tuning_service_server::TuningServiceServer;
 
 /// Map the shared ApiError onto gRPC status codes.
@@ -123,6 +125,12 @@ pub async fn serve_on(state: AppState, listener: tokio::net::TcpListener) -> any
         ))
         .add_service(PhotoServiceServer::with_interceptor(
             pipeline::PhotoApi {
+                state: state.clone(),
+            },
+            interceptor.clone(),
+        ))
+        .add_service(SafetyServiceServer::with_interceptor(
+            safety::SafetyApi {
                 state: state.clone(),
             },
             interceptor.clone(),

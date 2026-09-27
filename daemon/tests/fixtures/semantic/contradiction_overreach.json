@@ -1,0 +1,339 @@
+{
+  "id": "contradiction-overreach",
+  "category": "contradiction",
+  "description": "Apparent conflicts that are compatible once units, granularity, scope, time zones and modality are aligned; one genuinely aligned conflict; and one the user already dismissed.",
+  "units": [
+    {
+      "id": "team",
+      "statement": "The team has 5 engineers",
+      "subject": "team",
+      "attrs": {
+        "pattern": "numeric",
+        "value": "5",
+        "unit": "engineers"
+      },
+      "assignments": [],
+      "sources": [
+        "art-team"
+      ],
+      "asserted_at": "2026-01-05T00:00:00Z"
+    },
+    {
+      "id": "company",
+      "statement": "The company has 50 employees",
+      "subject": "company",
+      "attrs": {
+        "pattern": "numeric",
+        "value": "50",
+        "unit": "employees"
+      },
+      "assignments": [],
+      "sources": [
+        "art-company"
+      ],
+      "asserted_at": "2026-01-05T00:00:00Z"
+    },
+    {
+      "id": "rev_m",
+      "statement": "Revenue was $1.2M",
+      "subject": "revenue",
+      "attrs": {
+        "pattern": "numeric",
+        "value": "$1.2",
+        "unit": "M"
+      },
+      "assignments": [],
+      "sources": [
+        "art-rev_m"
+      ],
+      "asserted_at": "2026-01-05T00:00:00Z"
+    },
+    {
+      "id": "rev_full",
+      "statement": "Revenue was $1,200,000",
+      "subject": "revenue",
+      "attrs": {
+        "pattern": "numeric",
+        "value": "$1,200,000",
+        "unit": ""
+      },
+      "assignments": [],
+      "sources": [
+        "art-rev_full"
+      ],
+      "asserted_at": "2026-01-05T00:00:00Z"
+    },
+    {
+      "id": "missouri",
+      "statement": "I work in Missouri",
+      "subject": "me",
+      "attrs": {},
+      "assignments": [
+        [
+          "me",
+          "works_at",
+          "missouri"
+        ]
+      ],
+      "sources": [
+        "art-missouri"
+      ],
+      "asserted_at": "2026-01-05T00:00:00Z"
+    },
+    {
+      "id": "overland",
+      "statement": "I work in Overland",
+      "subject": "me",
+      "attrs": {},
+      "assignments": [
+        [
+          "me",
+          "works_at",
+          "overland"
+        ]
+      ],
+      "sources": [
+        "art-overland"
+      ],
+      "asserted_at": "2026-01-05T00:00:00Z"
+    },
+    {
+      "id": "m_central",
+      "statement": "The meeting is at 3 PM Central",
+      "subject": "meeting",
+      "attrs": {
+        "pattern": "clock_time",
+        "value": "3 PM",
+        "tz": "Central"
+      },
+      "assignments": [],
+      "sources": [
+        "art-m_central"
+      ],
+      "asserted_at": "2026-01-05T00:00:00Z"
+    },
+    {
+      "id": "m_eastern",
+      "statement": "The meeting is at 4 PM Eastern",
+      "subject": "meeting",
+      "attrs": {
+        "pattern": "clock_time",
+        "value": "4 PM",
+        "tz": "Eastern"
+      },
+      "assignments": [],
+      "sources": [
+        "art-m_eastern"
+      ],
+      "asserted_at": "2026-01-05T00:00:00Z"
+    },
+    {
+      "id": "m_bare",
+      "statement": "The meeting is at 5 PM",
+      "subject": "meeting",
+      "attrs": {
+        "pattern": "clock_time",
+        "value": "5 PM"
+      },
+      "assignments": [],
+      "sources": [
+        "art-m_bare"
+      ],
+      "asserted_at": "2026-01-05T00:00:00Z"
+    },
+    {
+      "id": "acc_val",
+      "statement": "Model accuracy is 90% on validation",
+      "subject": "accuracy",
+      "attrs": {
+        "pattern": "numeric",
+        "value": "90",
+        "unit": "%",
+        "scope": "validation"
+      },
+      "assignments": [],
+      "sources": [
+        "art-acc_val"
+      ],
+      "asserted_at": "2026-01-05T00:00:00Z"
+    },
+    {
+      "id": "acc_prod82",
+      "statement": "Model accuracy is 82% in production",
+      "subject": "accuracy",
+      "attrs": {
+        "pattern": "numeric",
+        "value": "82",
+        "unit": "%",
+        "scope": "production"
+      },
+      "assignments": [],
+      "sources": [
+        "art-acc_prod82"
+      ],
+      "asserted_at": "2026-01-05T00:00:00Z"
+    },
+    {
+      "id": "acc_prod70",
+      "statement": "Model accuracy is 70% in production",
+      "subject": "accuracy",
+      "attrs": {
+        "pattern": "numeric",
+        "value": "70",
+        "unit": "%",
+        "scope": "production"
+      },
+      "assignments": [],
+      "sources": [
+        "art-acc_prod70"
+      ],
+      "asserted_at": "2026-01-05T00:00:00Z"
+    },
+    {
+      "id": "budget50",
+      "statement": "My VPS budget is $50 per month",
+      "subject": "budget",
+      "attrs": {
+        "pattern": "numeric",
+        "value": "$50",
+        "unit": "per month"
+      },
+      "assignments": [],
+      "sources": [
+        "art-budget50"
+      ],
+      "asserted_at": "2026-01-05T00:00:00Z"
+    },
+    {
+      "id": "budget75",
+      "statement": "My VPS budget is $75 per month",
+      "subject": "budget",
+      "attrs": {
+        "pattern": "numeric",
+        "value": "$75",
+        "unit": "per month"
+      },
+      "assignments": [],
+      "sources": [
+        "art-budget75"
+      ],
+      "asserted_at": "2026-01-05T00:00:00Z"
+    },
+    {
+      "id": "redis_use",
+      "statement": "I use Redis for caching",
+      "subject": "me",
+      "attrs": {},
+      "assignments": [],
+      "sources": [
+        "art-redis_use"
+      ],
+      "asserted_at": "2026-01-05T00:00:00Z"
+    },
+    {
+      "id": "redis_might",
+      "statement": "I might not use Redis for caching",
+      "subject": "me",
+      "attrs": {},
+      "assignments": [],
+      "sources": [
+        "art-redis_might"
+      ],
+      "asserted_at": "2026-01-05T00:00:00Z"
+    }
+  ],
+  "part_of": [
+    [
+      "overland",
+      "missouri"
+    ]
+  ],
+  "checks": [
+    {
+      "pair": [
+        "team",
+        "company"
+      ],
+      "outcome": "none"
+    },
+    {
+      "pair": [
+        "rev_m",
+        "rev_full"
+      ],
+      "outcome": "none"
+    },
+    {
+      "pair": [
+        "missouri",
+        "overland"
+      ],
+      "outcome": "blocked",
+      "reasons_include": [
+        "GRANULARITY_MISMATCH"
+      ]
+    },
+    {
+      "pair": [
+        "m_central",
+        "m_eastern"
+      ],
+      "outcome": "none"
+    },
+    {
+      "pair": [
+        "m_central",
+        "m_bare"
+      ],
+      "outcome": "needs_review",
+      "reasons_include": [
+        "UNIT_NORMALIZATION_REQUIRED"
+      ]
+    },
+    {
+      "pair": [
+        "acc_val",
+        "acc_prod82"
+      ],
+      "outcome": "none"
+    },
+    {
+      "pair": [
+        "acc_val",
+        "acc_prod70"
+      ],
+      "outcome": "blocked",
+      "reasons_include": [
+        "CONTEXT_SCOPE_MISMATCH"
+      ]
+    },
+    {
+      "pair": [
+        "budget50",
+        "budget75"
+      ],
+      "outcome": "auto_applied"
+    },
+    {
+      "pair": [
+        "budget50",
+        "budget75"
+      ],
+      "outcome": "blocked",
+      "reasons_include": [
+        "USER_REJECTION_EXISTS"
+      ],
+      "user_rejected": true
+    },
+    {
+      "pair": [
+        "redis_use",
+        "redis_might"
+      ],
+      "outcome": "blocked",
+      "reasons_include": [
+        "MODALITY_MISMATCH"
+      ]
+    }
+  ]
+}

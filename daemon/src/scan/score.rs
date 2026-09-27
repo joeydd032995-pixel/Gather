@@ -41,6 +41,8 @@ const ANTONYM_PAIRS: &[(&str, &str)] = &[
     ("increase", "decrease"),
     ("public", "private"),
     ("allow", "forbid"),
+    ("paused", "active"),
+    ("inactive", "active"),
 ];
 
 const STOPWORDS: &[&str] = &[
@@ -87,6 +89,9 @@ fn structural_signal(a: &UnitFacts, b: &UnitFacts) -> Option<(f32, &'static str,
     if let Some(explanation) = numeric_mismatch(a, b) {
         return Some((0.80, "rule:numeric-mismatch", explanation));
     }
+    if let Some(explanation) = clock_mismatch(a, b) {
+        return Some((0.80, "rule:time-mismatch", explanation));
+    }
     if let Some(explanation) = negation_mismatch(a, b) {
         return Some((0.75, "rule:negation", explanation));
     }
@@ -104,6 +109,8 @@ fn structural_signal(a: &UnitFacts, b: &UnitFacts) -> Option<(f32, &'static str,
 // ---------------------------------------------------------------------------
 
 /// Same subject entity + same unit of measure, values differing by >10%.
+/// Values are normalized first ("$1.2M" and "$1,200,000" are the same
+/// amount), so equivalent quantities never look like a conflict.
 fn numeric_mismatch(a: &UnitFacts, b: &UnitFacts) -> Option<String> {
     if a.attrs.get("pattern")?.as_str()? != "numeric"
         || b.attrs.get("pattern")?.as_str()? != "numeric"
@@ -114,13 +121,17 @@ fn numeric_mismatch(a: &UnitFacts, b: &UnitFacts) -> Option<String> {
     if b.subject_entity_id? != subject {
         return None;
     }
-    let unit_a = normalize_unit(a.attrs.get("unit")?.as_str()?);
-    let unit_b = normalize_unit(b.attrs.get("unit")?.as_str()?);
+    let (value_a, unit_a) = normalize_quantity(
+        a.attrs.get("value")?.as_str()?,
+        a.attrs.get("unit")?.as_str()?,
+    )?;
+    let (value_b, unit_b) = normalize_quantity(
+        b.attrs.get("value")?.as_str()?,
+        b.attrs.get("unit")?.as_str()?,
+    )?;
     if unit_a != unit_b {
         return None;
     }
-    let value_a = parse_number(a.attrs.get("value")?.as_str()?)?;
-    let value_b = parse_number(b.attrs.get("value")?.as_str()?)?;
     let larger = value_a.abs().max(value_b.abs());
     if larger == 0.0 || ((value_a - value_b).abs() / larger) <= 0.10 {
         return None;
@@ -128,6 +139,85 @@ fn numeric_mismatch(a: &UnitFacts, b: &UnitFacts) -> Option<String> {
     Some(format!(
         "same subject and unit, conflicting values: {value_a} vs {value_b} {unit_a}"
     ))
+}
+
+/// Same subject, two clock times that name different moments once their
+/// time zones are applied ("3 PM Central" and "4 PM Eastern" agree).
+fn clock_mismatch(a: &UnitFacts, b: &UnitFacts) -> Option<String> {
+    if a.attrs.get("pattern")?.as_str()? != "clock_time"
+        || b.attrs.get("pattern")?.as_str()? != "clock_time"
+    {
+        return None;
+    }
+    if a.subject_entity_id? != b.subject_entity_id? {
+        return None;
+    }
+    let ma = parse_clock(a.attrs.get("value")?.as_str()?)?;
+    let mb = parse_clock(b.attrs.get("value")?.as_str()?)?;
+    let tz = |u: &UnitFacts| {
+        u.attrs
+            .get("tz")
+            .and_then(Value::as_str)
+            .and_then(zone_offset_minutes)
+    };
+    match (tz(a), tz(b)) {
+        (Some(oa), Some(ob)) => {
+            let utc = |m: i32, o: i32| (m - o).rem_euclid(24 * 60);
+            if utc(ma, oa) == utc(mb, ob) {
+                None
+            } else {
+                Some("same subject, the times name different moments".to_string())
+            }
+        }
+        _ if ma != mb => Some("same subject, different times (time zone unknown)".to_string()),
+        _ => None,
+    }
+}
+
+/// Minutes after midnight for "3 PM", "3:30pm", "15:00".
+pub fn parse_clock(raw: &str) -> Option<i32> {
+    let s = raw.trim().to_lowercase().replace('.', "");
+    let (body, pm, am) = if let Some(b) = s.strip_suffix("pm") {
+        (b.trim().to_string(), true, false)
+    } else if let Some(b) = s.strip_suffix("am") {
+        (b.trim().to_string(), false, true)
+    } else {
+        (s.clone(), false, false)
+    };
+    let mut parts = body.split(':');
+    let h: i32 = parts.next()?.trim().parse().ok()?;
+    let m: i32 = parts
+        .next()
+        .map(|m| m.trim().parse().ok())
+        .unwrap_or(Some(0))?;
+    if !(0..60).contains(&m) || h > 23 || ((pm || am) && !(1..=12).contains(&h)) {
+        return None;
+    }
+    let h = match (pm, am) {
+        (true, _) if h != 12 => h + 12,
+        (_, true) if h == 12 => 0,
+        _ => h,
+    };
+    Some(h * 60 + m)
+}
+
+/// Offsets for zone names whose relative offsets hold all year. US zones
+/// shift together for daylight saving, so comparing two of them is exact;
+/// comparing a US zone with UTC is not, so UTC is only paired with itself.
+pub fn zone_offset_minutes(zone: &str) -> Option<i32> {
+    let z = zone.trim().to_lowercase();
+    let us = |name: &str, off: i32| -> Option<i32> {
+        let abbrev = [
+            format!("{}t", &name[..1]),
+            format!("{}st", &name[..1]),
+            format!("{}dt", &name[..1]),
+        ];
+        (z == name || z == format!("{name} time") || abbrev.contains(&z)).then_some(off)
+    };
+    us("eastern", -5 * 60)
+        .or_else(|| us("central", -6 * 60))
+        .or_else(|| us("mountain", -7 * 60))
+        .or_else(|| us("pacific", -8 * 60))
 }
 
 /// One statement is negated and the other is not, over the same content.
@@ -243,6 +333,48 @@ fn parse_number(raw: &str) -> Option<f64> {
         .replace(',', "")
         .parse()
         .ok()
+}
+
+/// Magnitude words that may trail a value ("1.2 M", "3 million").
+const MAGNITUDES: &[(&str, f64)] = &[
+    ("k", 1e3),
+    ("K", 1e3),
+    ("thousand", 1e3),
+    ("M", 1e6),
+    ("mm", 1e6),
+    ("million", 1e6),
+    ("B", 1e9),
+    ("bn", 1e9),
+    ("billion", 1e9),
+];
+
+/// Normalize a (value, unit) pair to (amount, canonical unit): magnitude
+/// suffixes are applied and a currency symbol on the value becomes the unit,
+/// so "$1.2" + "M" and "$1,200,000" + "" are both (1200000, "$").
+pub fn normalize_quantity(value: &str, unit: &str) -> Option<(f64, String)> {
+    let currency = value
+        .chars()
+        .next()
+        .filter(|c| ['$', '€', '£'].contains(c))
+        .map(|c| c.to_string());
+    let mut amount = parse_number(value)?;
+    let mut rest: Vec<&str> = unit.split_whitespace().collect();
+    if let Some(first) = rest.first() {
+        if let Some((_, m)) = MAGNITUDES.iter().find(|(w, _)| w == first) {
+            amount *= m;
+            rest.remove(0);
+        }
+    }
+    let mut canonical = normalize_unit(&rest.join(" "));
+    if let Some(c) = currency {
+        let c = normalize_unit(&c);
+        canonical = if canonical.is_empty() || canonical == c {
+            c
+        } else {
+            format!("{c} {canonical}")
+        };
+    }
+    Some((amount, canonical))
 }
 
 /// Both windows known and non-overlapping: sequenced facts, likely both true.

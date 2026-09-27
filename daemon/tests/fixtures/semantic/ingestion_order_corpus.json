@@ -1,0 +1,290 @@
+{
+  "id": "ingestion-order-corpus",
+  "category": "ingestion_order",
+  "description": "A mixed corpus ingested in canonical order, 24 random permutations and random incremental batches (with repeated passes): entity partitions, photo groups and contradiction outcomes are identical.",
+  "entities": [
+    {
+      "id": "A",
+      "name": "Jordan Smith",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-A"
+      ]
+    },
+    {
+      "id": "B",
+      "name": "J. Smith",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-B"
+      ]
+    },
+    {
+      "id": "C",
+      "name": "Jane Smith",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-C"
+      ]
+    },
+    {
+      "id": "D",
+      "name": "Acme Holdings",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-D"
+      ]
+    },
+    {
+      "id": "E",
+      "name": "Acme Holdings.",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-E"
+      ]
+    },
+    {
+      "id": "F",
+      "name": "Acme Holdings Inc",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-F"
+      ]
+    },
+    {
+      "id": "john",
+      "name": "John",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-john"
+      ]
+    },
+    {
+      "id": "js",
+      "name": "John Smith",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-js"
+      ]
+    },
+    {
+      "id": "jd",
+      "name": "John Doe",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-jd"
+      ]
+    },
+    {
+      "id": "jl",
+      "name": "John Lee",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-jl"
+      ]
+    },
+    {
+      "id": "G",
+      "name": "Globex Corp",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-G"
+      ]
+    },
+    {
+      "id": "H",
+      "name": "Globex Corp.",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-H"
+      ]
+    }
+  ],
+  "pairs": [
+    {
+      "a": "A",
+      "b": "B",
+      "text": 0.94
+    },
+    {
+      "a": "B",
+      "b": "C",
+      "text": 0.93
+    },
+    {
+      "a": "D",
+      "b": "E",
+      "text": 0.96
+    },
+    {
+      "a": "D",
+      "b": "F",
+      "text": 0.95
+    },
+    {
+      "a": "E",
+      "b": "F",
+      "text": 0.94
+    },
+    {
+      "a": "john",
+      "b": "js",
+      "cosine": 0.93,
+      "text": 0.93
+    },
+    {
+      "a": "john",
+      "b": "jd",
+      "cosine": 0.93,
+      "text": 0.93
+    },
+    {
+      "a": "john",
+      "b": "jl",
+      "cosine": 0.93,
+      "text": 0.93
+    },
+    {
+      "a": "G",
+      "b": "H",
+      "text": 0.97
+    }
+  ],
+  "cannot_links": [
+    [
+      "G",
+      "H"
+    ]
+  ],
+  "photos": [
+    {
+      "id": "a",
+      "phash": "f0f0f0f0f0f0f0f0"
+    },
+    {
+      "id": "b",
+      "phash": "f0f0f0f0f0f0f0f7"
+    },
+    {
+      "id": "c",
+      "phash": "f0f0f0f0f080f0f7"
+    },
+    {
+      "id": "d",
+      "phash": "0f0f0f0f0f0f0f0f"
+    },
+    {
+      "id": "e",
+      "phash": "0f0f0f0f0f0f0f0e"
+    },
+    {
+      "id": "f",
+      "phash": "0f0f0f0f0f0f0f0d"
+    }
+  ],
+  "max_distance": 3,
+  "units": [
+    {
+      "id": "chi_now",
+      "statement": "I live in Chicago",
+      "subject": "me",
+      "attrs": {},
+      "assignments": [
+        [
+          "me",
+          "lives_in",
+          "chicago"
+        ]
+      ],
+      "sources": [
+        "art-chi_now"
+      ],
+      "asserted_at": "2023-01-10T00:00:00Z"
+    },
+    {
+      "id": "stl_now",
+      "statement": "I live in St. Louis",
+      "subject": "me",
+      "attrs": {},
+      "assignments": [
+        [
+          "me",
+          "lives_in",
+          "stlouis"
+        ]
+      ],
+      "sources": [
+        "art-stl_now"
+      ],
+      "asserted_at": "2026-02-01T00:00:00Z"
+    },
+    {
+      "id": "budget50",
+      "statement": "My VPS budget is $50 per month",
+      "subject": "budget",
+      "attrs": {
+        "pattern": "numeric",
+        "value": "$50",
+        "unit": "per month"
+      },
+      "assignments": [],
+      "sources": [
+        "art-budget50"
+      ],
+      "asserted_at": "2026-01-05T00:00:00Z"
+    },
+    {
+      "id": "budget75",
+      "statement": "My VPS budget is $75 per month",
+      "subject": "budget",
+      "attrs": {
+        "pattern": "numeric",
+        "value": "$75",
+        "unit": "per month"
+      },
+      "assignments": [],
+      "sources": [
+        "art-budget75"
+      ],
+      "asserted_at": "2026-01-05T00:00:00Z"
+    }
+  ],
+  "checks": [
+    {
+      "pair": [
+        "chi_now",
+        "stl_now"
+      ],
+      "outcome": "blocked",
+      "reasons_include": [
+        "TEMPORAL_SUCCESSION"
+      ],
+      "supersedes": [
+        "chi_now",
+        "stl_now"
+      ]
+    },
+    {
+      "pair": [
+        "budget50",
+        "budget75"
+      ],
+      "outcome": "auto_applied"
+    }
+  ],
+  "permutations": 24,
+  "seed": 42,
+  "expect": {}
+}

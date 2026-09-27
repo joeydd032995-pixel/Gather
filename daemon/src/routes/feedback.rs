@@ -94,6 +94,29 @@ pub async fn reject_unit_core(pool: &PgPool, id: Uuid, note: Option<&str>) -> Re
     // Same propagation the contradiction resolver does for a superseded unit.
     deactivate_relationships(&mut tx, id).await?;
     record_feedback(&mut tx, id, "reject", None, note).await?;
+    // The rejection is evidence: whatever rested on this unit (a
+    // supersession it caused, a contradiction, derived certificates) is
+    // withdrawn with the rejection as the cause.
+    let event = crate::safety::store::record(
+        &mut tx,
+        &crate::safety::service::user_decision(
+            "user.reject_unit",
+            format!("user-reject:{id}"),
+            vec![id],
+            crate::safety::EvidenceClass::Rejected,
+            "You rejected this claim; conclusions that relied on it were withdrawn.".into(),
+        ),
+    )
+    .await?;
+    let mut report = crate::safety::service::RetractionReport::default();
+    crate::safety::service::retract_unit_dependents(
+        &mut tx,
+        &[id],
+        "a claim it relied on was rejected",
+        event,
+        &mut report,
+    )
+    .await?;
     tx.commit().await?;
     Ok(())
 }
@@ -156,10 +179,13 @@ pub async fn restore_unit_core(
             "only a retracted unit can be restored; unit {id} is '{status}'"
         )));
     }
-    sqlx::query("UPDATE atomic_units SET status = 'active' WHERE id = $1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
+    // Rescan: conclusions withdrawn with the reject are re-derived afresh.
+    sqlx::query(
+        "UPDATE atomic_units SET status = 'active', contradiction_scanned_at = NULL WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
     reactivate_relationships(&mut tx, id).await?;
     record_feedback(&mut tx, id, "confirm", None, note).await?;
     tx.commit().await?;
@@ -505,6 +531,25 @@ pub async fn accept_review_core(
         }
         ("entity", "merge-band") => {
             let (a, b, score) = merge_pair(&item.signals)?;
+            // The pair may name an entity merged away since it was parked:
+            // act on the entities they are now part of.
+            let (a, b) = (
+                crate::entities::resolve_head(pool, a).await?,
+                crate::entities::resolve_head(pool, b).await?,
+            );
+            if a == b {
+                sqlx::query("UPDATE review_queue SET state = 'resolved' WHERE id = $1")
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+                return Ok(ReviewOutcome {
+                    id,
+                    action: "merged",
+                    winner: Some(a),
+                    loser: None,
+                    ..ReviewOutcome::default()
+                });
+            }
             let (winner, loser) = survivor_and_loser(pool, a, b).await?;
             // Merge and label in one transaction: a merge without its label
             // would leave the tray entry open and un-retryable.

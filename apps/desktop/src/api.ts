@@ -564,3 +564,92 @@ export async function getGraphOverview(
   );
   return jsonOrThrow<GraphOverview>(res);
 }
+
+// --- Semantic safety: why something was (or wasn't) concluded ------------
+
+export type CertificateOutcome =
+  | "auto_applied"
+  | "needs_review"
+  | "blocked"
+  | "user_decision"
+  | "superseded"
+  | "retracted";
+
+/** The record behind one automatic conclusion, or one Gather held back. */
+export interface Certificate {
+  id: string;
+  conclusion_kind: string;
+  conclusion_key: string;
+  conclusion_id: string | null;
+  subject_ids: string[];
+  rule_id: string;
+  rule_version: number;
+  decision: CertificateOutcome;
+  outcome: CertificateOutcome;
+  evidence_class: string;
+  inputs: { id: string; kind: string; class: string; detail: Record<string, unknown> }[];
+  source_artifact_ids: string[];
+  model_version: string | null;
+  scope: Record<string, unknown>;
+  temporal: Record<string, unknown>;
+  reason_codes: string[];
+  /** The reason codes in plain language. */
+  reasons: { code: string; text: string }[];
+  explanation: string;
+  created_at: string;
+  superseded_at: string | null;
+  retracted_at: string | null;
+  status_reason: string | null;
+  caused_by: string | null;
+}
+
+export interface CertificateQuery {
+  conclusion_id?: string;
+  subject_id?: string;
+  artifact_id?: string;
+  reason?: string;
+  outcome?: CertificateOutcome;
+  kind?: string;
+  live?: boolean;
+  limit?: number;
+}
+
+export async function listCertificates(q: CertificateQuery): Promise<Certificate[]> {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(q)) {
+    if (v !== undefined && v !== null && v !== "") params.set(k, String(v));
+  }
+  const body = await getJson<{ items: Certificate[] }>(`/certificates?${params}`);
+  return body.items;
+}
+
+export function getCertificate(id: string): Promise<Certificate> {
+  return getJson(`/certificates/${id}`);
+}
+
+/** A person says two photos are not copies; Gather never regroups them. */
+export function markNotDuplicate(
+  imageId: string,
+  otherId: string,
+): Promise<{ certificate: string }> {
+  return postJson(`/images/${imageId}/not-duplicate`, { other_id: otherId });
+}
+
+export interface RetractionReport {
+  event_certificate: string | null;
+  units_retracted: string[];
+  certificates_withdrawn: string[];
+  contradictions_withdrawn: number;
+  supersessions_reverted: number;
+  images_ungrouped: number;
+  deleted: boolean;
+}
+
+/** Stop a source from supporting anything (optionally deleting it). */
+export function retractArtifact(
+  id: string,
+  reason?: string,
+  del = false,
+): Promise<RetractionReport> {
+  return postJson(`/artifacts/${id}/retract`, { reason: reason || null, delete: del });
+}

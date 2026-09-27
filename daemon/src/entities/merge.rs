@@ -35,6 +35,8 @@ pub struct MergeOutcome {
     /// Entities previously merged into the loser, repointed at the winner so
     /// the merge graph stays exactly one level deep.
     pub descendants_flattened: u64,
+    /// The `entity_merge_audit` row recording this merge.
+    pub merge_id: Uuid,
 }
 
 /// Merge `loser` into `winner` in one transaction.
@@ -293,10 +295,10 @@ pub async fn merge_entities_in(
         descendants,
         gate: basis.map(|b| b.gate.as_str().to_string()),
     };
-    sqlx::query(
+    let merge_id: Uuid = sqlx::query_scalar(
         "INSERT INTO entity_merge_audit \
            (winner_entity_id, loser_entity_id, action, actor, note, undo, score) \
-         VALUES ($1, $2, 'merge', $3, $4, $5, $6)",
+         VALUES ($1, $2, 'merge', $3, $4, $5, $6) RETURNING id",
     )
     .bind(winner_id)
     .bind(loser_id)
@@ -304,8 +306,23 @@ pub async fn merge_entities_in(
     .bind(&note)
     .bind(serde_json::to_value(&journal).map_err(anyhow::Error::from)?)
     .bind(basis.map(|b| b.score))
-    .execute(&mut **tx)
+    .fetch_one(&mut **tx)
     .await?;
+
+    // A person's merge is evidence, not an inference: it fixes the pair for
+    // every later automatic pass. Automatic merges carry the certificate the
+    // clustering worker wrote.
+    if actor != "auto" {
+        let cert = crate::safety::service::user_decision(
+            "user.entity_merge",
+            format!("user-merge:{merge_id}"),
+            vec![winner_id, loser_id],
+            crate::safety::EvidenceClass::UserConfirmed,
+            format!("You merged \"{loser_name}\" into \"{winner_name}\"."),
+        );
+        let id = crate::safety::store::record(tx, &cert).await?;
+        crate::safety::store::set_conclusion(tx, id, merge_id).await?;
+    }
 
     Ok(MergeOutcome {
         winner_id,
@@ -318,6 +335,7 @@ pub async fn merge_entities_in(
         relationships_repointed: sources + targets,
         relationships_dropped: self_loops + duplicates,
         descendants_flattened,
+        merge_id,
     })
 }
 
@@ -387,6 +405,47 @@ pub async fn unmerge_entity_in(
     actor: Option<String>,
 ) -> Result<UnmergeOutcome, ApiError> {
     let actor = actor.unwrap_or_else(|| "local-user".to_string());
+    let outcome = unmerge_core(tx, loser_id, note, actor.clone(), true).await?;
+    // The split is the user's evidence; the merge's certificate no longer
+    // holds and is retracted with the split as its cause.
+    let cert = crate::safety::service::user_decision(
+        "user.entity_split",
+        format!("user-split:{}:{}", outcome.winner_id, loser_id),
+        vec![outcome.winner_id, loser_id],
+        crate::safety::EvidenceClass::Rejected,
+        "You split these apart; they won't be merged again automatically.".to_string(),
+    );
+    let event = crate::safety::store::record(tx, &cert).await?;
+    crate::safety::service::retract_merge_certificates(
+        tx,
+        loser_id,
+        crate::safety::Outcome::Retracted,
+        "split by the user",
+        event,
+    )
+    .await?;
+    Ok(outcome)
+}
+
+/// Withdraw an automatic merge because later evidence showed it was part of
+/// a chain. Exactly [`unmerge_entity_in`]'s reversal, but it is not a user
+/// decision: the pair is not dismissed (the review tray decides it) and no
+/// negative label reaches the tuner.
+pub async fn unmerge_for_supersession_in(
+    tx: &mut Transaction<'_, Postgres>,
+    loser_id: Uuid,
+    note: String,
+) -> Result<UnmergeOutcome, ApiError> {
+    unmerge_core(tx, loser_id, Some(note), "auto".to_string(), false).await
+}
+
+async fn unmerge_core(
+    tx: &mut Transaction<'_, Postgres>,
+    loser_id: Uuid,
+    note: Option<String>,
+    actor: String,
+    user_split: bool,
+) -> Result<UnmergeOutcome, ApiError> {
     let merge = sqlx::query(
         "SELECT id, winner_entity_id, undo, score, created_at FROM entity_merge_audit \
          WHERE loser_entity_id = $1 AND action = 'merge' AND undone_at IS NULL \
@@ -596,15 +655,16 @@ pub async fn unmerge_entity_in(
             .await?;
     }
 
-    // 6. Audit: close the merge, record the unmerge, and dismiss the pair so
-    //    the clustering worker never merges it again.
+    // 6. Audit: close the merge, record the unmerge, and — for a person's
+    //    split — dismiss the pair so the clustering worker never merges it
+    //    again.
     sqlx::query("UPDATE entity_merge_audit SET undone_at = now() WHERE id = $1")
         .bind(merge_id)
         .execute(&mut **tx)
         .await?;
     sqlx::query(
         "INSERT INTO entity_merge_audit (winner_entity_id, loser_entity_id, action, actor, note) \
-         VALUES ($1, $2, 'unmerge', $3, $4), ($1, $2, 'dismiss', $3, 'merge undone')",
+         VALUES ($1, $2, 'unmerge', $3, $4)",
     )
     .bind(winner_id)
     .bind(loser_id)
@@ -612,9 +672,21 @@ pub async fn unmerge_entity_in(
     .bind(&note)
     .execute(&mut **tx)
     .await?;
+    if user_split {
+        sqlx::query(
+            "INSERT INTO entity_merge_audit \
+               (winner_entity_id, loser_entity_id, action, actor, note) \
+             VALUES ($1, $2, 'dismiss', $3, 'merge undone')",
+        )
+        .bind(winner_id)
+        .bind(loser_id)
+        .bind(&actor)
+        .execute(&mut **tx)
+        .await?;
+    }
 
     // 7. A wrong merge the pipeline made is the tuner's negative label.
-    if let Some(score) = score {
+    if let (Some(score), true) = (score, user_split) {
         sqlx::query(
             "INSERT INTO unit_feedback \
                (target_kind, target_id, action, actor, corrected, note, score) \
@@ -684,6 +756,19 @@ pub async fn dismiss_suggestion_in(
     .bind(&note)
     .execute(&mut **tx)
     .await?;
+    let (lo, hi) = if a_id < b_id {
+        (a_id, b_id)
+    } else {
+        (b_id, a_id)
+    };
+    let cert = crate::safety::service::user_decision(
+        "user.entity_different",
+        format!("user-different:{lo}:{hi}"),
+        vec![a_id, b_id],
+        crate::safety::EvidenceClass::Rejected,
+        "You marked these as different; they won't be merged automatically.".to_string(),
+    );
+    crate::safety::store::record(tx, &cert).await?;
     Ok(())
 }
 

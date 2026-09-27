@@ -1,0 +1,102 @@
+{
+  "id": "identity-user-decisions",
+  "category": "identity",
+  "description": "A user merged A+B and said B and C are different: C matching both is blocked. An automatic merge the user later split (dismissed) is not re-made even with a near-certain score.",
+  "entities": [
+    {
+      "id": "A",
+      "name": "Northwind",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-A"
+      ]
+    },
+    {
+      "id": "B",
+      "name": "Northwind Traders",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-B"
+      ]
+    },
+    {
+      "id": "C",
+      "name": "Northwind Trader",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-C"
+      ]
+    },
+    {
+      "id": "D",
+      "name": "Contoso Ltd",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-D"
+      ]
+    },
+    {
+      "id": "E",
+      "name": "Contoso Ltd.",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-E"
+      ]
+    }
+  ],
+  "existing": [
+    {
+      "id": "B",
+      "head": "A",
+      "link": "user"
+    },
+    {
+      "id": "E",
+      "head": "D",
+      "link": "auto"
+    }
+  ],
+  "pairs": [
+    {
+      "a": "A",
+      "b": "C",
+      "text": 0.95
+    },
+    {
+      "a": "B",
+      "b": "C",
+      "text": 0.97
+    },
+    {
+      "a": "D",
+      "b": "E",
+      "text": 0.97
+    }
+  ],
+  "cannot_links": [
+    [
+      "B",
+      "C"
+    ],
+    [
+      "D",
+      "E"
+    ]
+  ],
+  "expect": {
+    "merge_groups": [
+      [
+        "A",
+        "B"
+      ]
+    ],
+    "reasons_include": [
+      "USER_REJECTION_EXISTS"
+    ]
+  }
+}

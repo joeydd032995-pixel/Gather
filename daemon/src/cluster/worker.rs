@@ -2,41 +2,32 @@
 //!
 //! Interval-driven, same shape as `scan::worker_loop`. Two passes per tick:
 //!
-//! 1. **Entity resolution** — reuses `entities::merge_suggestions` (the existing
-//!    two-pass scorer) as the candidate edges, applies the conservative
-//!    `decide::merge_decision` gate to each, auto-merges the components whose
-//!    edges all clear the Auto bar, and parks the rest in `review_queue`. This
-//!    is one decision per component, not per pair.
+//! 1. **Entity resolution** — `cluster::resolve`: plans merges with the
+//!    `safety::identity` rule (every pair in a merged group needs its own
+//!    qualifying evidence) over live and merged-away records, applies the
+//!    plan, withdraws automatic merges later evidence turned into chains, and
+//!    parks the rest in `review_queue`, each with a certificate.
 //!
 //! 2. **Topic grouping** — claims a batch of unclustered active units and groups
 //!    them with the mutual-kNN + connected-components primitive over statement
 //!    token similarity (offline, deterministic; embedding-based topics are a
 //!    follow-up). Assignment is a reversible `topic_cluster_id` tag.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
-use serde_json::json;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use super::{
-    cohesion, components, grouped, is_complete, label_from_texts, mutual_knn, pair_key,
-    survivor_key, Edge,
-};
+use super::{cohesion, components, grouped, label_from_texts, mutual_knn};
 use crate::config::Config;
-use crate::decide::live::LiveThresholds;
-use crate::decide::{
-    auto_basis, best_score, merge_decision, Band, MergeBasis, MergeGate, MergeSignals,
-};
-use crate::entities::similarity::name_similarity;
-use crate::entities::{merge_entities_in, merge_suggestions};
 use crate::scan::score::{all_tokens, jaccard};
 
 #[derive(Debug, Default)]
 pub struct ClusterStats {
     pub entities_merged: usize,
     pub entity_pairs_parked: usize,
+    /// Automatic merges withdrawn because later evidence made them a chain.
+    pub entities_withdrawn: usize,
     pub topics_created: usize,
     pub units_clustered: usize,
 }
@@ -69,248 +60,12 @@ pub async fn worker_loop(pool: PgPool, config: Config) {
 /// One full pass (entity resolution + topic grouping). Public for tests.
 pub async fn run_one_pass(pool: &PgPool, config: &Config) -> anyhow::Result<ClusterStats> {
     let mut stats = ClusterStats::default();
-    entity_resolution_pass(pool, config, &mut stats).await?;
+    let resolved = super::resolve::entity_resolution_pass(pool, config).await?;
+    stats.entities_merged = resolved.merged;
+    stats.entity_pairs_parked = resolved.parked;
+    stats.entities_withdrawn = resolved.withdrawn;
     topic_clustering_pass(pool, config, &mut stats).await?;
     Ok(stats)
-}
-
-async fn entity_resolution_pass(
-    pool: &PgPool,
-    config: &Config,
-    stats: &mut ClusterStats,
-) -> anyhow::Result<()> {
-    let suggestions = merge_suggestions(pool, config.cluster_threshold, 1_000).await?;
-    if suggestions.is_empty() {
-        return Ok(());
-    }
-    // Tuned merge thresholds (env/conservative defaults when untuned).
-    let thresholds = LiveThresholds::load(pool, config).await?.merge;
-
-    // Index entities appearing in suggestions; keep their names for canonical
-    // selection.
-    let mut ids: Vec<Uuid> = Vec::new();
-    let mut names: Vec<String> = Vec::new();
-    let mut kinds: Vec<String> = Vec::new();
-    let mut index: HashMap<Uuid, usize> = HashMap::new();
-    let mut intern = |id: Uuid,
-                      name: &str,
-                      kind: &str,
-                      ids: &mut Vec<Uuid>,
-                      names: &mut Vec<String>,
-                      kinds: &mut Vec<String>| {
-        *index.entry(id).or_insert_with(|| {
-            ids.push(id);
-            names.push(name.to_string());
-            kinds.push(kind.to_string());
-            ids.len() - 1
-        })
-    };
-
-    let mut auto_edges: Vec<Edge> = Vec::new();
-    // Why each Auto edge cleared the gate, parallel to auto_edges: kept with
-    // the merge so undoing it tunes the threshold that caused it.
-    let mut edge_basis: Vec<MergeBasis> = Vec::new();
-    // Also parallel: the pair's review-tray signals, used if the edge's
-    // component turns out to be a chain and has to be reviewed instead.
-    let mut edge_signals: Vec<(Uuid, Uuid, serde_json::Value)> = Vec::new();
-    for s in &suggestions {
-        // Supply BOTH signals when they exist. merge_suggestions emits only the
-        // embedding row for a pair it scored both ways, so recompute the text
-        // similarity here; otherwise the two-signal agreement path can never
-        // fire and a pair strong on both is needlessly held.
-        let text_sim = name_similarity(&s.a.name, &s.b.name);
-        let signals = if s.method == "embedding:cosine" {
-            MergeSignals {
-                cosine: Some(s.score),
-                text: Some(text_sim),
-            }
-        } else {
-            MergeSignals {
-                cosine: None,
-                text: Some(s.score),
-            }
-        };
-        match merge_decision(&signals, &thresholds) {
-            Band::Auto => {
-                let ia = intern(
-                    s.a.id, &s.a.name, &s.a.kind, &mut ids, &mut names, &mut kinds,
-                );
-                let ib = intern(
-                    s.b.id, &s.b.name, &s.b.kind, &mut ids, &mut names, &mut kinds,
-                );
-                let (a, b) = if ia < ib { (ia, ib) } else { (ib, ia) };
-                // Weighted by the strongest signal (cohesion); the basis
-                // records which gate admitted it and on what coordinate.
-                let sim = best_score(&signals).unwrap_or(s.score);
-                let basis = auto_basis(&signals, &thresholds).unwrap_or(MergeBasis {
-                    gate: MergeGate::Single,
-                    score: sim,
-                });
-                auto_edges.push(Edge { a, b, sim });
-                edge_basis.push(basis);
-                edge_signals.push((
-                    s.a.id,
-                    s.b.id,
-                    json!({
-                        "a": s.a.id,
-                        "b": s.b.id,
-                        "score": best_score(&signals),
-                        "cosine": signals.cosine,
-                        "text": signals.text,
-                        "method": s.method,
-                        "chained": true,
-                    }),
-                ));
-            }
-            Band::Hold => {
-                let parked = sqlx::query(
-                    "INSERT INTO review_queue (target_kind, target_id, reason, signals) \
-                     VALUES ('entity', $1, 'merge-band', $2) ON CONFLICT DO NOTHING",
-                )
-                .bind(pair_key(s.a.id, s.b.id))
-                // `score` is the strongest signal — the coordinate the
-                // single-signal Auto gate (and so the tuner) works on — with
-                // both raw signals kept alongside for inspection.
-                .bind(json!({
-                    "a": s.a.id,
-                    "b": s.b.id,
-                    "score": best_score(&signals),
-                    "cosine": signals.cosine,
-                    "text": signals.text,
-                    "method": s.method,
-                }))
-                .execute(pool)
-                .await?
-                .rows_affected();
-                stats.entity_pairs_parked += parked as usize;
-            }
-            Band::Drop => {}
-        }
-    }
-
-    if auto_edges.is_empty() {
-        return Ok(());
-    }
-    let comp = components(ids.len(), &auto_edges);
-    let mut merged_away: Vec<Uuid> = Vec::new();
-    for group in grouped(&comp) {
-        if group.len() < 2 {
-            continue;
-        }
-        // Chaining guard: a component larger than the cap is too diffuse to
-        // merge wholesale (a chain of adjacent-Auto pairs can join unrelated
-        // endpoints). Park it for review instead of a destructive auto-merge.
-        if group.len() > config.cluster_max_component {
-            let parked = sqlx::query(
-                "INSERT INTO review_queue (target_kind, target_id, reason, signals) \
-                 VALUES ('entity', $1, 'oversized-component', $2) ON CONFLICT DO NOTHING",
-            )
-            .bind(ids[group[0]])
-            .bind(json!({ "members": group.iter().map(|&i| ids[i]).collect::<Vec<_>>() }))
-            .execute(pool)
-            .await?
-            .rows_affected();
-            stats.entity_pairs_parked += parked as usize;
-            continue;
-        }
-        // Every member must match every other one directly. A chain (A~B,
-        // B~C, A≁C) would otherwise fold unrelated things together through
-        // one bridging entity, so its pairs go to the review tray one by one,
-        // where each can be merged or marked as different.
-        if !is_complete(&group, &auto_edges) {
-            for (edge, (a, b, signals)) in auto_edges.iter().zip(&edge_signals) {
-                if !group.contains(&edge.a) || !group.contains(&edge.b) {
-                    continue;
-                }
-                let parked = sqlx::query(
-                    "INSERT INTO review_queue (target_kind, target_id, reason, signals) \
-                     VALUES ('entity', $1, 'merge-band', $2) ON CONFLICT DO NOTHING",
-                )
-                .bind(pair_key(*a, *b))
-                .bind(signals)
-                .execute(pool)
-                .await?
-                .rows_affected();
-                stats.entity_pairs_parked += parked as usize;
-            }
-            continue;
-        }
-        // Canonical survivor: prefer a specifically-typed entity over an
-        // extraction-created 'other' (so a merge never discards the more
-        // specific kind), then the longest name, then lowest index.
-        let winner_local = *group
-            .iter()
-            .max_by(|&&x, &&y| {
-                survivor_key(&kinds[x], &names[x])
-                    .cmp(&survivor_key(&kinds[y], &names[y]))
-                    .then(y.cmp(&x))
-            })
-            .expect("non-empty group");
-        let winner_id = ids[winner_local];
-        let coh = cohesion(&group, &auto_edges);
-
-        let cluster_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO clusters (kind, label, cohesion, size) \
-             VALUES ('entity', $1, $2, $3) RETURNING id",
-        )
-        .bind(&names[winner_local])
-        .bind(coh)
-        .bind(group.len() as i32)
-        .fetch_one(pool)
-        .await?;
-
-        for &local in &group {
-            let member_id = ids[local];
-            sqlx::query(
-                "INSERT INTO cluster_members (cluster_id, member_kind, member_id, sim) \
-                 VALUES ($1, 'entity', $2, $3) ON CONFLICT DO NOTHING",
-            )
-            .bind(cluster_id)
-            .bind(member_id)
-            .bind(coh)
-            .execute(pool)
-            .await?;
-            if member_id != winner_id {
-                merged_away.push(member_id);
-                // The strongest Auto edge that pulled this member in: its
-                // basis is kept with the merge so an undo can teach the tuner.
-                let basis = auto_edges
-                    .iter()
-                    .zip(&edge_basis)
-                    .filter(|(e, _)| e.a == local || e.b == local)
-                    .max_by(|(x, _), (y, _)| x.sim.total_cmp(&y.sim))
-                    .map(|(_, b)| *b);
-                let mut tx = pool.begin().await?;
-                merge_entities_in(
-                    &mut tx,
-                    winner_id,
-                    member_id,
-                    Some("auto-clustered duplicate".to_string()),
-                    Some("auto".to_string()),
-                    basis,
-                )
-                .await?;
-                tx.commit().await?;
-                metrics::counter!("gather_entity_merges_total").increment(1);
-                stats.entities_merged += 1;
-            }
-        }
-    }
-    // A pair held in an earlier pass may now clear the (possibly re-tuned)
-    // Auto bar and have just been merged: its tray entry is stale, and
-    // accepting it would fail on the already-merged loser. Close every open
-    // merge entry that names an entity merged away this pass.
-    if !merged_away.is_empty() {
-        sqlx::query(
-            "UPDATE review_queue SET state = 'dismissed' \
-             WHERE state = 'open' AND target_kind = 'entity' AND reason = 'merge-band' \
-               AND (signals->>'a' = ANY($1) OR signals->>'b' = ANY($1))",
-        )
-        .bind(merged_away.iter().map(Uuid::to_string).collect::<Vec<_>>())
-        .execute(pool)
-        .await?;
-    }
-    Ok(())
 }
 
 async fn topic_clustering_pass(

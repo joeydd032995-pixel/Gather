@@ -1,0 +1,264 @@
+{
+  "id": "temporal-scope",
+  "category": "temporal",
+  "description": "Non-overlapping periods are not contradictions; a later current state supersedes an earlier one without erasing it; missing time alignment is review, never a confident conflict.",
+  "units": [
+    {
+      "id": "chi23",
+      "statement": "I live in Chicago during 2023",
+      "subject": "me",
+      "attrs": {},
+      "assignments": [
+        [
+          "me",
+          "lives_in",
+          "chicago"
+        ]
+      ],
+      "sources": [
+        "art-chi23"
+      ],
+      "asserted_at": "2023-06-01T00:00:00Z"
+    },
+    {
+      "id": "stl26",
+      "statement": "I live in St. Louis during 2026",
+      "subject": "me",
+      "attrs": {},
+      "assignments": [
+        [
+          "me",
+          "lives_in",
+          "stlouis"
+        ]
+      ],
+      "sources": [
+        "art-stl26"
+      ],
+      "asserted_at": "2026-06-01T00:00:00Z"
+    },
+    {
+      "id": "chi_now",
+      "statement": "I live in Chicago",
+      "subject": "me",
+      "attrs": {},
+      "assignments": [
+        [
+          "me",
+          "lives_in",
+          "chicago"
+        ]
+      ],
+      "sources": [
+        "art-chi_now"
+      ],
+      "asserted_at": "2023-01-10T00:00:00Z"
+    },
+    {
+      "id": "stl_now",
+      "statement": "I live in St. Louis",
+      "subject": "me",
+      "attrs": {},
+      "assignments": [
+        [
+          "me",
+          "lives_in",
+          "stlouis"
+        ]
+      ],
+      "sources": [
+        "art-stl_now"
+      ],
+      "asserted_at": "2026-02-01T00:00:00Z"
+    },
+    {
+      "id": "rent24",
+      "statement": "Rent was $1,200 in 2024",
+      "subject": "rent",
+      "attrs": {
+        "pattern": "numeric",
+        "value": "$1,200",
+        "unit": ""
+      },
+      "assignments": [],
+      "sources": [
+        "art-rent24"
+      ],
+      "asserted_at": "2026-03-01T00:00:00Z"
+    },
+    {
+      "id": "rent_now",
+      "statement": "Rent is $1,500 now",
+      "subject": "rent",
+      "attrs": {
+        "pattern": "numeric",
+        "value": "$1,500",
+        "unit": ""
+      },
+      "assignments": [],
+      "sources": [
+        "art-rent_now"
+      ],
+      "asserted_at": "2026-03-01T00:00:00Z"
+    },
+    {
+      "id": "paused",
+      "statement": "The project was paused",
+      "subject": "project",
+      "attrs": {},
+      "assignments": [],
+      "sources": [
+        "art-paused"
+      ],
+      "asserted_at": "2025-01-15T00:00:00Z"
+    },
+    {
+      "id": "active",
+      "statement": "The project is active",
+      "subject": "project",
+      "attrs": {},
+      "assignments": [],
+      "sources": [
+        "art-active"
+      ],
+      "asserted_at": "2025-06-01T00:00:00Z"
+    },
+    {
+      "id": "denver",
+      "statement": "I live in Denver",
+      "subject": "me",
+      "attrs": {},
+      "assignments": [
+        [
+          "me",
+          "lives_in",
+          "denver"
+        ]
+      ],
+      "sources": [
+        "art-denver"
+      ]
+    },
+    {
+      "id": "austin",
+      "statement": "I live in Austin",
+      "subject": "me",
+      "attrs": {},
+      "assignments": [
+        [
+          "me",
+          "lives_in",
+          "austin"
+        ]
+      ],
+      "sources": [
+        "art-austin"
+      ]
+    },
+    {
+      "id": "boston",
+      "statement": "I live in Boston",
+      "subject": "me",
+      "attrs": {},
+      "assignments": [
+        [
+          "me",
+          "lives_in",
+          "boston"
+        ]
+      ],
+      "sources": [
+        "art-boston"
+      ],
+      "asserted_at": "2026-05-01T09:00:00Z"
+    },
+    {
+      "id": "seattle",
+      "statement": "I live in Seattle",
+      "subject": "me",
+      "attrs": {},
+      "assignments": [
+        [
+          "me",
+          "lives_in",
+          "seattle"
+        ]
+      ],
+      "sources": [
+        "art-seattle"
+      ],
+      "asserted_at": "2026-05-01T18:00:00Z"
+    }
+  ],
+  "checks": [
+    {
+      "pair": [
+        "chi23",
+        "stl26"
+      ],
+      "outcome": "blocked",
+      "reasons_include": [
+        "TIME_WINDOWS_NON_OVERLAPPING"
+      ]
+    },
+    {
+      "pair": [
+        "chi_now",
+        "stl_now"
+      ],
+      "outcome": "blocked",
+      "reasons_include": [
+        "TEMPORAL_SUCCESSION"
+      ],
+      "supersedes": [
+        "chi_now",
+        "stl_now"
+      ]
+    },
+    {
+      "pair": [
+        "rent24",
+        "rent_now"
+      ],
+      "outcome": "blocked",
+      "reasons_include": [
+        "TIME_WINDOWS_NON_OVERLAPPING"
+      ],
+      "supersedes": [
+        "rent24",
+        "rent_now"
+      ]
+    },
+    {
+      "pair": [
+        "paused",
+        "active"
+      ],
+      "outcome": "blocked",
+      "reasons_include": [
+        "TIME_WINDOWS_NON_OVERLAPPING"
+      ],
+      "supersedes": [
+        "paused",
+        "active"
+      ]
+    },
+    {
+      "pair": [
+        "denver",
+        "austin"
+      ],
+      "outcome": "needs_review",
+      "reasons_include": [
+        "TIME_SCOPE_UNKNOWN"
+      ]
+    },
+    {
+      "pair": [
+        "boston",
+        "seattle"
+      ],
+      "outcome": "auto_applied"
+    }
+  ]
+}

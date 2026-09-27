@@ -1,0 +1,110 @@
+{
+  "id": "identity-threshold-boundary",
+  "category": "identity",
+  "description": "Scores at and just below each bar have documented outcomes: >= 0.92 merges; just below holds; >= 0.60 holds; below 0.60 is not surfaced.",
+  "entities": [
+    {
+      "id": "a1",
+      "name": "Boundary Alpha",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-a1"
+      ]
+    },
+    {
+      "id": "a2",
+      "name": "Boundary Alpha 2",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-a2"
+      ]
+    },
+    {
+      "id": "b1",
+      "name": "Boundary Beta",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-b1"
+      ]
+    },
+    {
+      "id": "b2",
+      "name": "Boundary Beta 2",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-b2"
+      ]
+    },
+    {
+      "id": "c1",
+      "name": "Boundary Gamma",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-c1"
+      ]
+    },
+    {
+      "id": "c2",
+      "name": "Boundary Gamma 2",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-c2"
+      ]
+    },
+    {
+      "id": "d1",
+      "name": "Boundary Delta",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-d1"
+      ]
+    },
+    {
+      "id": "d2",
+      "name": "Boundary Delta 2",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-d2"
+      ]
+    }
+  ],
+  "pairs": [
+    {
+      "a": "a1",
+      "b": "a2",
+      "text": 0.92
+    },
+    {
+      "a": "b1",
+      "b": "b2",
+      "text": 0.9199
+    },
+    {
+      "a": "c1",
+      "b": "c2",
+      "text": 0.6
+    },
+    {
+      "a": "d1",
+      "b": "d2",
+      "text": 0.5999
+    }
+  ],
+  "expect": {
+    "merge_groups": [
+      [
+        "a1",
+        "a2"
+      ]
+    ],
+    "review_items_min": 2
+  }
+}

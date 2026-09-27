@@ -1,0 +1,84 @@
+{
+  "id": "drift-model-versions",
+  "category": "drift",
+  "description": "Two extractor versions read the same sources: polarity, value and modality changes and a dropped claim are disagreements for review; agreement and additions are not.",
+  "old_claims": [
+    {
+      "id": "o1",
+      "anchor": "seg1",
+      "subject": "Me",
+      "statement": "I use Redis",
+      "model": "rules@1"
+    },
+    {
+      "id": "o2",
+      "anchor": "seg2",
+      "subject": "budget",
+      "statement": "The budget is $50",
+      "value": "$50",
+      "model": "rules@1"
+    },
+    {
+      "id": "o3",
+      "anchor": "seg3",
+      "subject": "Me",
+      "statement": "I moved to Chicago",
+      "model": "rules@1"
+    },
+    {
+      "id": "o4",
+      "anchor": "seg4",
+      "subject": "Me",
+      "statement": "I prefer tea",
+      "model": "rules@1"
+    },
+    {
+      "id": "o6",
+      "anchor": "seg6",
+      "subject": "Me",
+      "statement": "I have a cat",
+      "model": "rules@1"
+    }
+  ],
+  "new_claims": [
+    {
+      "id": "n1",
+      "anchor": "seg1",
+      "subject": "Me",
+      "statement": "I do not use Redis",
+      "model": "llm@2"
+    },
+    {
+      "id": "n2",
+      "anchor": "seg2",
+      "subject": "budget",
+      "statement": "The budget is $500",
+      "value": "$500",
+      "model": "llm@2"
+    },
+    {
+      "id": "n3",
+      "anchor": "seg3",
+      "subject": "Me",
+      "statement": "I plan to move to Chicago",
+      "model": "llm@2"
+    },
+    {
+      "id": "n4",
+      "anchor": "seg4",
+      "subject": "Me",
+      "statement": "I prefer tea.",
+      "model": "llm@2"
+    },
+    {
+      "id": "n5",
+      "anchor": "seg5",
+      "subject": "Me",
+      "statement": "I like jazz",
+      "model": "llm@2"
+    }
+  ],
+  "expect": {
+    "disagreements": 4
+  }
+}

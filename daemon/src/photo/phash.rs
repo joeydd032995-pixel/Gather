@@ -5,7 +5,7 @@
 //! above their median. Re-encoding, resizing and mild edits move only a few
 //! bits, so near-duplicates sit within a small Hamming distance.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use image::{imageops, GrayImage};
 
@@ -106,19 +106,14 @@ fn band_value(hash: u64, (start, width): (u32, u32)) -> u64 {
     }
 }
 
-/// Group photos that are near-duplicates of each other: every photo in a group
-/// is within `max_distance` bits of every other one.
+/// Every pair of photos within `max_distance` bits, as `(i, j)` with `i < j`.
 ///
 /// Candidate pairs come from banding: split the hash into `max_distance + 1`
 /// chunks; two hashes differing in at most `max_distance` bits must agree
 /// exactly on at least one chunk (pigeonhole), so only photos sharing a bucket
-/// are compared. Linked photos are first gathered transitively; a gathering
-/// that is only a chain (A near B, B near C, A far from C) is then split into
-/// groups whose members all match each other, so one in-between photo can't
-/// tie two different shots together. Returns groups of 2+ indices, each
-/// ascending, in order of their smallest member.
-pub fn near_duplicate_groups(hashes: &[u64], max_distance: u32) -> Vec<Vec<usize>> {
-    let mut uf = UnionFind::new(hashes.len());
+/// are compared.
+pub fn near_pairs(hashes: &[u64], max_distance: u32) -> BTreeSet<(usize, usize)> {
+    let mut pairs = BTreeSet::new();
     for band in band_ranges(max_distance + 1) {
         let mut buckets: HashMap<u64, Vec<usize>> = HashMap::new();
         for (i, &h) in hashes.iter().enumerate() {
@@ -127,15 +122,31 @@ pub fn near_duplicate_groups(hashes: &[u64], max_distance: u32) -> Vec<Vec<usize
         for members in buckets.values() {
             for (pos, &i) in members.iter().enumerate() {
                 for &j in &members[pos + 1..] {
-                    if uf.find(i) != uf.find(j) && hamming(hashes[i], hashes[j]) <= max_distance {
-                        uf.union(i, j);
+                    let key = (i.min(j), i.max(j));
+                    if !pairs.contains(&key) && hamming(hashes[i], hashes[j]) <= max_distance {
+                        pairs.insert(key);
                     }
                 }
             }
         }
     }
-    let comp: Vec<usize> = (0..hashes.len()).map(|i| uf.find(i)).collect();
-    let near = |i: usize, j: usize| hamming(hashes[i], hashes[j]) <= max_distance;
+    pairs
+}
+
+/// Split the linked items into groups whose members are all directly linked
+/// to each other. Linked items are first gathered transitively; a gathering
+/// that is only a chain (A-B, B-C, no A-C) is then split greedily, in index
+/// order, so one in-between item can't tie two others together. Callers
+/// sort items canonically first, which makes the split independent of the
+/// order the items arrived in. Returns groups of 2+ indices, each ascending,
+/// in order of their smallest member.
+pub fn split_cliques(n: usize, edges: &BTreeSet<(usize, usize)>) -> Vec<Vec<usize>> {
+    let mut uf = UnionFind::new(n);
+    for &(i, j) in edges {
+        uf.union(i, j);
+    }
+    let comp: Vec<usize> = (0..n).map(|i| uf.find(i)).collect();
+    let near = |i: usize, j: usize| edges.contains(&(i.min(j), i.max(j)));
     let mut groups: Vec<Vec<usize>> = Vec::new();
     for component in crate::cluster::grouped(&comp) {
         if component.len() < 2 {
@@ -149,8 +160,8 @@ pub fn near_duplicate_groups(hashes: &[u64], max_distance: u32) -> Vec<Vec<usize
             groups.push(component);
             continue;
         }
-        // Greedy and deterministic: each still-unplaced photo, in index order,
-        // starts a group that takes every later photo near all its members.
+        // Greedy and deterministic: each still-unplaced item, in index order,
+        // starts a group that takes every later item linked to all its members.
         let mut placed = vec![false; component.len()];
         for start in 0..component.len() {
             if placed[start] {
@@ -172,6 +183,13 @@ pub fn near_duplicate_groups(hashes: &[u64], max_distance: u32) -> Vec<Vec<usize
     }
     groups.sort_by_key(|g| g[0]);
     groups
+}
+
+/// Group photos that are near-duplicates of each other: every photo in a group
+/// is within `max_distance` bits of every other one (see [`near_pairs`] and
+/// [`split_cliques`]).
+pub fn near_duplicate_groups(hashes: &[u64], max_distance: u32) -> Vec<Vec<usize>> {
+    split_cliques(hashes.len(), &near_pairs(hashes, max_distance))
 }
 
 #[cfg(test)]

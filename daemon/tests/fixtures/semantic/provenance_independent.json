@@ -1,0 +1,20 @@
+{
+  "id": "provenance-independent",
+  "category": "provenance",
+  "description": "Two independently authored sources agree: two families, and confidence rises, unlike the copied chain.",
+  "sources": [
+    {
+      "artifact": "alice-email",
+      "fingerprint": "alice"
+    },
+    {
+      "artifact": "bob-notes",
+      "fingerprint": "bob"
+    }
+  ],
+  "base_confidence": 0.6,
+  "expect": {
+    "independent_sources": 2,
+    "confidence_increases": true
+  }
+}

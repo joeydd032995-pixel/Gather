@@ -19,6 +19,7 @@ import {
   type Resolution,
 } from "./api";
 import { useListKeys } from "./hooks/useListKeys";
+import Why from "./Why";
 import { kindLabel } from "./kinds";
 import {
   Badge,
@@ -172,6 +173,8 @@ function Detail({ id, onResolved }: { id: string; onResolved: (label: string) =>
           );
         })}
       </div>
+
+      <Why query={{ conclusion_id: id, kind: "contradiction" }} limit={1} />
 
       {error && <Callout>{error}</Callout>}
 

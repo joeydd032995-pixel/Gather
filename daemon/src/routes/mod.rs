@@ -8,13 +8,14 @@ pub mod ingest;
 pub mod library;
 pub mod photos;
 pub mod query;
+pub mod safety;
 pub mod tuning;
 
 use axum::extract::{DefaultBodyLimit, MatchedPath, Request, State};
 use axum::http::{HeaderValue, Method};
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use axum::routing::{get, patch, post};
+use axum::routing::{delete, get, patch, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -39,7 +40,16 @@ pub fn build_router(state: AppState) -> Router {
         .route("/ingest/files", post(ingest::ingest_files))
         // query
         .route("/artifacts", get(query::list_artifacts))
-        .route("/artifacts/{id}", get(query::get_artifact))
+        .route(
+            "/artifacts/{id}",
+            get(query::get_artifact).merge(delete(safety::delete_artifact)),
+        )
+        .route("/artifacts/{id}/retract", post(safety::retract_artifact))
+        .route("/artifacts/{id}/derivations", post(safety::add_derivation))
+        .route(
+            "/artifacts/{id}/conclusions",
+            get(safety::artifact_conclusions),
+        )
         .route("/artifacts/{id}/content", get(library::artifact_content))
         .route("/graph", get(library::graph_overview))
         .route("/atomic-units", get(query::list_atomic_units))
@@ -95,6 +105,18 @@ pub fn build_router(state: AppState) -> Router {
         .route("/clusters/{id}", get(clusters::get_cluster))
         // photos — thumbnails for duplicate groups, albums and visual topics
         .route("/images/{id}/thumbnail", get(photos::thumbnail))
+        .route("/images/{id}/not-duplicate", post(safety::not_duplicate))
+        // semantic safety — certificates, reasons, and what a retraction touched
+        .route("/certificates", get(safety::list_certificates))
+        .route("/certificates/{id}", get(safety::get_certificate))
+        .route("/certificates/{id}/chain", get(safety::certificate_chain))
+        .route(
+            "/certificates/{id}/affected",
+            get(safety::certificate_affected),
+        )
+        .route("/safety/summary", get(safety::safety_summary))
+        .route("/units/{id}/support", get(safety::unit_support))
+        .route("/units/{id}/revisions", post(safety::unit_revision))
         // Layer order: the last .layer() added is outermost (runs first), so
         // auth runs before the rate limiter. That way unauthenticated requests
         // are rejected without charging the shared bucket, and a flood of them
@@ -116,7 +138,7 @@ pub fn build_router(state: AppState) -> Router {
                 .map(|o| HeaderValue::from_static(o))
                 .collect::<Vec<_>>(),
         )
-        .allow_methods([Method::GET, Method::POST, Method::PATCH])
+        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
         .allow_headers([
             axum::http::header::AUTHORIZATION,
             axum::http::header::CONTENT_TYPE,

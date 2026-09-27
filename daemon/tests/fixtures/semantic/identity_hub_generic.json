@@ -1,0 +1,121 @@
+{
+  "id": "identity-hub-generic",
+  "category": "identity",
+  "description": "A bare first name resembles several different people, and generic names (Project, Notes, Meeting) resemble specific ones: neither may pull items into one merge.",
+  "entities": [
+    {
+      "id": "john",
+      "name": "John",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-john"
+      ]
+    },
+    {
+      "id": "js",
+      "name": "John Smith",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-js"
+      ]
+    },
+    {
+      "id": "jd",
+      "name": "John Doe",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-jd"
+      ]
+    },
+    {
+      "id": "jl",
+      "name": "John Lee",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-jl"
+      ]
+    },
+    {
+      "id": "proj",
+      "name": "Project",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-proj"
+      ]
+    },
+    {
+      "id": "projm",
+      "name": "Project Mercury",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-projm"
+      ]
+    },
+    {
+      "id": "notes",
+      "name": "Notes",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-notes"
+      ]
+    },
+    {
+      "id": "notes2",
+      "name": "Notes.",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-notes2"
+      ]
+    }
+  ],
+  "pairs": [
+    {
+      "a": "john",
+      "b": "js",
+      "cosine": 0.93,
+      "text": 0.93
+    },
+    {
+      "a": "john",
+      "b": "jd",
+      "cosine": 0.93,
+      "text": 0.93
+    },
+    {
+      "a": "john",
+      "b": "jl",
+      "cosine": 0.94,
+      "text": 0.93
+    },
+    {
+      "a": "js",
+      "b": "jd",
+      "text": 0.45
+    },
+    {
+      "a": "proj",
+      "b": "projm",
+      "text": 0.95
+    },
+    {
+      "a": "notes",
+      "b": "notes2",
+      "text": 0.97
+    }
+  ],
+  "expect": {
+    "merge_groups": [],
+    "reasons_include": [
+      "HUB_DEGREE_EXCEEDED",
+      "GENERIC_IDENTIFIER"
+    ]
+  }
+}

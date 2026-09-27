@@ -41,6 +41,7 @@ import {
   errorText,
   type Tone,
 } from "./ui";
+import Why from "./Why";
 
 const TRAY_LIMIT = 100;
 /** Re-read the tray this often: background workers park new items. */
@@ -59,6 +60,30 @@ const REASONS: Record<string, { label: string; tone: Tone; icon: typeof Layers; 
     tone: "neutral",
     icon: Layers,
     lead: "",
+  },
+  "generic-identifier": {
+    label: "Too generic to merge",
+    tone: "neutral",
+    icon: Layers,
+    lead: "",
+  },
+  "withdraw-merge": {
+    label: "Merge to undo",
+    tone: "warning",
+    icon: Layers,
+    lead: "lead-warning",
+  },
+  "modality-uncertain": {
+    label: "Stated or not?",
+    tone: "warning",
+    icon: ShieldQuestion,
+    lead: "lead-warning",
+  },
+  "model-disagreement": {
+    label: "Extractors disagree",
+    tone: "warning",
+    icon: ShieldQuestion,
+    lead: "lead-warning",
   },
 };
 
@@ -97,7 +122,7 @@ function titleOf(item: ReviewItem): string {
 /** Oversized duplicate groups can only be dismissed: there is no single
  *  pair to accept or reject, and the server refuses a wholesale action. */
 function canJudge(item: ReviewItem): boolean {
-  return item.reason !== "oversized-component";
+  return !["oversized-component", "generic-identifier", "withdraw-merge"].includes(item.reason);
 }
 
 function isTyping(target: EventTarget | null): boolean {
@@ -216,6 +241,9 @@ function ReviewDetail({
           Too many names are linked together to merge safely in one go. Dismiss it once you've
           looked; the individual pairs still come through on their own.
         </Callout>
+      )}
+      {typeof item.signals.certificate === "string" && (
+        <Why certificateId={item.signals.certificate} />
       )}
       {item.reason === "low-confidence" && (
         <p className="explain">

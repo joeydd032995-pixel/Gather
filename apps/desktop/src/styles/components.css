@@ -1365,3 +1365,28 @@ button.stat:focus-visible {
   align-items: center;
   gap: 5px;
 }
+
+/* "Why?" certificate notes */
+.why {
+  display: grid;
+  gap: var(--space-2, 8px);
+  margin-block: var(--space-2, 8px);
+}
+.why-reasons {
+  margin: 4px 0 0;
+  padding-left: 1.1em;
+}
+.why-reasons li + li {
+  margin-top: 2px;
+}
+.why-details {
+  margin-top: 6px;
+}
+.why-details summary {
+  cursor: pointer;
+  opacity: 0.8;
+}
+.why-details code {
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}

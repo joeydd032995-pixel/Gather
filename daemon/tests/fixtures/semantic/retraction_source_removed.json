@@ -1,0 +1,82 @@
+{
+  "id": "retraction-source-removed",
+  "category": "retraction",
+  "description": "A rejected claim and a deleted photo source: every conclusion that needed them is withdrawn; conclusions with other support survive.",
+  "certificates": [
+    {
+      "id": "merge1",
+      "inputs": [
+        "entA",
+        "entB"
+      ],
+      "sources": [
+        "art1"
+      ],
+      "conclusion": "cluster1"
+    },
+    {
+      "id": "contra1",
+      "inputs": [
+        "u1",
+        "u2"
+      ],
+      "sources": [
+        "art1",
+        "art2"
+      ]
+    },
+    {
+      "id": "supersede1",
+      "inputs": [
+        "u1",
+        "u2"
+      ],
+      "sources": [
+        "art1"
+      ],
+      "conclusion": "u1"
+    },
+    {
+      "id": "derived1",
+      "inputs": [
+        "cluster1"
+      ],
+      "sources": [
+        "art2"
+      ]
+    },
+    {
+      "id": "photo1",
+      "inputs": [
+        "img1",
+        "img2"
+      ],
+      "sources": [
+        "art3",
+        "art4"
+      ]
+    },
+    {
+      "id": "corr1",
+      "inputs": [
+        "art2"
+      ],
+      "sources": [
+        "art1",
+        "art2"
+      ]
+    }
+  ],
+  "withdraw": [
+    "u2",
+    "art3",
+    "img1"
+  ],
+  "expect": {
+    "retracted": [
+      "contra1",
+      "supersede1",
+      "photo1"
+    ]
+  }
+}
