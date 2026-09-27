@@ -1,0 +1,144 @@
+{
+  "id": "identity-type-context",
+  "category": "identity",
+  "description": "Same names, different things: Apple the company vs apple; Jordan the person vs the country; Mercury the project vs the planet; two Sam Lees at different employers; two Alex Kims active in different decades.",
+  "entities": [
+    {
+      "id": "apple_org",
+      "name": "Apple",
+      "kind": "organization",
+      "context": {},
+      "sources": [
+        "art-apple_org"
+      ]
+    },
+    {
+      "id": "apple",
+      "name": "apple",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-apple"
+      ]
+    },
+    {
+      "id": "jordan_p",
+      "name": "Jordan",
+      "kind": "person",
+      "context": {},
+      "sources": [
+        "art-jordan_p"
+      ]
+    },
+    {
+      "id": "jordan_c",
+      "name": "Jordan",
+      "kind": "location",
+      "context": {},
+      "sources": [
+        "art-jordan_c"
+      ]
+    },
+    {
+      "id": "mercury_proj",
+      "name": "Mercury",
+      "kind": "project",
+      "context": {},
+      "sources": [
+        "art-mercury_proj"
+      ]
+    },
+    {
+      "id": "mercury_planet",
+      "name": "Mercury",
+      "kind": "concept",
+      "context": {
+        "sense": "planet"
+      },
+      "sources": [
+        "art-mercury_planet"
+      ]
+    },
+    {
+      "id": "sam1",
+      "name": "Sam Lee",
+      "kind": "person",
+      "context": {
+        "employer": "Initech"
+      },
+      "sources": [
+        "art-sam1"
+      ]
+    },
+    {
+      "id": "sam2",
+      "name": "Sam Lee",
+      "kind": "person",
+      "context": {
+        "employer": "Globex"
+      },
+      "sources": [
+        "art-sam2"
+      ]
+    },
+    {
+      "id": "alex1",
+      "name": "Alex Kim",
+      "kind": "person",
+      "context": {
+        "active_from": "1990",
+        "active_to": "1999"
+      },
+      "sources": [
+        "art-alex1"
+      ]
+    },
+    {
+      "id": "alex2",
+      "name": "Alex Kim",
+      "kind": "person",
+      "context": {
+        "active_from": "2020"
+      },
+      "sources": [
+        "art-alex2"
+      ]
+    }
+  ],
+  "pairs": [
+    {
+      "a": "apple_org",
+      "b": "apple",
+      "text": 1.0
+    },
+    {
+      "a": "jordan_p",
+      "b": "jordan_c",
+      "text": 1.0
+    },
+    {
+      "a": "mercury_proj",
+      "b": "mercury_planet",
+      "text": 1.0
+    },
+    {
+      "a": "sam1",
+      "b": "sam2",
+      "text": 1.0
+    },
+    {
+      "a": "alex1",
+      "b": "alex2",
+      "text": 1.0
+    }
+  ],
+  "expect": {
+    "merge_groups": [],
+    "reasons_include": [
+      "ENTITY_TYPE_MISMATCH",
+      "ENTITY_TYPE_UNCERTAIN",
+      "CONTEXT_SCOPE_MISMATCH",
+      "TIME_WINDOWS_NON_OVERLAPPING"
+    ]
+  }
+}

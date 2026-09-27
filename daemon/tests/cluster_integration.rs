@@ -31,12 +31,62 @@ async fn test_state() -> Option<AppState> {
     })
 }
 
+/// An entity mentioned by a unit in a real (seeded) source: automatic merges
+/// need at least one source artifact behind the names they join.
 async fn seed_entity(state: &AppState, name: &str) -> Uuid {
-    sqlx::query_scalar("INSERT INTO entities (name, kind) VALUES ($1, 'other') RETURNING id")
-        .bind(name)
-        .fetch_one(&state.pool)
-        .await
-        .expect("seed entity")
+    let id: Uuid =
+        sqlx::query_scalar("INSERT INTO entities (name, kind) VALUES ($1, 'other') RETURNING id")
+            .bind(name)
+            .fetch_one(&state.pool)
+            .await
+            .expect("seed entity");
+    let text = format!("A note about {name} {}", Uuid::new_v4());
+    let artifact: Uuid = sqlx::query_scalar(
+        "INSERT INTO artifacts (kind, byte_size, content_hash, raw_content) \
+         VALUES ('document_text', 1, encode(digest($1, 'sha256'), 'hex'), $2) RETURNING id",
+    )
+    .bind(&text)
+    .bind(text.as_bytes())
+    .fetch_one(&state.pool)
+    .await
+    .expect("seed artifact");
+    let document: Uuid =
+        sqlx::query_scalar("INSERT INTO documents (artifact_id) VALUES ($1) RETURNING id")
+            .bind(artifact)
+            .fetch_one(&state.pool)
+            .await
+            .expect("seed document");
+    let segment: Uuid = sqlx::query_scalar(
+        "INSERT INTO document_segments (document_id, seq, content, content_hash, units_extracted_at) \
+         VALUES ($1, 0, $2, encode(digest($2, 'sha256'), 'hex'), now()) RETURNING id",
+    )
+    .bind(document)
+    .bind(&text)
+    .fetch_one(&state.pool)
+    .await
+    .expect("seed segment");
+    let unit: Uuid = sqlx::query_scalar(
+        "INSERT INTO atomic_units (kind, statement, statement_hash, subject_entity_id, \
+           confidence, extraction_method, clustered_at, contradiction_scanned_at) \
+         VALUES ('fact', $1, encode(digest($1, 'sha256'), 'hex'), $2, 0.6, 'rule_based', \
+                 now(), now()) RETURNING id",
+    )
+    .bind(&text)
+    .bind(id)
+    .fetch_one(&state.pool)
+    .await
+    .expect("seed unit");
+    sqlx::query(
+        "INSERT INTO atomic_unit_provenance (atomic_unit_id, artifact_id, document_segment_id) \
+         VALUES ($1, $2, $3)",
+    )
+    .bind(unit)
+    .bind(artifact)
+    .bind(segment)
+    .execute(&state.pool)
+    .await
+    .expect("seed provenance");
+    id
 }
 
 async fn seed_unit(state: &AppState, statement: &str) -> Uuid {

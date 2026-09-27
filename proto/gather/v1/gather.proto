@@ -719,3 +719,107 @@ message Thumbnail {
   bytes data = 1;                                  // JPEG, <= 256 px on the long side
   string content_type = 2;                         // image/jpeg
 }
+
+// ---------------------------------------------------------------------------
+// SafetyService — inference certificates (docs/SEMANTIC-SAFETY.md). Mirrors
+// GET /certificates*, GET /safety/summary, POST /artifacts/{id}/retract and
+// POST /images/{id}/not-duplicate.
+
+service SafetyService {
+  rpc GetCertificate(GetCertificateRequest) returns (Certificate);
+  rpc ListCertificates(ListCertificatesRequest) returns (ListCertificatesResponse);
+  // Conclusions withdrawn because of a certificate (a split, a removed source).
+  rpc ListAffected(GetCertificateRequest) returns (ListCertificatesResponse);
+  rpc GetSafetySummary(GetSafetySummaryRequest) returns (SafetySummary);
+  rpc RetractArtifact(RetractArtifactRequest) returns (RetractionReport);
+  rpc MarkNotDuplicate(MarkNotDuplicateRequest) returns (MarkNotDuplicateResponse);
+}
+
+message GetCertificateRequest {
+  string id = 1;
+}
+
+message ListCertificatesRequest {
+  string conclusion_id = 1;                        // the conclusion's row, or any subject id
+  string subject_id = 2;
+  string artifact_id = 3;                          // conclusions derived from this source
+  string reason = 4;                               // reason code, e.g. CHAINED_SIMILARITY
+  string outcome = 5;                              // auto_applied | needs_review | blocked | user_decision | superseded | retracted
+  string kind = 6;                                 // entity_merge | photo_duplicate_group | contradiction | ...
+  string rule = 7;
+  bool live = 8;                                   // only certificates still in force
+  int32 limit = 9;                                 // 0 = 100
+  int32 offset = 10;
+}
+
+message CertificateReason {
+  string code = 1;
+  string text = 2;                                 // plain language
+}
+
+message Certificate {
+  string id = 1;
+  string conclusion_kind = 2;
+  string conclusion_key = 3;
+  string conclusion_id = 4;
+  repeated string subject_ids = 5;
+  string rule_id = 6;
+  int32 rule_version = 7;
+  string decision = 8;
+  string outcome = 9;
+  string evidence_class = 10;
+  repeated string source_artifact_ids = 11;
+  repeated string source_family_ids = 12;
+  string model_version = 13;
+  repeated string reason_codes = 14;
+  repeated CertificateReason reasons = 15;
+  string explanation = 16;
+  string evidence_digest = 17;
+  google.protobuf.Struct detail = 18;              // inputs, config, scope, temporal, predicates
+  google.protobuf.Timestamp created_at = 19;
+  google.protobuf.Timestamp superseded_at = 20;
+  google.protobuf.Timestamp retracted_at = 21;
+  string status_reason = 22;
+  string caused_by = 23;
+}
+
+message ListCertificatesResponse {
+  repeated Certificate items = 1;
+}
+
+message GetSafetySummaryRequest {}
+
+message SafetySummary {
+  google.protobuf.Struct by_outcome = 1;
+  google.protobuf.Struct review_by_reason = 2;
+  google.protobuf.Struct blocked_by_reason = 3;
+  google.protobuf.Struct by_kind = 4;
+}
+
+message RetractArtifactRequest {
+  string artifact_id = 1;
+  string reason = 2;
+  bool delete = 3;
+}
+
+message RetractionReport {
+  string event_certificate = 1;
+  repeated string units_retracted = 2;
+  repeated string certificates_withdrawn = 3;
+  uint64 contradictions_withdrawn = 4;
+  uint64 supersessions_reverted = 5;
+  uint64 images_ungrouped = 6;
+  bool deleted = 7;
+  uint64 merges_withdrawn = 8;
+  string external_file_left = 9;               // a storage_path Gather did not delete
+}
+
+message MarkNotDuplicateRequest {
+  string image_id = 1;
+  string other_id = 2;
+  string note = 3;
+}
+
+message MarkNotDuplicateResponse {
+  string certificate = 1;
+}

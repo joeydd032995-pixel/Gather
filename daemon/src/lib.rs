@@ -12,6 +12,7 @@ pub mod grpc;
 pub mod library;
 pub mod photo;
 pub mod routes;
+pub mod safety;
 pub mod scan;
 pub mod tune;
 

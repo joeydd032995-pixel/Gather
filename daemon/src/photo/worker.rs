@@ -21,11 +21,13 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use super::albums::{album_label, segment_albums, Shot};
-use super::phash::{compute_phash, hamming, near_duplicate_groups};
+use super::phash::{compute_phash, hamming};
 use crate::cluster::label_from_texts;
 use crate::config::Config;
 use crate::extract::image::analyze;
 use crate::extract::ollama::{CaptionError, OllamaClient};
+use crate::safety::photo::{plan as plan_photo_groups, PhotoInput};
+use crate::safety::{store, InferenceCertificate, Outcome};
 
 #[derive(Debug, Default)]
 pub struct PhotoStats {
@@ -156,6 +158,8 @@ struct Group {
     label: String,
     cohesion: f32,
     representative: Uuid,
+    /// Duplicate groups carry the certificate that justified them.
+    certificate: Option<InferenceCertificate>,
 }
 
 /// The two whole-library groupings, each tagging its own images column. SQL is
@@ -234,6 +238,8 @@ struct PhotoRow {
     taken_at: Option<DateTime<Utc>>,
     gps: Option<(f64, f64)>,
     filename: Option<String>,
+    artifact_id: Uuid,
+    content_hash: String,
 }
 
 async fn regroup_pass(
@@ -242,8 +248,9 @@ async fn regroup_pass(
     stats: &mut PhotoStats,
 ) -> anyhow::Result<()> {
     let pending: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM images \
-         WHERE photo_prepared_at IS NOT NULL AND photo_grouped_at IS NULL)",
+        "SELECT EXISTS (SELECT 1 FROM images i JOIN artifacts a ON a.id = i.artifact_id \
+         WHERE i.photo_prepared_at IS NOT NULL AND i.photo_grouped_at IS NULL \
+           AND a.retracted_at IS NULL)",
     )
     .fetch_one(pool)
     .await?;
@@ -254,9 +261,11 @@ async fn regroup_pass(
     let photos: Vec<PhotoRow> = sqlx::query(
         "SELECT i.id, i.phash, COALESCE(i.width, 0)::bigint * COALESCE(i.height, 0) AS pixels, \
                 COALESCE(i.taken_at, a.source_created_at, a.ingested_at) AS ordering_time, \
-                i.taken_at, i.latitude, i.longitude, a.original_filename \
+                i.taken_at, i.latitude, i.longitude, a.original_filename, \
+                a.id AS artifact_id, a.content_hash \
          FROM images i JOIN artifacts a ON a.id = i.artifact_id \
-         WHERE i.photo_prepared_at IS NOT NULL",
+         WHERE i.photo_prepared_at IS NOT NULL AND a.retracted_at IS NULL \
+         ORDER BY i.id",
     )
     .fetch_all(pool)
     .await?
@@ -272,13 +281,27 @@ async fn regroup_pass(
             taken_at: r.get("taken_at"),
             gps: lat.zip(lon),
             filename: r.get("original_filename"),
+            artifact_id: r.get("artifact_id"),
+            content_hash: r.get::<String, _>("content_hash"),
         }
     })
     .collect();
 
-    let dup_groups = duplicate_groups(&photos, config.photo_dup_max_distance);
+    let cannot: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT a_id, b_id FROM semantic_user_decisions \
+         WHERE kind = 'photo_not_duplicate' AND revoked_at IS NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+    let (dup_groups, flagged) = duplicate_groups(
+        &photos,
+        config.photo_dup_max_distance,
+        &cannot,
+        config.safety_hub_degree,
+    );
     stats.duplicate_groups = dup_groups.len();
     reconcile(pool, Grouping::Duplicates, &dup_groups).await?;
+    record_photo_certificates(pool, &photos, &dup_groups, &flagged).await?;
 
     let album_groups = albums(&photos, config);
     stats.albums = album_groups.len();
@@ -297,13 +320,33 @@ async fn regroup_pass(
     Ok(())
 }
 
-fn duplicate_groups(photos: &[PhotoRow], max_distance: u32) -> Vec<Group> {
-    let hashed: Vec<&PhotoRow> = photos.iter().filter(|p| p.phash.is_some()).collect();
-    let hashes: Vec<u64> = hashed.iter().filter_map(|p| p.phash).collect();
-    near_duplicate_groups(&hashes, max_distance)
+/// Near-duplicate groups under the photo safety rule: canonical order, user
+/// "not a duplicate" decisions and hub detection. Returns the groups and the
+/// review/blocked certificates for what was not grouped.
+fn duplicate_groups(
+    photos: &[PhotoRow],
+    max_distance: u32,
+    cannot: &[(Uuid, Uuid)],
+    hub_degree: usize,
+) -> (Vec<Group>, Vec<InferenceCertificate>) {
+    let inputs: Vec<PhotoInput> = photos
+        .iter()
+        .filter_map(|p| {
+            Some(PhotoInput {
+                id: p.id,
+                phash: p.phash?,
+                tiebreak: p.content_hash.clone(),
+                source_artifact: p.artifact_id,
+            })
+        })
+        .collect();
+    let plan = plan_photo_groups(&inputs, max_distance, cannot, hub_degree);
+    let by_id: HashMap<Uuid, &PhotoRow> = photos.iter().map(|p| (p.id, p)).collect();
+    let groups = plan
+        .groups
         .into_iter()
-        .map(|idx| {
-            let members: Vec<&PhotoRow> = idx.iter().map(|&i| hashed[i]).collect();
+        .map(|g| {
+            let members: Vec<&PhotoRow> = g.members.iter().map(|id| by_id[id]).collect();
             // Sharpest copy wins; then the original (earliest); then id.
             let rep = *members
                 .iter()
@@ -328,9 +371,56 @@ fn duplicate_groups(photos: &[PhotoRow], max_distance: u32) -> Vec<Group> {
                 members: members.iter().map(|m| m.id).collect(),
                 cohesion,
                 representative: rep.id,
+                certificate: Some(g.certificate),
             }
         })
-        .collect()
+        .collect();
+    let flagged = plan.review.into_iter().chain(plan.blocked).collect();
+    (groups, flagged)
+}
+
+/// Certificates for this regroup: each group's (linked to its cluster),
+/// review/blocked ones for photos left out, and superseded ones for groups
+/// that no longer exist.
+async fn record_photo_certificates(
+    pool: &PgPool,
+    photos: &[PhotoRow],
+    groups: &[Group],
+    flagged: &[InferenceCertificate],
+) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+    let mut keys: Vec<String> = Vec::new();
+    for g in groups {
+        let Some(mut cert) = g.certificate.clone() else {
+            continue;
+        };
+        cert.conclusion_id = sqlx::query_scalar("SELECT dup_cluster_id FROM images WHERE id = $1")
+            .bind(g.members[0])
+            .fetch_one(&mut *tx)
+            .await?;
+        keys.push(cert.conclusion_key.clone());
+        store::record(&mut tx, &cert).await?;
+    }
+    for cert in flagged {
+        store::record(&mut tx, cert).await?;
+    }
+    let ids: Vec<Uuid> = photos.iter().map(|p| p.id).collect();
+    let stale: Vec<Uuid> = store::live_for_subjects(&mut tx, "photo_duplicate_group", &ids, None)
+        .await?
+        .into_iter()
+        .filter(|(_, key, _)| key.starts_with("photo-dup:") && !keys.contains(key))
+        .map(|(id, _, _)| id)
+        .collect();
+    store::withdraw(
+        &mut tx,
+        &stale,
+        Outcome::Superseded,
+        "the photos were regrouped",
+        None,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 fn albums(photos: &[PhotoRow], config: &Config) -> Vec<Group> {
@@ -359,6 +449,7 @@ fn albums(photos: &[PhotoRow], config: &Config) -> Vec<Group> {
             members: idx.iter().map(|&i| dated[i].id).collect(),
             cohesion: 1.0,
             representative: dated[idx[0]].id,
+            certificate: None,
         }
     })
     .collect()

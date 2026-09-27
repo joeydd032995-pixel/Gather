@@ -10,6 +10,7 @@ import {
   type MergeSuggestion,
 } from "./api";
 import { useListKeys } from "./hooks/useListKeys";
+import Why from "./Why";
 import {
   Badge,
   Button,
@@ -73,6 +74,7 @@ function EntityFacts({ id }: { id: string }) {
           ))}
         </div>
       )}
+      <Why query={{ subject_id: id, live: true }} limit={2} />
       {detail.audit.length > 0 && (
         // Prior merge decisions are context for this one, which is not
         // casually reversible — so surface them rather than just fetch them.

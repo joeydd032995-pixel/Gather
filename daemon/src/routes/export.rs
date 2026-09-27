@@ -31,7 +31,12 @@ const TABLES: &[(&str, &str)] = &[
         "artifacts",
         "id, kind, source_platform, source_format_version, original_filename, \
          media_type, byte_size, content_hash, raw_content, storage_path, version, \
-         supersedes_artifact_id, source_created_at, ingested_at, ingestion_job_id, metadata",
+         supersedes_artifact_id, source_created_at, ingested_at, ingestion_job_id, metadata, \
+         retracted_at, retraction_reason",
+    ),
+    (
+        "artifact_derivations",
+        "id, child_artifact_id, parent_artifact_id, kind, actor, created_at",
     ),
     (
         "conversations",
@@ -77,7 +82,7 @@ const TABLES: &[(&str, &str)] = &[
         "id, kind, statement, statement_hash, subject_entity_id, confidence, \
          extraction_method, extraction_model, embedding, valid_from, valid_to, \
          status, superseded_by_unit_id, attrs, created_at, updated_at, \
-         contradiction_scanned_at, topic_cluster_id, clustered_at",
+         contradiction_scanned_at, topic_cluster_id, clustered_at, asserted_at, observed_at",
     ),
     (
         "atomic_unit_provenance",
@@ -89,10 +94,20 @@ const TABLES: &[(&str, &str)] = &[
         "id, source_entity_id, target_entity_id, relation_type, atomic_unit_id, \
          confidence, valid_from, valid_to, status, metadata, created_at, updated_at",
     ),
+    // Before contradictions, which point at the certificate that reported them.
+    (
+        "inference_certificates",
+        "id, conclusion_kind, conclusion_key, conclusion_id, subject_ids, rule_id, \
+         rule_version, decision, outcome, evidence_class, inputs, input_ids, \
+         source_artifact_ids, source_family_ids, model_version, config, scope, temporal, \
+         predicates, reason_codes, explanation, evidence_digest, created_at, superseded_at, \
+         retracted_at, status_reason, caused_by",
+    ),
     (
         "contradictions",
         "id, unit_a_id, unit_b_id, score, detection_method, explanation, status, \
-         detected_at, resolved_at, resolved_by, resolution_note",
+         detected_at, resolved_at, resolved_by, resolution_note, certificate_id, alignment, \
+         certainty",
     ),
     (
         "contradiction_audit",
@@ -122,6 +137,11 @@ const TABLES: &[(&str, &str)] = &[
     ),
     // After clusters (its cluster_id FK). member_id is a plain uuid, no FK.
     ("cluster_members", "cluster_id, member_kind, member_id, sim"),
+    // User decisions no automatic rule may reverse ("not a duplicate").
+    (
+        "semantic_user_decisions",
+        "id, kind, a_id, b_id, actor, note, created_at, revoked_at",
+    ),
 ];
 
 // ---------------------------------------------------------------------------

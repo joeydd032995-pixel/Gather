@@ -265,6 +265,50 @@ sharpest (then earliest) copy; of an album, its first shot.
 
 ---
 
+## Semantic safety
+
+Every automatic conclusion — and every one Gather held back — has an inference certificate
+(see [SEMANTIC-SAFETY.md](SEMANTIC-SAFETY.md)).
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/certificates` | List, newest first. Query (all optional, combined): `conclusion_id` (the conclusion's row — a contradiction, a cluster, a unit — or any id it is about), `subject_id`, `artifact_id` (conclusions derived from that source), `reason` (a reason code, e.g. `CHAINED_SIMILARITY`; `400` for an unknown code), `outcome` (`auto_applied`, `needs_review`, `blocked`, `user_decision`, `superseded`, `retracted`), `kind`, `rule`, `live` (only certificates still in force), `limit` (≤ 500), `offset` |
+| GET | `/certificates/{id}` | One certificate: rule and version, decision and current outcome, inputs with their evidence class, sources, config, scope, time interpretation, predicates, reason codes with plain-language `reasons`, explanation, and withdrawal (`superseded_at`/`retracted_at`, `status_reason`, `caused_by`) |
+| GET | `/certificates/{id}/chain` | The certificate, what caused its withdrawal (transitively), every certificate for the same conclusion (its history) and what it caused |
+| GET | `/certificates/{id}/affected` | Conclusions withdrawn because of this one (a split, a "not a duplicate", a removed source) |
+| GET | `/safety/summary` | Counts by outcome, review-routed and blocked counts by reason code, live certificates by kind |
+| GET | `/artifacts/{id}/conclusions` | Certificates derived from a source (same filters as `/certificates`) |
+| POST | `/artifacts/{id}/retract` | Stop a source from supporting anything: `{ "reason": "…", "delete": false }`. Units only it supported are retracted with their edges; what rested on them is withdrawn. Returns the retraction report |
+| DELETE | `/artifacts/{id}` | Retract, then delete the artifact and the bytes stored in the database. Artifacts it linked (derivations, versions) stay in one source family. A `storage_path` file (only ever set by an imported bundle) is not removed; its path is returned as `external_file_left` |
+| POST | `/artifacts/{id}/derivations` | Declare that this artifact derives from another: `{ "parent_id": "…", "kind": "copy|summary|export|reingest|version|correction|other" }`. It no longer counts as independent corroboration |
+| GET | `/units/{id}/support` | The unit's live sources, their source families, independent-source count and the confidence independent support justifies |
+| POST | `/units/{id}/revisions` | Record a newer extractor's reading: `{ "statement": "…", "value": "…", "model_version": "…" }`. Disagreement is recorded and parked for review (`model-disagreement`); the unit is never rewritten |
+| POST | `/images/{id}/not-duplicate` | `{ "other_id": "…", "note": "…" }`. The two photos are never grouped as duplicates again |
+
+A retraction report:
+
+```json
+{
+  "event_certificate": "…",
+  "units_retracted": ["…"],
+  "certificates_withdrawn": ["…"],
+  "contradictions_withdrawn": 1,
+  "supersessions_reverted": 0,
+  "images_ungrouped": 0,
+  "merges_withdrawn": 0,
+  "deleted": false,
+  "external_file_left": null
+}
+```
+
+Contradictions carry `certificate_id`, `alignment` (subject, predicate, unit, value, scope,
+granularity, time) and `certainty` (`aligned` or `needs_review`) in the database and export
+bundle. New review-tray reasons: `generic-identifier`, `withdraw-merge` (both dismiss-only),
+`modality-uncertain` and `model-disagreement` (unit items). Parked entity items carry
+`signals.certificate` and `signals.reasons`.
+
+---
+
 ## Export & import
 
 | Method | Path | Description |
@@ -273,14 +317,15 @@ sharpest (then earliest) copy; of an album, its first shot.
 | POST | `/import` | Import a bundle. Idempotent: existing rows are kept |
 
 The bundle includes artifacts, extracted units, the graph, contradictions, merge history, the
-feedback and review state, and clusters, so a restore reproduces the whole brain. It is used
+feedback and review state, clusters, inference certificates, declared source derivations and
+"not a duplicate" decisions, so a restore reproduces the whole brain. It is used
 by the backup scripts and restore drills (see [BACKUP-RUNBOOK.md](BACKUP-RUNBOOK.md)).
 
 ---
 
 ## gRPC
 
-Nine services in package `gather.v1`, served with the same bearer-token interceptor. Each RPC
+Ten services in package `gather.v1`, served with the same bearer-token interceptor. Each RPC
 calls the same core function as its REST route:
 
 | Service | RPCs |
@@ -294,6 +339,7 @@ calls the same core function as its REST route:
 | `ClusterService` | `ListClusters`, `GetCluster` |
 | `TuningService` | `GetTuning`, `ResetTuning` |
 | `PhotoService` | `GetThumbnail` |
+| `SafetyService` | `GetCertificate`, `ListCertificates`, `ListAffected`, `GetSafetySummary`, `RetractArtifact`, `MarkNotDuplicate` |
 
 ```bash
 grpcurl -plaintext -H "authorization: Bearer $TOKEN" \

@@ -92,6 +92,20 @@ jobs:
       - name: cargo test
         working-directory: daemon
         run: cargo test --all-targets
+      # Semantic-safety report (docs/SEMANTIC-SAFETY.md): the fixture corpus
+      # through the pure safety rules, plus global invariants. Offline and
+      # deterministic; fails the build on any false automatic action, missing
+      # certificate, order dependence or broken retraction.
+      - name: semantic safety evaluation
+        working-directory: daemon
+        run: cargo run --locked --bin gather-semantic-eval -- --json semantic-safety-report.json
+      - name: upload semantic safety report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: semantic-safety-report
+          path: daemon/semantic-safety-report.json
+          if-no-files-found: ignore
 
   # ------------------------------------------------------ restore drill ----
   # Tier-1 restore drill (docs/BACKUP-RUNBOOK.md): proves backup -> restore

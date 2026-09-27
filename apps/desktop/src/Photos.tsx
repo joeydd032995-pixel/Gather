@@ -1,11 +1,21 @@
 import { useState } from "react";
 import { ArrowLeft, Images, Star } from "lucide-react";
-import { getCluster, type ClusterKind, type ClusterSummary } from "./api";
+import { getCluster, markNotDuplicate, type ClusterKind, type ClusterSummary } from "./api";
 import { useAsync } from "./hooks/useAsync";
 import { usePagedClusters } from "./hooks/usePagedClusters";
 import { plural } from "./kinds";
 import Thumbnail from "./Thumbnail";
-import { Badge, Button, Callout, EmptyState, IconButton, Segmented, Toolbar } from "./ui";
+import {
+  Badge,
+  Button,
+  Callout,
+  EmptyState,
+  IconButton,
+  Segmented,
+  Toolbar,
+  errorText,
+} from "./ui";
+import Why from "./Why";
 
 const KINDS: { value: ClusterKind; label: string; empty: string }[] = [
   {
@@ -31,12 +41,28 @@ function GroupPhotos({ cluster }: { cluster: ClusterSummary }) {
   // Only a duplicate group's representative is its sharpest copy; for albums
   // and topics it is just the first photo, so it gets no badge.
   const isDuplicateGroup = cluster.kind === "photo_dup";
+  const [split, setSplit] = useState<Set<string>>(new Set());
+  const [splitError, setSplitError] = useState<string | null>(null);
+  const notDuplicate = async (memberId: string) => {
+    if (!cluster.representative_id) return;
+    setSplitError(null);
+    try {
+      await markNotDuplicate(cluster.representative_id, memberId);
+      setSplit((s) => new Set(s).add(memberId));
+    } catch (e) {
+      setSplitError(errorText(e));
+    }
+  };
   if (detail.error) return <Callout>{detail.error}</Callout>;
   return (
     <>
       {isDuplicateGroup && (
         <p className="hint album-note">The sharpest copy is marked best. Nothing was deleted.</p>
       )}
+      {isDuplicateGroup && (
+        <Why query={{ conclusion_id: cluster.id, kind: "photo_duplicate_group" }} limit={1} />
+      )}
+      {splitError && <Callout>{splitError}</Callout>}
       <ul className="photo-grid">
         {detail.loading && !detail.data
           ? Array.from({ length: Math.min(cluster.size, 12) }, (_, i) => (
@@ -58,6 +84,17 @@ function GroupPhotos({ cluster }: { cluster: ClusterSummary }) {
                     <figcaption title={m.caption ?? m.filename ?? ""}>
                       {m.caption ?? m.filename ?? ""}
                     </figcaption>
+                    {isDuplicateGroup && !best && cluster.representative_id && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={split.has(m.member_id)}
+                        onClick={() => notDuplicate(m.member_id)}
+                        title="These are different photos; Gather won't group them again"
+                      >
+                        {split.has(m.member_id) ? "Marked different" : "Not a duplicate"}
+                      </Button>
+                    )}
                   </figure>
                 </li>
               );

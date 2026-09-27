@@ -21,3 +21,6 @@ apps/desktop/src-tauri/gen/
 # Desktop packaging inputs, staged by CI (scripts/bundle-postgres.*)
 apps/desktop/src-tauri/resources/postgres/
 apps/desktop/src-tauri/binaries/
+
+# Semantic-safety report written by CI / local runs
+daemon/semantic-safety-report.json

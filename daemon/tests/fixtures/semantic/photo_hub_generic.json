@@ -1,0 +1,36 @@
+{
+  "id": "photo-hub-generic",
+  "category": "photo",
+  "description": "A low-information image (a white wall) is close to many unrelated shots that aren't close to each other: it is left out of automatic grouping.",
+  "photos": [
+    {
+      "id": "wall",
+      "phash": "f0f0f0f0f0f0f0f0"
+    },
+    {
+      "id": "shot0",
+      "phash": "f0f0f0f0f0f0f0f3"
+    },
+    {
+      "id": "shot1",
+      "phash": "f0f0f0f0f0f0f3f0"
+    },
+    {
+      "id": "shot2",
+      "phash": "f0f0f0f0f0f3f0f0"
+    },
+    {
+      "id": "shot3",
+      "phash": "f0f0f0f0f3f0f0f0"
+    }
+  ],
+  "max_distance": 2,
+  "hub_degree": 3,
+  "expect": {
+    "groups": [],
+    "reasons_include": [
+      "HUB_DEGREE_EXCEEDED",
+      "GENERIC_IDENTIFIER"
+    ]
+  }
+}

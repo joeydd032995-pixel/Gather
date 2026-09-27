@@ -9,6 +9,7 @@ import {
 } from "./api";
 import { useAsync } from "./hooks/useAsync";
 import { useListKeys } from "./hooks/useListKeys";
+import Why from "./Why";
 import { usePagedClusters } from "./hooks/usePagedClusters";
 import { plural } from "./kinds";
 import {
@@ -76,6 +77,7 @@ function ClusterDetail({ cluster }: { cluster: ClusterSummary }) {
         {isEntity && <span className="dot-sep">You can split any of them back out</span>}
       </p>
 
+      {isEntity && <Why query={{ conclusion_id: cluster.id, kind: "entity_merge" }} limit={1} />}
       {error && <Callout>{error}</Callout>}
 
       <Panel title={isEntity ? "Names" : "Statements"} className="doc-panel">

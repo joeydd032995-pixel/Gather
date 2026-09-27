@@ -120,12 +120,28 @@ pub async fn persist_chunk_units(
         let valid_from = unit.event_time.or(chunk.source_time);
         let statement_hash = hex::encode(Sha256::digest(normalize_statement(&unit.statement)));
 
+        // Modality and polarity travel with the unit. Only an actual,
+        // non-negated claim may assert graph edges: a plan, a possibility, a
+        // condition, a rejection or a denial never becomes a present fact.
+        let reading = crate::safety::modality::classify(&unit.statement);
+        let mut attrs = unit.attrs.clone();
+        if let Some(map) = attrs.as_object_mut() {
+            map.entry("modality")
+                .or_insert_with(|| serde_json::json!(reading.modality.as_str()));
+            map.entry("negated")
+                .or_insert_with(|| serde_json::json!(reading.negated));
+            if reading.ambiguous {
+                map.insert("modality_ambiguous".into(), serde_json::json!(true));
+            }
+        }
+
         let inserted: Option<(Uuid,)> = sqlx::query_as(
             r#"
             INSERT INTO atomic_units
                 (kind, statement, statement_hash, subject_entity_id, confidence,
-                 extraction_method, extraction_model, valid_from, attrs)
-            VALUES ($1::unit_kind, $2, $3, $4, $5, $6::extraction_method, $7, $8, $9)
+                 extraction_method, extraction_model, valid_from, attrs,
+                 asserted_at, observed_at)
+            VALUES ($1::unit_kind, $2, $3, $4, $5, $6::extraction_method, $7, $8, $9, $10, $11)
             ON CONFLICT (statement_hash) DO NOTHING
             RETURNING id
             "#,
@@ -138,7 +154,9 @@ pub async fn persist_chunk_units(
         .bind(method)
         .bind(model)
         .bind(valid_from)
-        .bind(&unit.attrs)
+        .bind(&attrs)
+        .bind(chunk.source_time)
+        .bind(unit.event_time)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -177,7 +195,12 @@ pub async fn persist_chunk_units(
         // drop_below = 0). Only new units are classified; a re-assertion keeps
         // whatever state it already had.
         let admit_band = if is_new {
-            admit_unit(confidence, hold_below, drop_below)
+            match admit_unit(confidence, hold_below, drop_below) {
+                // Rules can't tell whether this is stated, denied or only
+                // possible: keep it, and ask.
+                Band::Auto if reading.ambiguous => Band::Hold,
+                band => band,
+            }
         } else {
             Band::Auto
         };
@@ -185,16 +208,26 @@ pub async fn persist_chunk_units(
             match admit_band {
                 Band::Auto => {}
                 Band::Hold => {
+                    let reason = if reading.ambiguous {
+                        "modality-uncertain"
+                    } else {
+                        "low-confidence"
+                    };
                     sqlx::query(
                         r#"
                         INSERT INTO review_queue (target_kind, target_id, reason, signals)
-                        VALUES ('unit', $1, 'low-confidence',
-                                jsonb_build_object('confidence', $2::float4))
+                        VALUES ('unit', $1, $3,
+                                jsonb_build_object('confidence', $2::float4,
+                                                   'modality', $4::text,
+                                                   'negated', $5::bool))
                         ON CONFLICT DO NOTHING
                         "#,
                     )
                     .bind(unit_id)
                     .bind(confidence)
+                    .bind(reason)
+                    .bind(reading.modality.as_str())
+                    .bind(reading.negated)
                     .execute(&mut *tx)
                     .await?;
                 }
@@ -212,6 +245,30 @@ pub async fn persist_chunk_units(
             ChunkAnchor::Segment(id) => (None, Some(id), None),
             ChunkAnchor::Image(id) => (None, None, Some(id)),
         };
+        // A re-assertion folds a new source into an existing proposition.
+        // Record that, and whether the new source is independent of the ones
+        // already behind it (copies and derivations are not corroboration).
+        if !is_new {
+            let existing = crate::safety::service::unit_sources(&mut tx, unit_id).await?;
+            let new_source = crate::safety::provenance::SourceRef {
+                artifact: chunk.artifact_id,
+                fingerprint: Some(hex::encode(Sha256::digest(chunk.text.as_bytes()))),
+            };
+            let mut artifacts: Vec<Uuid> = existing.iter().map(|s| s.artifact).collect();
+            artifacts.push(chunk.artifact_id);
+            let derivations = crate::safety::service::derivations_for(&mut tx, &artifacts).await?;
+            let (canonical, corroboration) = crate::safety::provenance::reassertion_certificates(
+                unit_id,
+                &unit.statement,
+                &existing,
+                &new_source,
+                &derivations,
+                model.clone().or_else(|| Some((*method).to_string())),
+            );
+            crate::safety::store::record(&mut tx, &canonical).await?;
+            crate::safety::store::record(&mut tx, &corroboration).await?;
+        }
+
         let quote_end = unit.char_end.min(chunk.text.len());
         let quote = chunk
             .text
@@ -240,7 +297,7 @@ pub async fn persist_chunk_units(
         // Relationship edges asserted by this unit (only on first creation;
         // re-assertions already carry them). A dropped unit is retracted, so it
         // must not seed active edges.
-        if is_new && admit_band != Band::Drop {
+        if is_new && admit_band != Band::Drop && reading.asserts_positive_fact() {
             if let Some(source_entity) = subject_entity_id {
                 for (object_name, relation) in &unit.objects {
                     let target_entity = resolve_or_create_entity(&mut tx, object_name).await?;

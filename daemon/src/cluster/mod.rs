@@ -14,6 +14,7 @@
 //! no I/O — so the worker gathers inputs and acts on the output, and the whole
 //! thing is unit-testable without a database (mirrors `scan::score`).
 
+pub mod resolve;
 pub mod worker;
 
 use uuid::Uuid;

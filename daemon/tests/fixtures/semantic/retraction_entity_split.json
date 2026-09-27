@@ -1,0 +1,56 @@
+{
+  "id": "retraction-entity-split",
+  "category": "retraction",
+  "description": "A user splits a merged entity: the merge is withdrawn, and so is everything built on the merged node.",
+  "certificates": [
+    {
+      "id": "merge1",
+      "inputs": [
+        "entA",
+        "entB"
+      ],
+      "sources": [
+        "art1"
+      ],
+      "conclusion": "cluster1"
+    },
+    {
+      "id": "derived1",
+      "inputs": [
+        "cluster1",
+        "u9"
+      ],
+      "sources": [
+        "art2"
+      ]
+    },
+    {
+      "id": "derived2",
+      "inputs": [
+        "derived1"
+      ],
+      "sources": [
+        "art2"
+      ]
+    },
+    {
+      "id": "other",
+      "inputs": [
+        "entC"
+      ],
+      "sources": [
+        "art1"
+      ]
+    }
+  ],
+  "withdraw": [
+    "entB"
+  ],
+  "expect": {
+    "retracted": [
+      "merge1",
+      "derived1",
+      "derived2"
+    ]
+  }
+}

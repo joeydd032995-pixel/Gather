@@ -1,0 +1,89 @@
+{
+  "id": "identity-bridge-chain",
+  "category": "identity",
+  "description": "A matches B and B matches C over the auto bar, A and C don't match: no three-way merge, the chain goes to review. A clean pair D/E still merges under the pair policy.",
+  "entities": [
+    {
+      "id": "A",
+      "name": "Jordan Smith",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-A"
+      ]
+    },
+    {
+      "id": "B",
+      "name": "J. Smith",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-B"
+      ]
+    },
+    {
+      "id": "C",
+      "name": "Jane Smith",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-C"
+      ]
+    },
+    {
+      "id": "D",
+      "name": "Acme Holdings",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-D"
+      ]
+    },
+    {
+      "id": "E",
+      "name": "Acme Holdings.",
+      "kind": "other",
+      "context": {},
+      "sources": [
+        "art-E"
+      ]
+    }
+  ],
+  "pairs": [
+    {
+      "a": "A",
+      "b": "B",
+      "text": 0.94
+    },
+    {
+      "a": "B",
+      "b": "C",
+      "text": 0.93
+    },
+    {
+      "a": "A",
+      "b": "C",
+      "text": 0.55
+    },
+    {
+      "a": "D",
+      "b": "E",
+      "text": 0.96
+    }
+  ],
+  "permutations": 24,
+  "seed": 3,
+  "expect": {
+    "merge_groups": [
+      [
+        "D",
+        "E"
+      ]
+    ],
+    "reasons_include": [
+      "CHAINED_SIMILARITY",
+      "PAIRWISE_EVIDENCE_GAP"
+    ],
+    "review_items_min": 2
+  }
+}

@@ -82,6 +82,47 @@ pub fn name_similarity(a: &str, b: &str) -> f32 {
     token.max(trigram).max(prefix_ratio(&na, &nb))
 }
 
+/// A name's comparison features, computed once so scoring many pairs
+/// doesn't re-tokenize both names for every pair.
+#[derive(Debug, Clone)]
+pub struct NameFeatures {
+    normalized: String,
+    tokens: Vec<String>,
+    trigrams: HashSet<String>,
+}
+
+impl NameFeatures {
+    pub fn new(name: &str) -> Self {
+        let normalized = normalize_name(name);
+        Self {
+            tokens: all_tokens(&normalized),
+            trigrams: trigrams(&normalized),
+            normalized,
+        }
+    }
+}
+
+/// [`name_similarity`] over precomputed features; identical results.
+pub fn features_similarity(a: &NameFeatures, b: &NameFeatures) -> f32 {
+    if a.normalized.is_empty() || b.normalized.is_empty() {
+        return 0.0;
+    }
+    if a.normalized == b.normalized {
+        return 1.0;
+    }
+    let token = jaccard(&a.tokens, &b.tokens);
+    let trigram = if a.trigrams.is_empty() || b.trigrams.is_empty() {
+        0.0
+    } else {
+        let intersection = a.trigrams.intersection(&b.trigrams).count();
+        let union = a.trigrams.len() + b.trigrams.len() - intersection;
+        intersection as f32 / union as f32
+    };
+    token
+        .max(trigram)
+        .max(prefix_ratio(&a.normalized, &b.normalized))
+}
+
 /// Score a candidate pair. `cosine_sim` is the pgvector cosine similarity when
 /// both entities have embeddings; it supersedes the text score, mirroring
 /// `scan::score::score_pair`'s treatment of unit similarity.
@@ -101,6 +142,35 @@ pub fn pair_method(cosine_sim: Option<f32>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn precomputed_features_score_exactly_like_name_similarity() {
+        let names = [
+            "Postgres",
+            "PostgreSQL",
+            "New York",
+            "New York City",
+            "Java",
+            "JavaScript",
+            "a",
+            "abcdefgh",
+            "",
+            "Acme Holdings",
+            "Acme Holdings.",
+            "J. Smith",
+            "Jane Smith",
+        ];
+        for a in names {
+            for b in names {
+                let direct = name_similarity(a, b);
+                let fast = features_similarity(&NameFeatures::new(a), &NameFeatures::new(b));
+                assert!(
+                    (direct - fast).abs() < 1e-6,
+                    "{a} / {b}: {direct} vs {fast}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn identical_names_score_one() {

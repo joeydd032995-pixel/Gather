@@ -1,0 +1,45 @@
+{
+  "id": "photo-bridge-chain",
+  "category": "photo",
+  "description": "Photo B is a near copy of A and of C, but A and C are far apart: they are never grouped as one set, and the split is the same in any order.",
+  "photos": [
+    {
+      "id": "a",
+      "phash": "f0f0f0f0f0f0f0f0"
+    },
+    {
+      "id": "b",
+      "phash": "f0f0f0f0f0f0f0f7"
+    },
+    {
+      "id": "c",
+      "phash": "f0f0f0f0f080f0f7"
+    },
+    {
+      "id": "d",
+      "phash": "0f0f0f0f0f0f0f0f"
+    },
+    {
+      "id": "e",
+      "phash": "0f0f0f0f0f0f0f0e"
+    }
+  ],
+  "max_distance": 3,
+  "permutations": 24,
+  "expect": {
+    "groups": [
+      [
+        "b",
+        "c"
+      ],
+      [
+        "d",
+        "e"
+      ]
+    ],
+    "reasons_include": [
+      "CHAINED_SIMILARITY",
+      "PAIRWISE_EVIDENCE_GAP"
+    ]
+  }
+}

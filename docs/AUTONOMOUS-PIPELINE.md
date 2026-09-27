@@ -24,6 +24,13 @@ questions. Gather inverts this:
 4. **Your occasional correction is the training signal.** It's recorded, it's reversible, and
    it feeds a real-data precision metric (and, next, automatic threshold tuning).
 
+5. **Automation is fail-closed.** An automatic action needs positive evidence for every
+   condition its rule requires. When evidence is missing, ambiguous or contradicts itself
+   (a chain of similarities, an unknown time, a generic name, a type mismatch, a copied
+   source), the item becomes review work, not an autonomous state change. Every automatic
+   conclusion, and every one held back, carries an **inference certificate** saying which
+   rule allowed it or which check stopped it; see [SEMANTIC-SAFETY.md](SEMANTIC-SAFETY.md).
+
 One distinction drives the safety design: **grouping is not merging**. Putting a unit in a
 topic cluster is a reversible tag, so it is always safe to do automatically. Merging two
 entities redirects a node in the graph, so it has a deliberately conservative gate.
@@ -107,19 +114,30 @@ It is pure, deterministic and runs fully offline.
 
 ### Entity resolution
 
-The clustering worker takes the existing merge-suggestion scorer's candidate pairs and passes
-each through the conservative gate above, supplying *both* signals when they exist. It then
-takes components of the **Auto** edges only:
+(`daemon/src/cluster/resolve.rs`, rule `entity.auto_merge` v2 in `daemon/src/safety/identity.rs`.)
+Every pass scores candidate pairs over live entities *and* the entities already merged into
+them, passes each through the conservative gate above (both signals when they exist), and
+then takes components of the **Auto** edges only:
 
 - Each component is **one merge decision**, not one per pair.
 - A component merges only if **every pair** in it cleared the Auto bar. A chain (A~B and B~C
   but not A~C) would otherwise fold unrelated entities together through one bridging name, so
   its pairs are parked in the review tray one by one instead, each shown as a possible
   duplicate you can merge or mark as different.
+- Pairs of different explicit types are never merged; an untyped entity against a typed one,
+  or two with different employer/location/period in their metadata, are held for review.
+- Generic names ("Project", "Notes") and hubs (a name that matches several things that don't
+  match each other) are never auto-merged; a hub gets one `generic-identifier` tray item.
+- A pair you marked as different, or split, is never merged automatically — also not through
+  another entity you merged by hand.
+- A merge needs at least one source artifact behind its names.
 - Components larger than `GATHER_CLUSTER_MAX_COMPONENT` are parked for review instead of
   merged wholesale.
+- An **automatic merge is withdrawn** when a later name turns it into a chain, so the result
+  does not depend on arrival order. The withdrawal replays the merge journal; the pairs go to
+  the tray (it is not a "different" decision and teaches the tuner nothing).
 - The survivor is the most specific entity: a typed entity (e.g. `person`) beats an
-  extraction-created `other`, then the longest name wins.
+  extraction-created `other`, then the longest name, then the smallest id.
 
 ### Topic grouping
 
@@ -144,9 +162,11 @@ These run offline in CI and fail the build on regressions:
 | `tests/clustering.rs` | Real name similarity groups duplicates and keeps distinct names apart |
 | `tests/photo_pipeline.rs` | Re-encoded and resized copies of a scene hash within the duplicate distance, different scenes hash far apart, a mixed library groups exactly by scene, and albums split on time gaps and travel |
 | `tests/tuning.rs` | The tuner converges to a known boundary, never leaves its bounds, never moves on thin evidence, never oscillates, and never loosens on reject-only feedback; the tray ranks boundary hubs first |
+| `gather-semantic-eval`, `tests/semantic_safety.rs` | The semantic fixture corpus: no merge or photo group without pairwise evidence, no contradiction without full alignment, no automatic conclusion without a certificate and a source, no order dependence, retraction reaches everything that relied on withdrawn evidence, user rejections hold, copies never corroborate |
+| `tests/semantic_properties.rs` | Seeded property tests: permutation invariance, idempotence, bridge non-amplification, independent evidence, retraction propagation, user-decision protection, provenance completeness, no invalid closure, threshold boundaries, model-version visibility |
 
 Integration tests (`feedback_integration.rs`, `cluster_integration.rs`, `tune_integration.rs`,
-`photo_integration.rs`, which uses a mock loopback Ollama) exercise the feedback
+`semantic_safety_integration.rs`, `photo_integration.rs`, which uses a mock loopback Ollama) exercise the feedback
 endpoints and the clustering worker end to end against pgvector.
 
 ## Active learning and auto-tuning
@@ -233,8 +253,11 @@ deleted**. A background worker (`GATHER_PHOTO_*`) runs three steps:
    is pure Rust (JPEG, PNG, WebP, TIFF, GIF, BMP) with size and allocation limits. Formats it
    can't decode, such as HEIC, get no hash and are simply left out of duplicate grouping.
 2. **Regroup** (whenever new photos have been prepared) over the whole library:
-   - **Near-duplicates**: photos within `GATHER_PHOTO_DUP_MAX_DISTANCE` bits of *every* other
-     photo in their group. Candidates come from banding the hash into `distance + 1` chunks: two
+   - **Near-duplicates** (rule `photo.duplicate_group` v2): photos within
+     `GATHER_PHOTO_DUP_MAX_DISTANCE` bits of *every* other photo in their group, never two you
+     marked "not a duplicate", and never a low-information image that resembles many
+     unrelated shots. Photos are ordered canonically before a chain is split, so the split
+     doesn't depend on arrival order. Each group carries a certificate. Candidates come from banding the hash into `distance + 1` chunks: two
      hashes that close must match exactly on at least one chunk, so only photos sharing a chunk
      are compared. Linked photos that only form a chain (A near B, B near C, A far from C) are
      split into groups whose members all match each other, so one in-between shot can't tie two
@@ -257,6 +280,17 @@ deleted**. A background worker (`GATHER_PHOTO_*`) runs three steps:
 
 Browse with `GET /clusters?kind=photo_dup|album|photo_topic` and render previews with
 `GET /images/{id}/thumbnail`.
+
+## Contradictions and changing facts
+
+The contradiction scanner's findings go through the `contradiction.aligned_conflict` rule
+before anything is reported: subject, predicate (including modality), unit, value, scope,
+granularity and time must line up. Claims about different periods, a city and the state it
+is in, different scopes, or a plan versus a fact are not reported. A later statement of the
+current state (asserted at least `GATHER_SAFETY_SUCCESSION_DAYS` after an earlier one)
+**supersedes** the older unit, which is kept as history. A conflict whose time can't be
+aligned is reported for review, never as a confident contradiction. Details in
+[SEMANTIC-SAFETY.md](SEMANTIC-SAFETY.md).
 
 ## Using it day to day
 

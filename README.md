@@ -76,6 +76,17 @@ photo out") rather than reviewing thousands of suggestions.
 **Contradictions**
 - Background scanner detects conflicts (numeric mismatch, negation, exclusive assignment,
   antonyms), scores them, and queues them for resolution with a full audit trail
+- A conflict is reported only when subject, predicate, unit, value, scope, granularity and
+  time line up; a later statement of current state supersedes an earlier one instead
+
+**Semantic safety** (see [docs/SEMANTIC-SAFETY.md](docs/SEMANTIC-SAFETY.md))
+- Every automatic merge, photo group, contradiction and supersession carries an **inference
+  certificate**: the rule and version, the direct evidence, the sources, and why it was
+  automated — or exactly which check stopped it
+- Similarity is not identity: nothing is merged or grouped through a chain, a generic hub,
+  a type or context mismatch, or against your own "these are different"
+- Copies and summaries of one source never count as independent corroboration; removing a
+  source withdraws everything that rested on it
 
 **Interfaces**
 - **REST** API (`127.0.0.1:7601/api/v1`) and an equivalent **gRPC** API (`127.0.0.1:7602`)
@@ -300,6 +311,7 @@ file rather than editing an existing one. Constraints on large tables should be 
 | [docs/API.md](docs/API.md) | REST and gRPC endpoint reference with examples |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every environment variable |
 | [docs/AUTONOMOUS-PIPELINE.md](docs/AUTONOMOUS-PIPELINE.md) | How Gather organizes itself: confidence bands, feedback loop, clustering |
+| [docs/SEMANTIC-SAFETY.md](docs/SEMANTIC-SAFETY.md) | Inference certificates, reason codes, and the rules that keep similarity from becoming false identity, conflict or corroboration |
 | [docs/BENCHMARK-RUNBOOK.md](docs/BENCHMARK-RUNBOOK.md) | Producing the go/no-go numbers: latency benchmark, quality evals |
 | [docs/BACKUP-RUNBOOK.md](docs/BACKUP-RUNBOOK.md) | Scheduled encrypted backups and restore drills |
 | [scripts/README.md](scripts/README.md) | The operational scripts |

@@ -111,6 +111,15 @@ pub struct Config {
     /// Components larger than this are treated as too diffuse to auto-label and
     /// are skipped (chaining guard).
     pub cluster_max_component: usize,
+    /// Candidate degree at which an entity or photo whose neighbours don't
+    /// match each other is treated as a generic hub (review, never merged).
+    pub safety_hub_degree: usize,
+    /// Present-tense claims asserted at least this many days apart describe
+    /// successive states (the later supersedes), not a contradiction.
+    pub safety_succession_days: i64,
+    /// Present-tense claims asserted within this many hours describe the same
+    /// moment. Between the two windows, time alignment is unknown (review).
+    pub safety_same_moment_hours: i64,
     /// Let the tuner move decision thresholds from user feedback. The tune
     /// worker always runs (it also re-ranks the review tray); this gates only
     /// the threshold changes.
@@ -434,6 +443,21 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .map(|v: usize| v.clamp(2, 10_000))
                 .unwrap_or(50),
+            safety_hub_degree: var("GATHER_SAFETY_HUB_DEGREE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|v: usize| v.clamp(2, 1_000))
+                .unwrap_or(3),
+            safety_succession_days: var("GATHER_SAFETY_SUCCESSION_DAYS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|v: i64| v.clamp(1, 3_650))
+                .unwrap_or(30),
+            safety_same_moment_hours: var("GATHER_SAFETY_SAME_MOMENT_HOURS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(|v: i64| v.clamp(0, 24 * 30))
+                .unwrap_or(24),
             tune_enabled: env_bool("GATHER_TUNE_ENABLED", true),
             tune_interval_secs: var("GATHER_TUNE_INTERVAL_SECS")
                 .ok()
@@ -525,6 +549,9 @@ impl Config {
             cluster_k: 6,
             cluster_threshold: 0.5,
             cluster_max_component: 50,
+            safety_hub_degree: 3,
+            safety_succession_days: 30,
+            safety_same_moment_hours: 24,
             tune_enabled: true,
             tune_interval_secs: 600,
             tune_min_samples: 20,
