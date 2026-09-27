@@ -810,6 +810,8 @@ message RetractionReport {
   uint64 supersessions_reverted = 5;
   uint64 images_ungrouped = 6;
   bool deleted = 7;
+  uint64 merges_withdrawn = 8;
+  string external_file_left = 9;               // a storage_path Gather did not delete
 }
 
 message MarkNotDuplicateRequest {

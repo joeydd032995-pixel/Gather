@@ -76,7 +76,8 @@ pub async fn retract_merge_certificates(
 
 /// Retract every live certificate that can no longer satisfy its rule once
 /// `withdrawn` evidence (units, artifacts, certificates) is gone: those that
-/// used any of it as a direct input, or whose every source artifact is gone.
+/// used any of it as a direct input, or with no live source artifact left
+/// (withdrawn now, retracted earlier, or deleted).
 /// Repeats to a fixpoint so conclusions built on conclusions follow; each
 /// is linked to the certificate (or event) that caused it.
 pub async fn propagate_withdrawal(
@@ -100,7 +101,11 @@ pub async fn propagate_withdrawal(
              WHERE c.superseded_at IS NULL AND c.retracted_at IS NULL \
                AND c.decision <> 'user_decision' AND c.id <> $4 \
                AND (c.input_ids && $1 \
-                    OR (cardinality(c.source_artifact_ids) > 0 AND c.source_artifact_ids <@ $1)) \
+                    OR (cardinality(c.source_artifact_ids) > 0 \
+                        AND NOT EXISTS ( \
+                          SELECT 1 FROM unnest(c.source_artifact_ids) src \
+                          JOIN artifacts a ON a.id = src AND a.retracted_at IS NULL \
+                          WHERE src <> ALL($1)))) \
              RETURNING c.id, c.conclusion_id",
         )
         .bind(&gone)
@@ -130,7 +135,114 @@ pub struct RetractionReport {
     pub contradictions_withdrawn: u64,
     pub supersessions_reverted: u64,
     pub images_ungrouped: u64,
+    /// Automatic entity merges undone because no remaining source backs them.
+    pub merges_withdrawn: u64,
     pub deleted: bool,
+    /// A file the artifact row pointed at outside the database. Gather never
+    /// writes such paths itself (they only arrive in imported bundles), so it
+    /// never deletes them either: the path is reported for the user.
+    pub external_file_left: Option<String>,
+}
+
+/// Undo the automatic merges that folded `members` into their heads,
+/// newest-first as the journal requires, stopping at a person's merge. Each
+/// undo runs in a savepoint so one that can't be done exactly doesn't abort
+/// the rest. The next resolution pass re-merges anything still supported.
+async fn unwind_auto_merges(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    members: &[Uuid],
+    note: &str,
+) -> Result<u64, ApiError> {
+    use sqlx::Acquire;
+    let heads: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT merged_into_entity_id FROM entities \
+         WHERE id = ANY($1) AND merged_into_entity_id IS NOT NULL",
+    )
+    .bind(members)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut undone = 0;
+    for head in heads {
+        let mut targets: BTreeSet<Uuid> = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM entities WHERE id = ANY($1) AND merged_into_entity_id = $2",
+        )
+        .bind(members)
+        .bind(head)
+        .fetch_all(&mut **tx)
+        .await?
+        .into_iter()
+        .collect();
+        let merges: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT loser_entity_id, actor FROM entity_merge_audit \
+             WHERE winner_entity_id = $1 AND action = 'merge' AND undone_at IS NULL \
+             ORDER BY created_at DESC",
+        )
+        .bind(head)
+        .fetch_all(&mut **tx)
+        .await?;
+        for (loser, actor) in merges {
+            if targets.is_empty() || actor != "auto" {
+                break;
+            }
+            let mut sp = tx.begin().await?;
+            match crate::entities::merge::unmerge_for_supersession_in(
+                &mut sp,
+                loser,
+                note.to_string(),
+            )
+            .await
+            {
+                Ok(_) => {
+                    sp.commit().await?;
+                    targets.remove(&loser);
+                    undone += 1;
+                }
+                Err(e) => {
+                    sp.rollback().await?;
+                    tracing::warn!(entity = %loser, error = %e, "could not undo a merge");
+                    break;
+                }
+            }
+        }
+    }
+    Ok(undone)
+}
+
+/// Before a hard delete: keep the artifacts linked through this one (its
+/// derivations and versions) in one source family, since the cascade would
+/// otherwise drop every edge that joined them.
+async fn relink_around(conn: &mut PgConnection, artifact: Uuid) -> Result<(), ApiError> {
+    let parents: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT parent_artifact_id FROM artifact_derivations WHERE child_artifact_id = $1 \
+         UNION SELECT supersedes_artifact_id FROM artifacts \
+               WHERE id = $1 AND supersedes_artifact_id IS NOT NULL \
+         ORDER BY 1",
+    )
+    .bind(artifact)
+    .fetch_all(&mut *conn)
+    .await?;
+    let children: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT child_artifact_id FROM artifact_derivations WHERE parent_artifact_id = $1 \
+         UNION SELECT id FROM artifacts WHERE supersedes_artifact_id = $1 \
+         ORDER BY 1",
+    )
+    .bind(artifact)
+    .fetch_all(&mut *conn)
+    .await?;
+    let Some(anchor) = parents.first().or(children.first()).copied() else {
+        return Ok(());
+    };
+    for other in parents.iter().chain(&children).filter(|&&x| x != anchor) {
+        sqlx::query(
+            "INSERT INTO artifact_derivations (child_artifact_id, parent_artifact_id, kind, actor) \
+             VALUES ($1, $2, 'other', 'safety') ON CONFLICT DO NOTHING",
+        )
+        .bind(other)
+        .bind(anchor)
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(())
 }
 
 /// Undo automatic supersessions where one of `units` was the newer claim:
@@ -394,7 +506,31 @@ pub async fn retract_artifact(
         .await?;
     }
 
+    // Automatic merges whose every source is gone are undone now rather than
+    // at the next resolution pass.
+    let merge_members: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT unnest(subject_ids) FROM inference_certificates \
+         WHERE id = ANY($1) AND conclusion_kind = 'entity_merge' AND decision = 'auto_applied'",
+    )
+    .bind(&report.certificates_withdrawn)
+    .fetch_all(&mut *tx)
+    .await?;
+    if !merge_members.is_empty() {
+        report.merges_withdrawn = unwind_auto_merges(
+            &mut tx,
+            &merge_members,
+            "withdrawn: the only source behind this merge was removed",
+        )
+        .await?;
+    }
+
     if delete {
+        report.external_file_left =
+            sqlx::query_scalar("SELECT storage_path FROM artifacts WHERE id = $1")
+                .bind(artifact)
+                .fetch_one(&mut *tx)
+                .await?;
+        relink_around(&mut tx, artifact).await?;
         sqlx::query("DELETE FROM artifacts WHERE id = $1")
             .bind(artifact)
             .execute(&mut *tx)
@@ -517,9 +653,11 @@ pub async fn add_derivation(
     let stale: Vec<Uuid> = sqlx::query_scalar(
         "SELECT id FROM inference_certificates \
          WHERE rule_id = 'claim.corroboration' AND decision = 'auto_applied' \
-           AND $1 = ANY(input_ids) AND superseded_at IS NULL AND retracted_at IS NULL",
+           AND source_artifact_ids && $1 AND superseded_at IS NULL AND retracted_at IS NULL",
     )
-    .bind(child)
+    // Any corroboration resting on either side may have counted the two as
+    // independent, whichever arrived first; support is recomputed live.
+    .bind(vec![child, parent])
     .fetch_all(&mut *tx)
     .await?;
     let withdrawn = store::withdraw(
@@ -567,19 +705,22 @@ pub async fn derivations_for(
     artifacts: &[Uuid],
 ) -> Result<Vec<Derivation>, ApiError> {
     let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
-        "WITH RECURSIVE link(child, parent, depth) AS ( \
-             SELECT child_artifact_id, parent_artifact_id, 1 FROM artifact_derivations \
-             WHERE child_artifact_id = ANY($1) OR parent_artifact_id = ANY($1) \
-           UNION \
-             SELECT id, supersedes_artifact_id, 1 FROM artifacts \
+        // Declared derivations and version links are one edge set, walked
+        // together, so a version chain of any length stays one lineage.
+        "WITH RECURSIVE edge(child, parent) AS ( \
+             SELECT child_artifact_id, parent_artifact_id FROM artifact_derivations \
+             UNION ALL \
+             SELECT id, supersedes_artifact_id FROM artifacts \
              WHERE supersedes_artifact_id IS NOT NULL \
-               AND (id = ANY($1) OR supersedes_artifact_id = ANY($1)) \
+         ), \
+         link(child, parent, depth) AS ( \
+             SELECT child, parent, 1 FROM edge \
+             WHERE child = ANY($1) OR parent = ANY($1) \
            UNION \
-             SELECT d.child_artifact_id, d.parent_artifact_id, l.depth + 1 \
-             FROM artifact_derivations d JOIN link l \
-               ON d.child_artifact_id IN (l.child, l.parent) \
-               OR d.parent_artifact_id IN (l.child, l.parent) \
-             WHERE l.depth < 8 \
+             SELECT e.child, e.parent, l.depth + 1 \
+             FROM edge e JOIN link l \
+               ON e.child IN (l.child, l.parent) OR e.parent IN (l.child, l.parent) \
+             WHERE l.depth < 16 \
          ) SELECT DISTINCT child, parent FROM link",
     )
     .bind(artifacts)

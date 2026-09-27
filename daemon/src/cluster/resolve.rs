@@ -200,7 +200,11 @@ async fn park(
         .collect::<Vec<_>>());
     let n = sqlx::query(
         "INSERT INTO review_queue (target_kind, target_id, reason, signals) \
-         VALUES ('entity', $1, $2, $3) ON CONFLICT DO NOTHING",
+         VALUES ('entity', $1, $2, $3) \
+         ON CONFLICT (target_kind, target_id) WHERE state = 'open' DO UPDATE \
+           SET reason = EXCLUDED.reason, signals = EXCLUDED.signals \
+           WHERE review_queue.reason IS DISTINCT FROM EXCLUDED.reason \
+              OR review_queue.signals IS DISTINCT FROM EXCLUDED.signals",
     )
     .bind(target)
     .bind(reason)

@@ -525,18 +525,39 @@ async fn record_conflict(
                     Ok(true)
                 }
                 None => {
-                    if let Some((id, _, _)) = existing {
-                        store::set_conclusion(tx, cert_id, id).await?;
+                    let Some((id, status, by)) = existing else {
+                        return Ok(false);
+                    };
+                    store::set_conclusion(tx, cert_id, id).await?;
+                    // A contradiction the safety layer withdrew (its claim was
+                    // rejected, then restored) comes back once it holds again;
+                    // one a person resolved stays resolved.
+                    let reopen = status == "dismissed" && by.as_deref() == Some("safety");
+                    let updated = sqlx::query(
+                        "UPDATE contradictions SET certificate_id = $2, alignment = $3, \
+                           certainty = $4, status = 'open', resolved_at = NULL, \
+                           resolved_by = NULL, resolution_note = NULL \
+                         WHERE id = $1 AND (status = 'open' \
+                           OR (status = 'dismissed' AND resolved_by = 'safety'))",
+                    )
+                    .bind(id)
+                    .bind(cert_id)
+                    .bind(&alignment)
+                    .bind(certainty)
+                    .execute(&mut **tx)
+                    .await?
+                    .rows_affected();
+                    if reopen && updated > 0 {
                         sqlx::query(
-                            "UPDATE contradictions SET certificate_id = $2, alignment = $3, \
-                               certainty = $4 WHERE id = $1 AND status = 'open'",
+                            "INSERT INTO contradiction_audit \
+                               (contradiction_id, action, actor, from_status, to_status, note) \
+                             VALUES ($1, 'reopen', 'scanner', 'dismissed', 'open', $2)",
                         )
                         .bind(id)
-                        .bind(cert_id)
-                        .bind(&alignment)
-                        .bind(certainty)
+                        .bind("the claim it rested on was restored")
                         .execute(&mut **tx)
                         .await?;
+                        return Ok(true);
                     }
                     Ok(false)
                 }

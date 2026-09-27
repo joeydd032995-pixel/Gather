@@ -151,6 +151,8 @@ impl pb::safety_service_server::SafetyService for SafetyApi {
             supersessions_reverted: rep.supersessions_reverted,
             images_ungrouped: rep.images_ungrouped,
             deleted: rep.deleted,
+            merges_withdrawn: rep.merges_withdrawn,
+            external_file_left: rep.external_file_left.unwrap_or_default(),
         }))
     }
 

@@ -642,7 +642,9 @@ export interface RetractionReport {
   contradictions_withdrawn: number;
   supersessions_reverted: number;
   images_ungrouped: number;
+  merges_withdrawn: number;
   deleted: boolean;
+  external_file_left: string | null;
 }
 
 /** Stop a source from supporting anything (optionally deleting it). */

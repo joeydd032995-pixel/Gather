@@ -279,7 +279,7 @@ Every automatic conclusion — and every one Gather held back — has an inferen
 | GET | `/safety/summary` | Counts by outcome, review-routed and blocked counts by reason code, live certificates by kind |
 | GET | `/artifacts/{id}/conclusions` | Certificates derived from a source (same filters as `/certificates`) |
 | POST | `/artifacts/{id}/retract` | Stop a source from supporting anything: `{ "reason": "…", "delete": false }`. Units only it supported are retracted with their edges; what rested on them is withdrawn. Returns the retraction report |
-| DELETE | `/artifacts/{id}` | Retract, then delete the artifact and its stored bytes |
+| DELETE | `/artifacts/{id}` | Retract, then delete the artifact and the bytes stored in the database. Artifacts it linked (derivations, versions) stay in one source family. A `storage_path` file (only ever set by an imported bundle) is not removed; its path is returned as `external_file_left` |
 | POST | `/artifacts/{id}/derivations` | Declare that this artifact derives from another: `{ "parent_id": "…", "kind": "copy|summary|export|reingest|version|correction|other" }`. It no longer counts as independent corroboration |
 | GET | `/units/{id}/support` | The unit's live sources, their source families, independent-source count and the confidence independent support justifies |
 | POST | `/units/{id}/revisions` | Record a newer extractor's reading: `{ "statement": "…", "value": "…", "model_version": "…" }`. Disagreement is recorded and parked for review (`model-disagreement`); the unit is never rewritten |
@@ -295,7 +295,9 @@ A retraction report:
   "contradictions_withdrawn": 1,
   "supersessions_reverted": 0,
   "images_ungrouped": 0,
-  "deleted": false
+  "merges_withdrawn": 0,
+  "deleted": false,
+  "external_file_left": null
 }
 ```
 

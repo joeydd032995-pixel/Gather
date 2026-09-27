@@ -587,19 +587,30 @@ async fn unmerge_core(
     //     and the units no longer share one. Rescanning (cursors were just
     //     cleared) re-finds any that still hold on other evidence. Only
     //     untouched ('open') ones detected after the merge are withdrawn.
-    let contradictions_withdrawn = sqlx::query(
+    let withdrawn: Vec<Uuid> = sqlx::query_scalar(
         "DELETE FROM contradictions c WHERE c.status = 'open' AND c.detected_at >= $3 AND ( \
            (c.unit_a_id = ANY($1) AND c.unit_b_id IN \
               (SELECT id FROM atomic_units WHERE subject_entity_id = $2)) \
         OR (c.unit_b_id = ANY($1) AND c.unit_a_id IN \
-              (SELECT id FROM atomic_units WHERE subject_entity_id = $2)))",
+              (SELECT id FROM atomic_units WHERE subject_entity_id = $2))) \
+         RETURNING c.id",
     )
     .bind(&journal.units)
     .bind(winner_id)
     .bind(merged_at)
+    .fetch_all(&mut **tx)
+    .await?;
+    let contradictions_withdrawn = withdrawn.len() as u64;
+    // Their certificates no longer describe anything that exists.
+    sqlx::query(
+        "UPDATE inference_certificates SET retracted_at = now(), outcome = 'retracted', \
+           status_reason = 'the merge that put both claims under one subject was undone' \
+         WHERE conclusion_kind = 'contradiction' AND conclusion_id = ANY($1) \
+           AND superseded_at IS NULL AND retracted_at IS NULL",
+    )
+    .bind(&withdrawn)
     .execute(&mut **tx)
-    .await?
-    .rows_affected();
+    .await?;
 
     // 4. Edges: repoint the moved ones back, re-insert the deleted ones.
     let sources = sqlx::query(

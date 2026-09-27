@@ -119,6 +119,11 @@ async fn artifact_of(state: &AppState, conversation: &str) -> Uuid {
 
 /// An entity mentioned by a unit in a seeded source.
 async fn seed_entity(state: &AppState, name: &str) -> Uuid {
+    seed_entity_with_source(state, name).await.0
+}
+
+/// [`seed_entity`], also returning the artifact that mentions it.
+async fn seed_entity_with_source(state: &AppState, name: &str) -> (Uuid, Uuid) {
     let id: Uuid =
         sqlx::query_scalar("INSERT INTO entities (name, kind) VALUES ($1, 'other') RETURNING id")
             .bind(name)
@@ -171,7 +176,7 @@ async fn seed_entity(state: &AppState, name: &str) -> Uuid {
     .execute(&state.pool)
     .await
     .unwrap();
-    id
+    (id, artifact)
 }
 
 async fn head(state: &AppState, id: Uuid) -> Option<Uuid> {
@@ -893,4 +898,166 @@ async fn the_migration_is_reversible() {
     .execute(&state.pool)
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn removing_the_last_source_of_an_automatic_merge_undoes_it() {
+    let _guard = LOCK.lock().await;
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let app = routes::build_router(state.clone());
+    let token = &Uuid::new_v4().simple().to_string()[..8];
+    let (x, art_x) = seed_entity_with_source(&state, &format!("Plover {token} Maritime")).await;
+    let (y, art_y) = seed_entity_with_source(&state, &format!("Plover {token} Maritime.")).await;
+    cluster::worker::run_one_pass(&state.pool, &state.config)
+        .await
+        .unwrap();
+    assert_eq!(head(&state, x).await, Some(y));
+
+    // One source left: the merge still has support.
+    let (_, first) = call(
+        &app,
+        Method::POST,
+        &format!("/artifacts/{art_x}/retract"),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(first["merges_withdrawn"], 0);
+    assert_eq!(head(&state, x).await, Some(y));
+    // No source left: the merge is undone at once.
+    let (_, second) = call(
+        &app,
+        Method::POST,
+        &format!("/artifacts/{art_y}/retract"),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(second["merges_withdrawn"], 1, "{second}");
+    assert_eq!(head(&state, x).await, None);
+    // And no later pass re-merges it without a source.
+    cluster::worker::run_one_pass(&state.pool, &state.config)
+        .await
+        .unwrap();
+    assert_eq!(head(&state, x).await, None);
+}
+
+async fn seed_artifact(state: &AppState, supersedes: Option<Uuid>) -> Uuid {
+    let text = Uuid::new_v4().to_string();
+    sqlx::query_scalar(
+        "INSERT INTO artifacts (kind, byte_size, content_hash, raw_content, supersedes_artifact_id) \
+         VALUES ('document_text', 1, encode(digest($1, 'sha256'), 'hex'), $2, $3) RETURNING id",
+    )
+    .bind(&text)
+    .bind(text.as_bytes())
+    .bind(supersedes)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap()
+}
+
+fn families_of(links: &[gather_daemon::safety::provenance::Derivation], ids: &[Uuid]) -> usize {
+    use gather_daemon::safety::provenance::{families, SourceRef};
+    let sources: Vec<SourceRef> = ids
+        .iter()
+        .map(|&artifact| SourceRef {
+            artifact,
+            fingerprint: None,
+        })
+        .collect();
+    families(&sources, links).len()
+}
+
+#[tokio::test]
+async fn source_families_survive_long_version_chains_and_deleted_parents() {
+    use gather_daemon::safety::service::{add_derivation, derivations_for, retract_artifact};
+    let _guard = LOCK.lock().await;
+    let Some(state) = test_state().await else {
+        return;
+    };
+    // A <- B <- C <- D as versions: the ends are one lineage.
+    let a = seed_artifact(&state, None).await;
+    let b = seed_artifact(&state, Some(a)).await;
+    let c = seed_artifact(&state, Some(b)).await;
+    let d = seed_artifact(&state, Some(c)).await;
+    let mut conn = state.pool.acquire().await.unwrap();
+    let links = derivations_for(&mut conn, &[a, d]).await.unwrap();
+    assert_eq!(families_of(&links, &[a, d]), 1);
+
+    // Two summaries of one parent stay related after the parent is deleted.
+    let parent = seed_artifact(&state, None).await;
+    let s1 = seed_artifact(&state, None).await;
+    let s2 = seed_artifact(&state, None).await;
+    add_derivation(&state.pool, s1, parent, "summary")
+        .await
+        .unwrap();
+    add_derivation(&state.pool, s2, parent, "summary")
+        .await
+        .unwrap();
+    retract_artifact(&state.pool, parent, None, true, None)
+        .await
+        .unwrap();
+    let links = derivations_for(&mut conn, &[s1, s2]).await.unwrap();
+    assert_eq!(
+        families_of(&links, &[s1, s2]),
+        1,
+        "siblings are still one family"
+    );
+}
+
+#[tokio::test]
+async fn restoring_a_rejected_claim_brings_its_contradiction_back() {
+    let _guard = LOCK.lock().await;
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let app = routes::build_router(state.clone());
+    let m = &Uuid::new_v4().simple().to_string()[..8];
+    ingest(
+        &app,
+        &format!("rst-{m}-a"),
+        &format!("My Sigma{m} budget is $50 per month."),
+        "2026-04-01T10:00:00Z",
+    )
+    .await;
+    ingest(
+        &app,
+        &format!("rst-{m}-b"),
+        &format!("My Sigma{m} budget is $75 per month."),
+        "2026-04-01T10:00:00Z",
+    )
+    .await;
+    drain(&state).await;
+    let b = unit_like(&state, &format!("Sigma{m} budget is $75")).await;
+    let status = |state: AppState| async move {
+        sqlx::query_scalar::<_, String>(
+            "SELECT status::text FROM contradictions WHERE unit_a_id = $1 OR unit_b_id = $1",
+        )
+        .bind(b)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(status(state.clone()).await, "open");
+    call(
+        &app,
+        Method::POST,
+        &format!("/units/{b}/reject"),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status(state.clone()).await, "dismissed");
+    call(
+        &app,
+        Method::POST,
+        &format!("/units/{b}/restore"),
+        Some(json!({})),
+    )
+    .await;
+    drain(&state).await;
+    assert_eq!(
+        status(state.clone()).await,
+        "open",
+        "the conflict holds again"
+    );
 }
