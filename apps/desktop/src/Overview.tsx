@@ -182,7 +182,7 @@ export default function Overview({
         listReview(100),
         listContradictions("open"),
         listMergeSuggestions(),
-        getGraphOverview(60, 40),
+        getGraphOverview(60, 40, 0),
       ]);
       if (cancelled) return;
       const value = <T,>(r: PromiseSettledResult<T>, fallback: T) =>

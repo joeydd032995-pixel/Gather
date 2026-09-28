@@ -25,6 +25,7 @@ pub async fn project_graph(
     id: Uuid,
     max_files: i64,
     max_entities: i64,
+    compare_max: usize,
 ) -> Result<GraphOverview, ApiError> {
     let row = sqlx::query(
         "SELECT p.id, p.name, p.source, \
@@ -181,9 +182,11 @@ pub async fn project_graph(
     let relations = relations_among(pool, &entity_ids).await?;
 
     // The projects most like this one, linked to it.
-    let signatures = similarity::load(pool).await?;
+    let loaded = similarity::load(pool, compare_max).await?;
+    let ranked = similarity::rank(id, &loaded, SIMILAR).unwrap_or_default();
+    let ranked = similarity::with_examples(pool, id, ranked).await?;
     let mut similar = Vec::new();
-    for s in similarity::rank(id, &signatures, SIMILAR).unwrap_or_default() {
+    for s in ranked {
         let files = sqlx::query_scalar(
             "SELECT count(*) FROM project_items WHERE project_id = $1 AND item_kind = 'file'",
         )

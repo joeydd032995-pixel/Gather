@@ -34,7 +34,9 @@ pub struct OverviewParams {
     pub max_entities: Option<i64>,
     /// 0 leaves files out.
     pub max_files: Option<i64>,
-    /// false leaves projects out (default true).
+    /// Most projects shown (default 150, max 1000; 0 leaves them out).
+    pub max_projects: Option<i64>,
+    /// false leaves projects out, like `max_projects=0`.
     pub projects: Option<bool>,
 }
 
@@ -50,7 +52,12 @@ pub async fn graph_overview(
             &state.pool,
             max_entities,
             max_files,
-            params.projects.unwrap_or(true),
+            if params.projects == Some(false) {
+                0
+            } else {
+                params.max_projects.unwrap_or(150).clamp(0, 1000)
+            },
+            state.config.project_compare_max,
         )
         .await?,
     ))

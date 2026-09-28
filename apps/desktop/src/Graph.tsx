@@ -345,7 +345,10 @@ export default function Graph({
 
   useEffect(() => {
     let cancelled = false;
-    (projectId ? getProjectGraph(projectId, 250, Math.min(size, 150)) : getGraphOverview(size, 100))
+    (projectId
+      ? getProjectGraph(projectId, 250, Math.min(size, 150))
+      : getGraphOverview(size, 100, size)
+    )
       .then((d) => {
         if (cancelled) return;
         setData(d);

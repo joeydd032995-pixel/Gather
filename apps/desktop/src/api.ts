@@ -572,12 +572,14 @@ export interface GraphOverview {
   truncated: boolean;
 }
 
+/** `maxProjects` 0 leaves projects out. */
 export async function getGraphOverview(
   maxEntities = 150,
   maxFiles = 100,
+  maxProjects = 150,
 ): Promise<GraphOverview> {
   const res = await fetch(
-    `${DAEMON_URL}/api/v1/graph?max_entities=${maxEntities}&max_files=${maxFiles}`,
+    `${DAEMON_URL}/api/v1/graph?max_entities=${maxEntities}&max_files=${maxFiles}&max_projects=${maxProjects}`,
     { headers: authHeaders() },
   );
   return jsonOrThrow<GraphOverview>(res);

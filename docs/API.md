@@ -229,8 +229,12 @@ Overlaps are weighted by rarity across projects, so what every project has (`REA
 `LICENSE`, your own name, common words) counts for little. A signal is `null` when either
 project has nothing for it (a folder of photos has no text), and the score is the weighted
 average of the signals that apply (files 0.3, layout 0.2, entities 0.3, content 0.2). Projects
-scoring under 0.08 are left out. The 500 most recently changed projects are compared; what they
-are made of is cached until a project changes or more is read from its files.
+scoring under 0.08 are left out. The most recently changed projects are compared, 5,000 by
+default (`GATHER_PROJECT_COMPARE_MAX`); what they are made of is cached until a project changes
+or more is read from its files. Each is kept as a few kilobytes however large: files, paths and
+entities as hashes, and past 256 files or paths (128 entities) a consistent sample of them, so
+counts for large projects are estimates (`shared.approximate`, and reasons that start "About").
+`path_examples` are the first shared paths in alphabetical order.
 
 ```json
 { "project_id": "…",
@@ -292,8 +296,8 @@ knowledge), `limit`, `offset`.
 
 The whole collection at a glance: the most connected entities, the relationships among them,
 the files they were extracted from, and your projects. Query: `max_entities` (default 150,
-max 1000), `max_files` (default 100, max 1000; `0` leaves files out), `projects` (default
-`true`; `false` leaves projects out).
+max 1000), `max_files` (default 100, max 1000; `0` leaves files out), `max_projects` (default
+150, max 1000; `0` leaves projects out; `projects=false` does the same).
 
 ```json
 { "entities": [ { "id": "…", "name": "Me", "kind": "person", "weight": 16 } ],
@@ -307,9 +311,11 @@ max 1000), `max_files` (default 100, max 1000; `0` leaves files out), `projects`
   "entity_total": 10, "truncated": false }
 ```
 
-Projects are the 60 most recently changed. `contains` links a project to those of the returned
-`files` it holds (the overview has no folders; a project's own graph does). `similar` links
-projects that are alike, up to three per project, with why. gRPC's `GetGraphOverview` returns
+Projects are the `max_projects` most recently changed. `contains` links a project to those of
+the returned `files` it holds (the overview has no folders; a project's own graph does).
+`similar` links projects that are alike, up to three per project, with why; pairs are compared
+among the projects returned, weighted by rarity across all compared projects, and remembered
+until a project changes. gRPC's `GetGraphOverview` returns
 entities and files only.
 
 An entity's `weight` is its relationships plus the units about it; entities with neither are
