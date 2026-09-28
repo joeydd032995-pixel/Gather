@@ -215,11 +215,16 @@ export async function uploadFiles(files: File[]): Promise<FilesResponse> {
   for (const file of files) {
     form.append("file", file, file.name);
   }
+  return postForm("/ingest/files", form);
+}
+
+/** POST a multipart form, retrying while the daemon is rate limiting. */
+async function postForm<T>(path: string, form: FormData): Promise<T> {
   // Uploading a batch one file at a time can outpace the daemon's rate limit;
   // a 429 means "slow down", not "this file is bad", so wait and retry.
   let res: Response;
   for (let attempt = 0; ; attempt++) {
-    res = await fetch(`${DAEMON_URL}/api/v1/ingest/files`, {
+    res = await fetch(`${DAEMON_URL}/api/v1${path}`, {
       method: "POST",
       headers: authHeaders(),
       body: form,
@@ -550,6 +555,19 @@ export interface GraphOverview {
     confidence: number;
   }[];
   mentions: { file_id: string; entity_id: string; count: number }[];
+  /** Projects (folders or .zip files uploaded whole). */
+  projects: { id: string; name: string; source: "folder" | "zip"; files: number }[];
+  /** Folders inside a project (only in a project's own graph). */
+  folders: { id: string; project_id: string; name: string; path: string }[];
+  /** A project or folder holding a folder or file (a file's id is its artifact's). */
+  contains: {
+    parent_type: "project" | "folder";
+    parent: string;
+    child_type: "folder" | "file";
+    child: string;
+  }[];
+  /** Two projects that are alike, and why. */
+  similar: { a: string; b: string; score: number; reasons: string[] }[];
   entity_total: number;
   truncated: boolean;
 }
@@ -697,4 +715,169 @@ export function agreeExplainedAway(certificateId: string, note?: string): Promis
   return postJson(`/contradictions/explained-away/${certificateId}/agree`, {
     note: note || null,
   });
+}
+
+// --- Projects: a folder or .zip kept as its tree ---------------------------
+
+export interface ProjectSummary {
+  id: string;
+  name: string;
+  source: "folder" | "zip";
+  created_at: string;
+  updated_at: string;
+  folders: number;
+  files: number;
+  ingested: number;
+  deduplicated: number;
+  /** Files kept as they are, without text read from them. */
+  stored: number;
+  skipped: number;
+  failed: number;
+  /** Folders left out whole (version control, dependencies, caches). */
+  left_out: number;
+  bytes: number;
+}
+
+export interface ProjectItem {
+  id: string;
+  parent_id: string | null;
+  item_kind: "folder" | "file";
+  name: string;
+  path: string;
+  depth: number;
+  /** A folder is "folder", or "skipped" when left out whole. */
+  status: "folder" | "ingested" | "deduplicated" | "stored" | "skipped" | "failed";
+  detail: string | null;
+  byte_size: number | null;
+  artifact_id: string | null;
+  artifact_kind: string | null;
+  /** Statements extracted from the file so far. */
+  units: number;
+}
+
+export interface ProjectDetail extends ProjectSummary {
+  items: ProjectItem[];
+}
+
+/** What happened to one file sent to a project. */
+export interface ProjectFileResult {
+  path: string;
+  /** "left_out" is a folder left out whole; `path` is the folder. */
+  status: "ingested" | "deduplicated" | "stored" | "skipped" | "failed" | "left_out" | "ignored";
+  kind: string | null;
+  artifact_id: string | null;
+  detail: string | null;
+  segments: number;
+}
+
+export function createProject(name: string): Promise<ProjectSummary> {
+  return postJson("/projects", { name });
+}
+
+export interface ProjectFilesResponse {
+  project_id: string;
+  job_id: string;
+  /** One result per file; a .zip unpacked in place gives one per file in it. */
+  files: ProjectFileResult[];
+  /** Why unpacking a .zip stopped early, if it did. */
+  stopped: string | null;
+}
+
+/** Send one file to a project at `path` (relative to the project folder). */
+export function uploadProjectFile(
+  projectId: string,
+  path: string,
+  file: File,
+): Promise<ProjectFilesResponse> {
+  const form = new FormData();
+  form.append("path", path);
+  form.append("file", file, file.name);
+  return postForm(`/projects/${projectId}/files`, form);
+}
+
+/** Tell a project what a folder held that wasn't sent: folders left out
+ *  whole (`.git`, `node_modules`, …), secret-looking files withheld unread,
+ *  and empty folders. The tree then shows all of it. */
+export async function describeProject(
+  projectId: string,
+  held: { leftOut: string[]; withheld: string[]; folders: string[] },
+): Promise<ProjectFileResult[]> {
+  const form = new FormData();
+  for (const folder of held.leftOut) form.append("left_out", folder);
+  for (const path of held.withheld) form.append("withheld", path);
+  for (const folder of held.folders) form.append("folder", folder);
+  const body = await postForm<ProjectFilesResponse>(`/projects/${projectId}/files`, form);
+  return body.files;
+}
+
+export interface ImportReport {
+  project: ProjectSummary;
+  files: ProjectFileResult[];
+  stopped: string | null;
+}
+
+/** Unpack a .zip into a new project, folders and all. */
+export function importProjectZip(file: File, name?: string): Promise<ImportReport> {
+  const form = new FormData();
+  if (name) form.append("name", name);
+  form.append("file", file, file.name);
+  return postForm("/projects/import", form);
+}
+
+export async function listProjects(): Promise<ProjectSummary[]> {
+  const body = await getJson<{ items: ProjectSummary[] }>("/projects");
+  return body.items;
+}
+
+export function getProject(id: string): Promise<ProjectDetail> {
+  return getJson(`/projects/${id}`);
+}
+
+/** One project as a graph: its folders and files, what they mention, and
+ *  the projects most like it. Same shape as the whole-collection graph. */
+export function getProjectGraph(
+  id: string,
+  maxFiles = 250,
+  maxEntities = 80,
+): Promise<GraphOverview> {
+  return getJson(`/projects/${id}/graph?max_files=${maxFiles}&max_entities=${maxEntities}`);
+}
+
+export interface SimilarProject {
+  project_id: string;
+  name: string;
+  /** 0 to 1. */
+  score: number;
+  /** Each signal's score, or null when it doesn't apply to both projects. */
+  signals: {
+    files: number | null;
+    layout: number | null;
+    entities: number | null;
+    content: number | null;
+  };
+  shared: {
+    files: number;
+    paths: number;
+    path_examples: string[];
+    entities: { id: string; name: string }[];
+    terms: string[];
+    content_by: "meaning" | "words" | null;
+  };
+  /** Plain-language reasons, strongest first. */
+  reasons: string[];
+}
+
+/** The projects most like `id`, best first. */
+export async function getSimilarProjects(id: string, limit = 10): Promise<SimilarProject[]> {
+  const body = await getJson<{ items: SimilarProject[] }>(`/projects/${id}/similar?limit=${limit}`);
+  return body.items;
+}
+
+/** Remove a project's tree; its files stay in Gather. */
+export async function deleteProject(id: string): Promise<void> {
+  const res = await fetch(`${DAEMON_URL}/api/v1/projects/${id}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) await jsonOrThrow(res);
 }

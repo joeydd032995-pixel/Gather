@@ -89,8 +89,23 @@ Re-ingesting the same content is deduplicated by content hash.
 
 ### `POST /ingest/files`
 
-`multipart/form-data`, any number of file parts. PDFs, Markdown/text and images are
-classified by extension and MIME type. Text and OCR extraction happen asynchronously in the
+`multipart/form-data`, any number of file parts. Files are classified by extension and MIME
+type:
+
+| Kind | Files | Read |
+|---|---|---|
+| `document_pdf` | `.pdf` | text layer, then OCR, in the extraction worker |
+| `document_markdown` | `.md`, `.markdown` | as is |
+| `document_docx` | `.docx` | paragraphs and table cells of the Word document |
+| `document_spreadsheet` | `.xlsx`, `.xlsm`, `.xls`, `.ods` | every sheet, one row per line, cells separated by tabs |
+| `document_text` | `.txt`, `.csv`, `.tsv`, `.json`, `.yaml`, `.xml`, `.html`, `.log`, source code (`.rs`, `.py`, `.ts`, `.go`, `.java`, `.sql`, `.sh`, …) | as text; HTML without its tags, scripts and styles |
+| `image` | `.jpg`, `.png`, `.webp`, `.heic`, … | EXIF, then OCR, in the extraction worker |
+| `file_other` | anything, when the part is named `file_other` | nothing: the file is kept as it is |
+
+Word documents and spreadsheets are turned into text when they arrive; a damaged one, or one
+that unpacks to far more than its size (over 256 MB, or 200× its compressed size), is refused
+with `400`. A file whose extension says text but whose content is binary is refused with `400`,
+and a file Gather can't read at all with `415`. Statements are pulled out asynchronously by the
 extraction worker.
 
 ```bash
@@ -98,6 +113,143 @@ curl -X POST $API/ingest/files -F file=@report.pdf -F file=@photo.jpg
 ```
 
 Per-request size is capped by `GATHER_MAX_UPLOAD_MB`; larger requests get `413 payload_too_large`, refused from their declared `Content-Length` before the body is read. For large batches, send one file per request (as the desktop app does): memory then stays at one file, and one bad file doesn't fail the rest.
+
+---
+
+## Projects
+
+A project is a folder — of documents, a code repository, `.zip` files, anything — uploaded as
+a whole and kept as the tree it came in: the project, the folders in it, and the files in
+those. Every file counts. Each is stored exactly as a single upload would be (so it is
+deduplicated by content, read, and linked into the graph like any other file); the project
+records where each file sat and what happened to it.
+
+- A file of a kind Gather reads is read. One whose kind Gather doesn't know by name is read as
+  text when its content is text (a `Makefile`, `.gitignore`, a config file by another name).
+- Anything else — a program, a design file, audio, a `.7z` — is **kept as it is**
+  (`file_other`, status `stored`), and so is a known kind whose text couldn't be read (a
+  damaged Word file), with why in `detail`.
+- A `.zip` in a project is **unpacked where it sits**, as a folder of the same name
+  (`archive/drafts.zip/…`); one holding a single folder is unpacked without repeating it. Zips
+  inside zips are unpacked too, up to three deep; a fourth is kept as it is. One that can't be
+  unpacked is kept as it is.
+
+| Status | Meaning |
+|---|---|
+| `ingested` | Read into Gather |
+| `deduplicated` | The same content was already in Gather; the project links to that file |
+| `stored` | Kept as it is, without text read from it |
+| `skipped` | Not kept, with the reason in `detail`: an empty or oversized file, a clash with the tree, or a file that looks like it holds keys or passwords (`.env`, `id_rsa`, `.pem`, `.key`, …), which is never opened |
+| `failed` | It couldn't be stored; sending it again retries |
+
+Folders that aren't the project's own work are **left out whole** and appear in the tree as a
+folder with status `skipped` and the reason in `detail`: version-control history (`.git`,
+`.hg`, `.svn`), installed dependencies (`node_modules`, `bower_components`, `.venv`, `venv`)
+and tool caches (`__pycache__`, `.mypy_cache`, `.pytest_cache`, `.ruff_cache`, `.tox`,
+`.gradle`, `.next`, `.nuxt`, `.terraform`). Only operating-system clutter — `.DS_Store`,
+`Thumbs.db`, `desktop.ini`, `._*` files and `__MACOSX` folders — is dropped without a record.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/projects` | `{ "items": [ProjectSummary] }`, most recently changed first |
+| POST | `/projects` | `{ "name": "Atlas" }` → `201` with the new, empty project |
+| POST | `/projects/{id}/files` | Add files; see below → `202` |
+| POST | `/projects/import` | Unpack a `.zip` into a new project; see below → `201` |
+| GET | `/projects/{id}` | The project and every folder and file in it, ordered by path |
+| DELETE | `/projects/{id}` | Removes the project and its tree → `204`. Its files stay in Gather |
+
+A `ProjectSummary` is `{ id, name, source ("folder" or "zip"), created_at, updated_at, files,
+folders, ingested, deduplicated, stored, skipped, failed, left_out, bytes }`, where `skipped`
+counts files and `left_out` folders left out whole. Each item of `GET /projects/{id}`
+is `{ id, parent_id, item_kind ("folder" or "file"), name, path, depth, status, detail,
+artifact_id, artifact_kind, units, byte_size }`, where `units` counts the statements found in
+the file so far.
+
+### `POST /projects/{id}/files`
+
+`multipart/form-data`. Each file part may be preceded by a text part named `path` giving the
+file's path inside the project; without one the part's file name is used. Folders are created
+as needed. Text parts describe what the sender didn't send:
+
+- `left_out` — a folder left out whole instead of sending its files
+  (`-F left_out=web/node_modules`); only the folder names above are taken.
+- `withheld` — a file not sent because it looks like it holds keys or passwords
+  (`-F withheld=.env`), so its bytes never leave the sender; it is listed as skipped. Only paths
+  Gather wouldn't read are taken.
+- `folder` — an empty folder, so the tree keeps it.
+
+Anything else in those parts comes back `skipped` and isn't recorded. Requests adding to the
+same project are handled one at a time. Sending a path again replaces that file's record, so a partly failed upload can be
+resumed. Paths are relative and `/`-separated; absolute paths, drive letters, `..` and control
+characters are skipped per file, as is a file where the project already has a folder, or one
+inside what the project already has as a file; such a file isn't stored.
+
+```bash
+curl -X POST $API/projects -H 'content-type: application/json' -d '{"name":"Atlas"}'
+curl -X POST $API/projects/$ID/files \
+  -F path=docs/plan.md -F file=@Atlas/docs/plan.md \
+  -F path=data/budget.xlsx -F file=@Atlas/data/budget.xlsx
+```
+
+The response is `{ project_id, job_id, files: [{ path, status, kind, artifact_id, detail,
+segments }], stopped }`: one result per file, so a `.zip` gives one for each file in it, and
+`left_out` for each folder left out (its `path` is the folder). `stopped` says why unpacking
+stopped early, or is `null`. As with `/ingest/files`, one file per request keeps memory at one file; the
+desktop app sends a picked or dropped folder that way.
+
+### `POST /projects/import`
+
+`multipart/form-data` with one `.zip` part and, optionally, a text part `name`. Without a name
+the project is named after the folder the archive holds, or else the archive. Entries are
+unpacked one at a time, and zips inside it are unpacked in place as above. Limits, shared by
+every zip in the request however deeply nested: `GATHER_PROJECT_MAX_FILES` files,
+`GATHER_MAX_UPLOAD_MB` per file and `GATHER_PROJECT_MAX_MB` in all; an entry that would unpack
+to more than 200× its compressed size is skipped. Links inside the archive are skipped.
+
+```bash
+curl -X POST $API/projects/import -F file=@Atlas.zip
+```
+
+The response is `{ project: ProjectSummary, files: [...], stopped }`, where `stopped` says why
+unpacking ended early (a limit reached), or is `null`.
+
+### `GET /projects/{id}/similar`
+
+The projects most like this one, best first. Query: `limit` (default 10, max 50). Two projects
+are compared on four signals, each from 0 to 1:
+
+| Signal | What it compares |
+|---|---|
+| `files` | Identical files (the same content) in both |
+| `layout` | Files at the same paths (`src/main.rs`, `docs/plan.md`), which matches two versions of one repository even when every file changed |
+| `entities` | The same people, organisations, tools and places mentioned |
+| `content` | What the text is about: the average embedding when embeddings are on, otherwise the words used most |
+
+Overlaps are weighted by rarity across projects, so what every project has (`README.md`,
+`LICENSE`, your own name, common words) counts for little. A signal is `null` when either
+project has nothing for it (a folder of photos has no text), and the score is the weighted
+average of the signals that apply (files 0.3, layout 0.2, entities 0.3, content 0.2). Projects
+scoring under 0.08 are left out. The 500 most recently changed projects are compared; what they
+are made of is cached until a project changes or more is read from its files.
+
+```json
+{ "project_id": "…",
+  "items": [ { "project_id": "…", "name": "Orbit tracker v2", "score": 0.588,
+    "signals": { "files": 0.1, "layout": 0.62, "entities": 0.5, "content": 0.71 },
+    "shared": { "files": 1, "paths": 3, "path_examples": ["cargo.toml", "docs/spec.md"],
+                "entities": [ { "id": "…", "name": "Dana Reyes" } ],
+                "terms": ["orbit", "tracker"], "content_by": "words" },
+    "reasons": [ "Both mention Dana Reyes", "3 files at the same place (cargo.toml, docs/spec.md and src/main.rs)", "1 identical file in common" ] } ] }
+```
+
+### `GET /projects/{id}/graph`
+
+One project as a graph, in the same shape as [`GET /graph`](#get-graph): the project, the
+folders and files in it (`contains` links), the entities its files mention and the
+relationships among them, and up to five similar projects (`similar` links). Query:
+`max_files` (default 250, max 2000; files with the most read from them come first, with the
+folders above them) and `max_entities` (default 80, max 1000). A file stored at two paths is one
+node held by both folders. `truncated` is true when files or entities were left out.
 
 ---
 
@@ -139,16 +291,26 @@ knowledge), `limit`, `offset`.
 ### `GET /graph`
 
 The whole collection at a glance: the most connected entities, the relationships among them,
-and the files they were extracted from. Query: `max_entities` (default 150, max 1000),
-`max_files` (default 100, max 1000; `0` leaves files out).
+the files they were extracted from, and your projects. Query: `max_entities` (default 150,
+max 1000), `max_files` (default 100, max 1000; `0` leaves files out), `projects` (default
+`true`; `false` leaves projects out).
 
 ```json
 { "entities": [ { "id": "…", "name": "Me", "kind": "person", "weight": 16 } ],
   "files": [ { "id": "…", "name": "notes.md", "kind": "document_markdown", "mentions": 4 } ],
   "relations": [ { "source": "…", "target": "…", "relation_type": "works_at", "count": 1, "confidence": 0.6 } ],
   "mentions": [ { "file_id": "…", "entity_id": "…", "count": 2 } ],
+  "projects": [ { "id": "…", "name": "Atlas", "source": "folder", "files": 12 } ],
+  "folders": [],
+  "contains": [ { "parent_type": "project", "parent": "…", "child_type": "file", "child": "…" } ],
+  "similar": [ { "a": "…", "b": "…", "score": 0.59, "reasons": ["3 files at the same place (…)"] } ],
   "entity_total": 10, "truncated": false }
 ```
+
+Projects are the 60 most recently changed. `contains` links a project to those of the returned
+`files` it holds (the overview has no folders; a project's own graph does). `similar` links
+projects that are alike, up to three per project, with why. gRPC's `GetGraphOverview` returns
+entities and files only.
 
 An entity's `weight` is its relationships plus the units about it; entities with neither are
 left out. `truncated` is true when more connected entities exist than were returned.
@@ -320,8 +482,8 @@ bundle. New review-tray reasons: `generic-identifier`, `withdraw-merge` (both di
 | POST | `/import` | Import a bundle. Idempotent: existing rows are kept |
 
 The bundle includes artifacts, extracted units, the graph, contradictions, merge history, the
-feedback and review state, clusters, inference certificates, declared source derivations and
-"not a duplicate" decisions, so a restore reproduces the whole brain. It is used
+feedback and review state, clusters, inference certificates, declared source derivations,
+"not a duplicate" decisions and projects, so a restore reproduces the whole brain. It is used
 by the backup scripts and restore drills (see [BACKUP-RUNBOOK.md](BACKUP-RUNBOOK.md)).
 
 ---

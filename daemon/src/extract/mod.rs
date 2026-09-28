@@ -9,6 +9,7 @@
 //! (stale 'processing' rows are reset at loop start), and unit chunks are
 //! stamped atomically with their units in one transaction (persist.rs).
 
+pub mod formats;
 pub mod image;
 pub mod ollama;
 pub mod pdf;

@@ -59,7 +59,11 @@ function GraphPreview({ data, onOpen }: { data: GraphOverview; onOpen: () => voi
     const canvas = canvasRef.current;
     const wrap = wrapRef.current;
     if (!canvas || !wrap) return;
-    const graph = buildGraph(data, { showFiles: false, hiddenKinds: new Set() });
+    const graph = buildGraph(data, {
+      showFiles: false,
+      showProjects: false,
+      hiddenKinds: new Set(),
+    });
     // Lay it out once, synchronously: this is a picture, not the explorer.
     forceSimulation<Node, Link>(graph.nodes)
       .force(

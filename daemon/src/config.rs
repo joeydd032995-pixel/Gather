@@ -43,6 +43,10 @@ pub struct Config {
     pub auth_mode: String,
     /// Upload cap per request body, in megabytes.
     pub max_upload_mb: usize,
+    /// Most files one project upload may hold (GATHER_PROJECT_MAX_FILES).
+    pub project_max_files: usize,
+    /// Most a project .zip may expand to, in megabytes (GATHER_PROJECT_MAX_MB).
+    pub project_max_mb: usize,
     /// Requests/sec allowed across /api/v1 and the gRPC services combined
     /// (a shared global bucket). 0 disables rate limiting. Bounds a runaway
     /// local client; the listener is loopback-only regardless.
@@ -271,6 +275,16 @@ impl Config {
             // Storing a file briefly costs several times its size in the
             // daemon and in PostgreSQL, so the low profile caps files lower.
             .unwrap_or(if low { 32 } else { 256 });
+        let project_max_files = set("GATHER_PROJECT_MAX_FILES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n: &usize| n > 0)
+            .unwrap_or(20_000);
+        let project_max_mb = set("GATHER_PROJECT_MAX_MB")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n: &usize| n > 0)
+            .unwrap_or(if low { 1024 } else { 4096 });
 
         // 0 is a valid value (rate limiting disabled); only a malformed value
         // is an error rather than a silent fall-back to the default.
@@ -367,6 +381,8 @@ impl Config {
             api_token,
             auth_mode,
             max_upload_mb,
+            project_max_files,
+            project_max_mb,
             rate_limit_rps,
             log_json,
             allow_non_loopback,
@@ -522,6 +538,8 @@ impl Config {
             api_token: None,
             auth_mode: "env".to_string(),
             max_upload_mb: 16,
+            project_max_files: 20_000,
+            project_max_mb: 256,
             rate_limit_rps: 0,
             log_json: false,
             allow_non_loopback: false,

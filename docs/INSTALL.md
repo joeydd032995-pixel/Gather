@@ -102,8 +102,12 @@ The first start takes a little longer. Gather creates your private database (you
 
 ## Using Gather
 
-1. **Upload** files on the Upload tab: PDFs, Markdown, text files, photos or screenshots.
-   Gather stores each one and reads it in the background.
+1. **Upload** files on the Upload tab: PDFs, Word documents, spreadsheets, Markdown, text,
+   CSV, JSON, HTML or code files, photos or screenshots. Gather stores each one and reads it
+   in the background. To add a whole project, use **Projects → Add folder** (or
+   **Import .zip**), or drop a folder anywhere in the window: Gather keeps every file in it,
+   reads what it can, unpacks the .zip files inside, and keeps its folders. Folders that are
+   tooling rather than your work (`.git`, `node_modules`) are left out and shown with why.
 2. **Library** lists everything you've added. Pick a file to see what Gather found in it
    (facts, decisions, preferences, events) and to read its text. The search box searches
    all of it.

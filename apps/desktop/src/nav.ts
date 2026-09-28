@@ -1,5 +1,6 @@
 import {
   Combine,
+  FolderTree,
   GitCompareArrows,
   House,
   Images,
@@ -15,6 +16,7 @@ import {
 export type Tab =
   | "home"
   | "library"
+  | "projects"
   | "graph"
   | "review"
   | "clusters"
@@ -47,6 +49,12 @@ export const NAV: NavGroup[] = [
     label: "Explore",
     items: [
       { id: "library", label: "Library", icon: Library, hint: "Browse and search everything" },
+      {
+        id: "projects",
+        label: "Projects",
+        icon: FolderTree,
+        hint: "Folders you added, as they were laid out",
+      },
       {
         id: "graph",
         label: "Graph",

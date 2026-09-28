@@ -40,6 +40,8 @@ These are read by `docker-compose.yml`, not by the daemon itself.
 | `GATHER_ALLOW_NON_LOOPBACK` | `false` | Explicit opt-out of the loopback-only policy (for both listeners and the Ollama URL). Containers set this; desktops should not |
 | `GATHER_DB_MAX_CONNECTIONS` | `8` (low: `4`) | Shared Postgres pool size. **Validated**, ≥ 1 |
 | `GATHER_MAX_UPLOAD_MB` | `256` (low: `32`) | Maximum request body size, and the per-file limit for gRPC `IngestFile` streams (`RESOURCE_EXHAUSTED`). A request that declares a larger size is refused with `413` before any of it is read. The desktop app checks a picked file's size against the same limit before reading it. Storing a file briefly costs the daemon about 3.5× its size (the upload, plus the database driver's encoded copy of it), so keep this low on small-memory machines |
+| `GATHER_PROJECT_MAX_FILES` | `20000` | Most files unpacked from `.zip` files in one request (a project `.zip` and the zips inside it together); the rest are reported as not read (`stopped`) |
+| `GATHER_PROJECT_MAX_MB` | `4096` (low: `1024`) | Most data unpacked from `.zip` files in one request, in MB. Each file is also held to `GATHER_MAX_UPLOAD_MB`, and one that unpacks to over 200× its compressed size is skipped |
 | `GATHER_RATE_LIMIT_RPS` | `50` | Global requests/second shared by REST and gRPC; `0` disables. **Validated** |
 | `RUST_LOG` | `info,sqlx=warn,tower_http=info` | Log filter (tracing `EnvFilter` syntax) |
 | `GATHER_LOG_JSON` | `false` | Emit JSON logs |

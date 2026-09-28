@@ -408,6 +408,8 @@ impl pb::query_service_server::QueryService for QueryApi {
             &self.state.pool,
             clamp_limit(req.max_entities, 150, 1000),
             max_files,
+            // Projects are REST-only for now; skip the work of finding them.
+            false,
         )
         .await
         .map_err(status_from)?;

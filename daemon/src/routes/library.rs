@@ -34,6 +34,8 @@ pub struct OverviewParams {
     pub max_entities: Option<i64>,
     /// 0 leaves files out.
     pub max_files: Option<i64>,
+    /// false leaves projects out (default true).
+    pub projects: Option<bool>,
 }
 
 /// GET /api/v1/graph
@@ -44,6 +46,12 @@ pub async fn graph_overview(
     let max_entities = params.max_entities.unwrap_or(150).clamp(1, 1000);
     let max_files = params.max_files.unwrap_or(100).clamp(0, 1000);
     Ok(Json(
-        library::graph_overview(&state.pool, max_entities, max_files).await?,
+        library::graph_overview(
+            &state.pool,
+            max_entities,
+            max_files,
+            params.projects.unwrap_or(true),
+        )
+        .await?,
     ))
 }
