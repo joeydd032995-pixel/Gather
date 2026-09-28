@@ -3,6 +3,7 @@
 //! file's bytes for upload, the supervisor that runs the bundled database and
 //! daemon (`runtime`), and the opt-in update check (`updates`).
 
+mod folders;
 mod memory;
 mod runtime;
 mod updates;
@@ -49,6 +50,13 @@ fn read_upload_file(path: PathBuf) -> Result<tauri::ipc::Response, String> {
         return Err(too_large());
     }
     Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// The files of a project folder the user picked with the native dialog,
+/// with their paths inside it (no bytes: those are read per file).
+#[tauri::command]
+fn list_project_folder(path: PathBuf) -> Result<folders::FolderListing, String> {
+    folders::list(&path)
 }
 
 /// The daemon's API token. In GATHER_AUTH_MODE=env (chosen by the user,
@@ -173,6 +181,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             read_upload_file,
+            list_project_folder,
             get_api_token,
             runtime_status,
             memory_profile,

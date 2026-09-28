@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use crate::adapters::{self, NormalizedConversation};
 use crate::error::ApiError;
+use crate::extract::formats;
 use crate::extract::segment::{Segment, Segments};
 use crate::AppState;
 
@@ -540,6 +541,8 @@ const EXPLICIT_KINDS: &[&str] = &[
     "document_pdf",
     "document_markdown",
     "document_text",
+    "document_docx",
+    "document_spreadsheet",
     "image_photo",
     "image_screenshot",
 ];
@@ -562,10 +565,16 @@ fn classify(
                 .to_string()
         });
     let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
+    if ext == "md" || ext == "markdown" {
+        return Ok("document_markdown".to_string());
+    }
+    // Names first: a `.ts` file is TypeScript, not the video MIME type.
+    if let Some(kind) = formats::kind_for(filename) {
+        return Ok(kind.to_string());
+    }
     let kind = match guessed.as_str() {
         "application/pdf" => "document_pdf",
         "text/markdown" => "document_markdown",
-        "text/plain" if ext == "md" || ext == "markdown" => "document_markdown",
         "text/plain" => "document_text",
         // Heuristic: PNGs are overwhelmingly screenshots at personal scale,
         // camera formats are photos. Callers can override via the part name.
@@ -573,7 +582,8 @@ fn classify(
         "image/jpeg" | "image/heic" | "image/heif" | "image/webp" | "image/tiff" => "image_photo",
         other => {
             return Err(ApiError::UnsupportedMedia(format!(
-                "{other} (supported: pdf, markdown, plain text, png, jpeg, heic, webp, tiff)"
+                "{other} (supported: pdf, markdown, Word, spreadsheets, HTML, plain text, code, \
+                 CSV/JSON/YAML, png, jpeg, heic, webp, tiff)"
             )))
         }
     };
@@ -590,7 +600,7 @@ fn too_large(max_bytes: usize) -> ApiError {
 /// Read one multipart part into memory, at most `max_bytes`. With a size
 /// hint (the first part of a request), the buffer is allocated once instead
 /// of through a series of growing reallocations.
-async fn read_part(
+pub(crate) async fn read_part(
     mut field: Field<'_>,
     part_name: &str,
     max_bytes: usize,
@@ -654,23 +664,26 @@ pub(crate) async fn ingest_one_file(
     let mut segments = 0usize;
     if !stored.deduplicated {
         match kind.as_str() {
-            // Markdown / plain text: extraction is pure UTF-8 decoding, so it
+            // Text formats (Markdown, plain text, code, HTML, Word,
+            // spreadsheets): extraction is quick and in memory, so it
             // completes synchronously at ingest time, including segmentation.
-            "document_markdown" | "document_text" => {
-                // Borrowed when the file is valid UTF-8 (the usual case), so
-                // the text isn't a second copy of the upload.
-                let text = String::from_utf8_lossy(bytes);
+            "document_markdown" | "document_text" | "document_docx" | "document_spreadsheet" => {
+                let format = formats::format_for(&kind, filename);
+                // Borrowed for plain UTF-8 (the usual case), so the text
+                // isn't a second copy of the upload.
+                let text = formats::to_text(format, bytes).map_err(ApiError::BadRequest)?;
                 let (document_id,): (Uuid,) = sqlx::query_as(
                     r#"
                     INSERT INTO documents
                         (artifact_id, extracted_text, extraction_tool,
                          extraction_status, extracted_at)
-                    VALUES ($1, $2, 'utf8-passthrough', 'completed', now())
+                    VALUES ($1, $2, $3, 'completed', now())
                     RETURNING id
                     "#,
                 )
                 .bind(stored.id)
                 .bind(text.as_ref())
+                .bind(format.tool())
                 .fetch_one(&mut *tx)
                 .await?;
 
@@ -707,7 +720,7 @@ pub(crate) async fn ingest_one_file(
                     .await?;
                     segments += seqs.len();
                 }
-                metrics::counter!("gather_extraction_segments_total", "tool" => "utf8-passthrough")
+                metrics::counter!("gather_extraction_segments_total", "tool" => format.tool())
                     .increment(segments as u64);
             }
             // PDFs and images: the stored artifact is complete; text/OCR

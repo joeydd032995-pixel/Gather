@@ -54,6 +54,10 @@ prost-types = "0.14"
 tokio-stream = { version = "0.1", features = ["net"] }
 governor = "0.10.4"
 jpeg-decoder = { version = "0.3", default-features = false }
+# Office formats for project uploads: .xlsx/.ods (calamine), .docx and .zip (zip + quick-xml).
+calamine = "0.36"
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+quick-xml = "0.41"
 
 [build-dependencies]
 tonic-prost-build = "0.14"

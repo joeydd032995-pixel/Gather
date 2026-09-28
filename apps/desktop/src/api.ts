@@ -215,11 +215,16 @@ export async function uploadFiles(files: File[]): Promise<FilesResponse> {
   for (const file of files) {
     form.append("file", file, file.name);
   }
+  return postForm("/ingest/files", form);
+}
+
+/** POST a multipart form, retrying while the daemon is rate limiting. */
+async function postForm<T>(path: string, form: FormData): Promise<T> {
   // Uploading a batch one file at a time can outpace the daemon's rate limit;
   // a 429 means "slow down", not "this file is bad", so wait and retry.
   let res: Response;
   for (let attempt = 0; ; attempt++) {
-    res = await fetch(`${DAEMON_URL}/api/v1/ingest/files`, {
+    res = await fetch(`${DAEMON_URL}/api/v1${path}`, {
       method: "POST",
       headers: authHeaders(),
       body: form,
@@ -697,4 +702,100 @@ export function agreeExplainedAway(certificateId: string, note?: string): Promis
   return postJson(`/contradictions/explained-away/${certificateId}/agree`, {
     note: note || null,
   });
+}
+
+// --- Projects: a folder or .zip kept as its tree ---------------------------
+
+export interface ProjectSummary {
+  id: string;
+  name: string;
+  source: "folder" | "zip";
+  created_at: string;
+  updated_at: string;
+  folders: number;
+  files: number;
+  ingested: number;
+  deduplicated: number;
+  skipped: number;
+  failed: number;
+  bytes: number;
+}
+
+export interface ProjectItem {
+  id: string;
+  parent_id: string | null;
+  item_kind: "folder" | "file";
+  name: string;
+  path: string;
+  depth: number;
+  status: "folder" | "ingested" | "deduplicated" | "skipped" | "failed";
+  detail: string | null;
+  byte_size: number | null;
+  artifact_id: string | null;
+  artifact_kind: string | null;
+  /** Statements extracted from the file so far. */
+  units: number;
+}
+
+export interface ProjectDetail extends ProjectSummary {
+  items: ProjectItem[];
+}
+
+/** What happened to one file sent to a project. */
+export interface ProjectFileResult {
+  path: string;
+  status: "ingested" | "deduplicated" | "skipped" | "failed" | "ignored";
+  kind: string | null;
+  artifact_id: string | null;
+  detail: string | null;
+  segments: number;
+}
+
+export function createProject(name: string): Promise<ProjectSummary> {
+  return postJson("/projects", { name });
+}
+
+/** Send one file to a project at `path` (relative to the project folder). */
+export async function uploadProjectFile(
+  projectId: string,
+  path: string,
+  file: File,
+): Promise<ProjectFileResult> {
+  const form = new FormData();
+  form.append("path", path);
+  form.append("file", file, file.name);
+  const body = await postForm<{ files: ProjectFileResult[] }>(`/projects/${projectId}/files`, form);
+  return body.files[0];
+}
+
+export interface ImportReport {
+  project: ProjectSummary;
+  files: ProjectFileResult[];
+  stopped: string | null;
+}
+
+/** Unpack a .zip into a new project, folders and all. */
+export function importProjectZip(file: File, name?: string): Promise<ImportReport> {
+  const form = new FormData();
+  if (name) form.append("name", name);
+  form.append("file", file, file.name);
+  return postForm("/projects/import", form);
+}
+
+export async function listProjects(): Promise<ProjectSummary[]> {
+  const body = await getJson<{ items: ProjectSummary[] }>("/projects");
+  return body.items;
+}
+
+export function getProject(id: string): Promise<ProjectDetail> {
+  return getJson(`/projects/${id}`);
+}
+
+/** Remove a project's tree; its files stay in Gather. */
+export async function deleteProject(id: string): Promise<void> {
+  const res = await fetch(`${DAEMON_URL}/api/v1/projects/${id}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) await jsonOrThrow(res);
 }

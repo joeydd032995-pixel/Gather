@@ -142,6 +142,14 @@ const TABLES: &[(&str, &str)] = &[
         "semantic_user_decisions",
         "id, kind, a_id, b_id, actor, note, created_at, revoked_at",
     ),
+    // Projects: after artifacts (project_items.artifact_id). parent_id is
+    // deferrable, so items restore in any order.
+    ("projects", "id, name, source, created_at, updated_at"),
+    (
+        "project_items",
+        "id, project_id, parent_id, item_kind, name, path, depth, artifact_id, status, detail, \
+         byte_size, created_at",
+    ),
 ];
 
 // ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ pub mod health;
 pub mod ingest;
 pub mod library;
 pub mod photos;
+pub mod projects;
 pub mod query;
 pub mod safety;
 pub mod tuning;
@@ -38,6 +39,17 @@ pub fn build_router(state: AppState) -> Router {
         .route("/ingest/chat-export", post(ingest::ingest_chat_export))
         .route("/ingest/agent-log", post(ingest::ingest_agent_log))
         .route("/ingest/files", post(ingest::ingest_files))
+        // projects: a folder or .zip kept as its tree
+        .route(
+            "/projects",
+            get(projects::list_projects).post(projects::create_project),
+        )
+        .route("/projects/import", post(projects::import_project))
+        .route(
+            "/projects/{id}",
+            get(projects::get_project).delete(projects::delete_project),
+        )
+        .route("/projects/{id}/files", post(projects::add_files))
         // query
         .route("/artifacts", get(query::list_artifacts))
         .route(

@@ -11,6 +11,7 @@ pub mod extract;
 pub mod grpc;
 pub mod library;
 pub mod photo;
+pub mod projects;
 pub mod routes;
 pub mod safety;
 pub mod scan;

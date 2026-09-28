@@ -1828,3 +1828,133 @@
     transform: translateY(24px);
   }
 }
+
+/* ---------------------------------------------------------------- projects */
+.tree-wrap {
+  padding: var(--s-1) 0;
+}
+.tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.tree .tree {
+  margin-left: 15px;
+  padding-left: 7px;
+  border-left: 1px solid var(--border);
+}
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--t-sm);
+  text-align: left;
+}
+button.tree-row {
+  cursor: pointer;
+  transition: background var(--d-1);
+}
+button.tree-row:hover {
+  background: var(--hover);
+}
+button.tree-row:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--focus);
+}
+.tree-chevron {
+  flex-shrink: 0;
+  width: 13px;
+  height: 13px;
+  color: var(--text-3);
+  transition: transform var(--d-2) var(--ease-out);
+}
+.tree-chevron.open {
+  transform: rotate(90deg);
+}
+.tree-file {
+  padding-left: 28px;
+}
+.tree-flat .tree-file {
+  padding-left: 8px;
+}
+.tree-icon {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+.tree-icon svg {
+  width: 15px;
+  height: 15px;
+  stroke-width: 1.8;
+}
+.tree-folder .tree-icon {
+  color: var(--accent-text);
+}
+.tree-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.tree-folder .tree-name {
+  font-weight: 600;
+}
+.tree-kind {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: var(--r-full);
+  background: var(--active);
+  color: var(--text-3);
+  font-size: var(--t-2xs);
+  line-height: 18px;
+}
+.tree-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: var(--t-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tree-status svg {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+}
+.tree-file.skipped .tree-name,
+.tree-file.failed .tree-name {
+  color: var(--text-3);
+  font-weight: 400;
+}
+.tree-go {
+  flex-shrink: 0;
+  width: 13px;
+  height: 13px;
+  color: var(--text-3);
+  opacity: 0;
+  transition: opacity var(--d-1);
+}
+button.tree-row:hover .tree-go,
+button.tree-row:focus-visible .tree-go {
+  opacity: 1;
+}
+.empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--s-2);
+}

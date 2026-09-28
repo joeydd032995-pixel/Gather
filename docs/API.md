@@ -89,8 +89,22 @@ Re-ingesting the same content is deduplicated by content hash.
 
 ### `POST /ingest/files`
 
-`multipart/form-data`, any number of file parts. PDFs, Markdown/text and images are
-classified by extension and MIME type. Text and OCR extraction happen asynchronously in the
+`multipart/form-data`, any number of file parts. Files are classified by extension and MIME
+type:
+
+| Kind | Files | Read |
+|---|---|---|
+| `document_pdf` | `.pdf` | text layer, then OCR, in the extraction worker |
+| `document_markdown` | `.md`, `.markdown` | as is |
+| `document_docx` | `.docx` | paragraphs and table cells of the Word document |
+| `document_spreadsheet` | `.xlsx`, `.xlsm`, `.xls`, `.ods` | every sheet, one row per line, cells separated by tabs |
+| `document_text` | `.txt`, `.csv`, `.tsv`, `.json`, `.yaml`, `.xml`, `.html`, `.log`, source code (`.rs`, `.py`, `.ts`, `.go`, `.java`, `.sql`, `.sh`, …) | as text; HTML without its tags, scripts and styles |
+| `image` | `.jpg`, `.png`, `.webp`, `.heic`, … | EXIF, then OCR, in the extraction worker |
+
+Word documents and spreadsheets are turned into text when they arrive; a damaged one, or one
+that unpacks to far more than its size (over 256 MB, or 200× its compressed size), is refused
+with `400`. A file whose extension says text but whose content is binary is refused with `400`,
+and a file Gather can't read at all with `415`. Statements are pulled out asynchronously by the
 extraction worker.
 
 ```bash
@@ -98,6 +112,76 @@ curl -X POST $API/ingest/files -F file=@report.pdf -F file=@photo.jpg
 ```
 
 Per-request size is capped by `GATHER_MAX_UPLOAD_MB`; larger requests get `413 payload_too_large`, refused from their declared `Content-Length` before the body is read. For large batches, send one file per request (as the desktop app does): memory then stays at one file, and one bad file doesn't fail the rest.
+
+---
+
+## Projects
+
+A project is a folder uploaded as a whole and kept as the tree it came in: the project, the
+folders in it, and the files in those. Every file is stored exactly as a single upload would be
+(so it is deduplicated by content, read, and linked into the graph like any other file); the
+project records where each file sat and what happened to it.
+
+| Status | Meaning |
+|---|---|
+| `ingested` | Read into Gather |
+| `deduplicated` | The same content was already in Gather; the project links to that file |
+| `skipped` | Not read, with the reason in `detail`: a kind of file Gather can't read, an empty or oversized file, a nested archive, or a file that looks like it holds keys or passwords (`.env`, `id_rsa`, `.pem`, `.key`, …), which is never opened |
+| `failed` | It couldn't be stored; sending it again retries |
+
+Tooling and clutter — `.git`, `node_modules`, `__pycache__`, virtualenvs, `__MACOSX`,
+`.DS_Store`, `Thumbs.db` and the like — are left out without a record.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/projects` | `{ "items": [ProjectSummary] }`, most recently changed first |
+| POST | `/projects` | `{ "name": "Atlas" }` → `201` with the new, empty project |
+| POST | `/projects/{id}/files` | Add files; see below → `202` |
+| POST | `/projects/import` | Unpack a `.zip` into a new project; see below → `201` |
+| GET | `/projects/{id}` | The project and every folder and file in it, ordered by path |
+| DELETE | `/projects/{id}` | Removes the project and its tree → `204`. Its files stay in Gather |
+
+A `ProjectSummary` is `{ id, name, source ("folder" or "zip"), created_at, updated_at, files,
+folders, ingested, deduplicated, skipped, failed, bytes }`. Each item of `GET /projects/{id}`
+is `{ id, parent_id, item_kind ("folder" or "file"), name, path, depth, status, detail,
+artifact_id, artifact_kind, units, byte_size }`, where `units` counts the statements found in
+the file so far.
+
+### `POST /projects/{id}/files`
+
+`multipart/form-data`. Each file part may be preceded by a text part named `path` giving the
+file's path inside the project; without one the part's file name is used. Folders are created
+as needed. Sending a path again replaces that file's record, so a partly failed upload can be
+resumed. Paths are relative and `/`-separated; absolute paths, drive letters, `..` and control
+characters are skipped per file, as is a file where the project already has a folder, or one
+inside what the project already has as a file; such a file isn't stored.
+
+```bash
+curl -X POST $API/projects -H 'content-type: application/json' -d '{"name":"Atlas"}'
+curl -X POST $API/projects/$ID/files \
+  -F path=docs/plan.md -F file=@Atlas/docs/plan.md \
+  -F path=data/budget.xlsx -F file=@Atlas/data/budget.xlsx
+```
+
+The response is `{ project_id, job_id, files: [{ path, status, kind, artifact_id, detail,
+segments }] }`. As with `/ingest/files`, one file per request keeps memory at one file; the
+desktop app sends a picked or dropped folder that way.
+
+### `POST /projects/import`
+
+`multipart/form-data` with one `.zip` part and, optionally, a text part `name`. Without a name
+the project is named after the folder the archive holds, or else the archive. Entries are
+unpacked one at a time. Limits: `GATHER_PROJECT_MAX_FILES` files, `GATHER_MAX_UPLOAD_MB` per
+file and `GATHER_PROJECT_MAX_MB` in all; an entry that would unpack to more than 200× its
+compressed size is skipped. Links inside the archive are skipped, and archives inside it are
+recorded but not unpacked.
+
+```bash
+curl -X POST $API/projects/import -F file=@Atlas.zip
+```
+
+The response is `{ project: ProjectSummary, files: [...], stopped }`, where `stopped` says why
+unpacking ended early (a limit reached), or is `null`.
 
 ---
 
@@ -320,8 +404,8 @@ bundle. New review-tray reasons: `generic-identifier`, `withdraw-merge` (both di
 | POST | `/import` | Import a bundle. Idempotent: existing rows are kept |
 
 The bundle includes artifacts, extracted units, the graph, contradictions, merge history, the
-feedback and review state, clusters, inference certificates, declared source derivations and
-"not a duplicate" decisions, so a restore reproduces the whole brain. It is used
+feedback and review state, clusters, inference certificates, declared source derivations,
+"not a duplicate" decisions and projects, so a restore reproduces the whole brain. It is used
 by the backup scripts and restore drills (see [BACKUP-RUNBOOK.md](BACKUP-RUNBOOK.md)).
 
 ---

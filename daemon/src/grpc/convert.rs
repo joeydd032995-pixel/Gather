@@ -48,6 +48,8 @@ pub fn artifact_kind_to_pb(kind: &str) -> pb::ArtifactKind {
         "document_text" => pb::ArtifactKind::DocumentText,
         "image_photo" => pb::ArtifactKind::ImagePhoto,
         "image_screenshot" => pb::ArtifactKind::ImageScreenshot,
+        "document_docx" => pb::ArtifactKind::DocumentDocx,
+        "document_spreadsheet" => pb::ArtifactKind::DocumentSpreadsheet,
         _ => pb::ArtifactKind::Unspecified,
     }
 }
@@ -61,6 +63,8 @@ pub fn artifact_kind_from_pb(kind: pb::ArtifactKind) -> Option<&'static str> {
         pb::ArtifactKind::DocumentText => Some("document_text"),
         pb::ArtifactKind::ImagePhoto => Some("image_photo"),
         pb::ArtifactKind::ImageScreenshot => Some("image_screenshot"),
+        pb::ArtifactKind::DocumentDocx => Some("document_docx"),
+        pb::ArtifactKind::DocumentSpreadsheet => Some("document_spreadsheet"),
         pb::ArtifactKind::Unspecified => None,
     }
 }
@@ -171,6 +175,8 @@ mod tests {
             "document_text",
             "image_photo",
             "image_screenshot",
+            "document_docx",
+            "document_spreadsheet",
         ] {
             assert_eq!(artifact_kind_from_pb(artifact_kind_to_pb(kind)), Some(kind));
         }

@@ -50,7 +50,12 @@ photo out") rather than reviewing thousands of suggestions.
 - Chat exports from **ChatGPT, Claude, Gemini, Grok, Perplexity, Copilot**, plus a generic
   JSON adapter
 - Agent / session logs (JSONL)
-- Files: **PDF** (text extraction), **Markdown / text**, **images** (EXIF + Tesseract OCR)
+- Files: **PDF** (text extraction), **Word** (`.docx`), **spreadsheets** (`.xlsx`, `.xls`,
+  `.ods`), **Markdown / text**, **CSV, JSON, YAML, XML, HTML** and **source code**, **images**
+  (EXIF + Tesseract OCR)
+- **Projects**: a whole folder or `.zip` uploaded at once and kept as its tree (project →
+  folders → files), with every file it held accounted for — read, already in Gather, or
+  skipped with the reason
 - Content-hash deduplication and versioning — re-importing the same export is idempotent
 
 **Understanding**

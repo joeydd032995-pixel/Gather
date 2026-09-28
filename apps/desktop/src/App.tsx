@@ -5,6 +5,7 @@ import {
   LoaderCircle,
   Monitor,
   Moon,
+  FolderPlus,
   Plus,
   Search,
   Sun,
@@ -29,7 +30,8 @@ import ReviewTray from "./ReviewTray";
 import Settings from "./Settings";
 import Tuning from "./Tuning";
 import { Button, Callout, SectionContext } from "./ui";
-import { DropOverlay, FallbackInput, UploadTray, useUploads } from "./uploads";
+import { DropOverlay, FallbackFolderInput, FallbackInput, UploadTray, useUploads } from "./uploads";
+import Projects from "./Projects";
 
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 const MOD = isMac ? "⌘" : "Ctrl+";
@@ -91,6 +93,7 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("home");
   /** The file open in the Library; the graph and uploads set it too. */
   const [libraryFile, setLibraryFile] = useState<string | null>(null);
+  const [project, setProject] = useState<string | null>(null);
   const [updateVersion, setUpdateVersion] = useState<string | null>(null);
   const [health, setHealth] = useState<HealthState>({ reachable: false, ready: false });
   const [checkedHealth, setCheckedHealth] = useState(false);
@@ -165,10 +168,13 @@ export default function App() {
       ?.focus({ preventScroll: true });
   }, [tab]);
 
-  const { pick } = uploads;
+  const { pick, pickFolder } = uploads;
   const addFiles = useCallback(() => {
     if (health.ready) pick();
   }, [health.ready, pick]);
+  const addFolder = useCallback(() => {
+    if (health.ready) void pickFolder();
+  }, [health.ready, pickFolder]);
 
   // Global shortcuts: ⌘K palette, ⌘O add files.
   useEffect(() => {
@@ -201,6 +207,14 @@ export default function App() {
     [go],
   );
 
+  const openProject = useCallback(
+    (id: string) => {
+      setProject(id);
+      go("projects");
+    },
+    [go],
+  );
+
   const commands = useMemo<Command[]>(
     () => [
       ...NAV_ITEMS.map((item) => ({
@@ -219,6 +233,14 @@ export default function App() {
         icon: Plus,
         run: addFiles,
       },
+      {
+        id: "add-folder",
+        group: "Actions",
+        label: "Add a project folder…",
+        hint: "Keeps its folders",
+        icon: FolderPlus,
+        run: addFolder,
+      },
       ...(["light", "dark", "system"] as ThemeChoice[]).map((choice) => ({
         id: `theme-${choice}`,
         group: "Appearance",
@@ -228,7 +250,7 @@ export default function App() {
         run: () => setTheme(choice),
       })),
     ],
-    [addFiles, go, setTheme, theme],
+    [addFiles, addFolder, go, setTheme, theme],
   );
 
   if (runtime.state === "starting") return <Splash step={runtime.step} />;
@@ -366,6 +388,16 @@ export default function App() {
             {tab === "library" && (
               <Library selected={libraryFile} onSelect={setLibraryFile} onAddFiles={addFiles} />
             )}
+            {tab === "projects" && (
+              <Projects
+                selected={project}
+                onSelect={setProject}
+                onOpenFile={openFile}
+                onAddFolder={addFolder}
+                onAddZip={uploads.pickZip}
+                refreshKey={uploads.version}
+              />
+            )}
             {tab === "graph" && <Graph onOpenFile={openFile} initialFocus={graphFocus} />}
             {tab === "review" && <ReviewTray />}
             {tab === "clusters" && <Clusters />}
@@ -379,8 +411,15 @@ export default function App() {
       </main>
 
       <FallbackInput inputRef={uploads.fallbackInput} onFiles={uploads.addFiles} />
-      <DropOverlay onFiles={uploads.addFiles} enabled={health.ready} />
-      <UploadTray items={uploads.items} onOpen={openFile} onClear={uploads.clear} />
+      <FallbackInput inputRef={uploads.zipInput} onFiles={uploads.addFiles} accept=".zip" />
+      <FallbackFolderInput inputRef={uploads.folderInput} onFiles={uploads.addPickedFolder} />
+      <DropOverlay onDrop={uploads.addDropped} enabled={health.ready} />
+      <UploadTray
+        items={uploads.items}
+        onOpen={openFile}
+        onOpenProject={openProject}
+        onClear={uploads.clear}
+      />
       {paletteOpen && <Palette commands={commands} onClose={() => setPaletteOpen(false)} />}
     </div>
   );
