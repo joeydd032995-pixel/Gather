@@ -67,8 +67,6 @@ pub struct FileOutcome {
 }
 
 pub async fn create(pool: &PgPool, name: &str, source: &str) -> Result<ProjectSummary, ApiError> {
-    // Similar projects look again rather than trust a recent check.
-    super::similarity::touch();
     let name = name.trim();
     if name.is_empty() {
         return Err(ApiError::BadRequest("a project needs a name".into()));
@@ -82,6 +80,7 @@ pub async fn create(pool: &PgPool, name: &str, source: &str) -> Result<ProjectSu
             .bind(source)
             .fetch_one(pool)
             .await?;
+    super::similarity::touch();
     summary(pool, id).await
 }
 
@@ -130,11 +129,12 @@ async fn folder_chain(
 }
 
 pub async fn ensure_folder(pool: &PgPool, project: Uuid, path: &str) -> Result<Uuid, ApiError> {
-    // Similar projects look again rather than trust a recent check.
-    super::similarity::touch();
     let mut tx = pool.begin().await?;
     let id = folder_chain(&mut tx, project, path).await?;
     tx.commit().await?;
+    // Once it is visible: similar projects look again rather than trust a
+    // recent check.
+    super::similarity::touch();
     Ok(id)
 }
 
@@ -183,8 +183,6 @@ pub async fn record_left_out(
     path: &str,
     reason: &str,
 ) -> Result<(), ApiError> {
-    // Similar projects look again rather than trust a recent check.
-    super::similarity::touch();
     let mut tx = pool.begin().await?;
     let ancestors = paths::ancestors(path);
     let parent = match ancestors.last() {
@@ -213,6 +211,9 @@ pub async fn record_left_out(
         )));
     }
     tx.commit().await?;
+    // Once it is visible: similar projects look again rather than trust a
+    // recent check.
+    super::similarity::touch();
     Ok(())
 }
 
@@ -223,8 +224,6 @@ pub async fn record_file(
     path: &str,
     outcome: &FileOutcome,
 ) -> Result<Uuid, ApiError> {
-    // Similar projects look again rather than trust a recent check.
-    super::similarity::touch();
     let mut tx = pool.begin().await?;
     let ancestors = paths::ancestors(path);
     let parent = match ancestors.last() {
@@ -260,6 +259,9 @@ pub async fn record_file(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    // Once it is visible: similar projects look again rather than trust a
+    // recent check.
+    super::similarity::touch();
     Ok(id)
 }
 
@@ -353,8 +355,6 @@ pub async fn get(pool: &PgPool, id: Uuid) -> Result<ProjectDetail, ApiError> {
 
 /// Remove a project's tree. The files stay in Gather.
 pub async fn delete(pool: &PgPool, id: Uuid) -> Result<(), ApiError> {
-    // Similar projects look again rather than trust a recent check.
-    super::similarity::touch();
     let n = sqlx::query("DELETE FROM projects WHERE id = $1")
         .bind(id)
         .execute(pool)
@@ -363,5 +363,6 @@ pub async fn delete(pool: &PgPool, id: Uuid) -> Result<(), ApiError> {
     if n == 0 {
         return Err(ApiError::NotFound(format!("project {id}")));
     }
+    super::similarity::touch();
     Ok(())
 }

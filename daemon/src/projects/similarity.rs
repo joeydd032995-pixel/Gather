@@ -118,35 +118,115 @@ fn prune_names() {
     set.retain(|s| Arc::strong_count(s) > 1);
 }
 
-/// Words as numbers: every word Gather has compared gets an id, and each is
-/// stored once. The vocabulary of a personal collection stays small.
+/// Words as numbers: each word some signature uses has an id and is stored
+/// once. Ids are counted as signatures take and drop them, and a word no
+/// signature uses is forgotten and its id reused, so the vocabulary is only
+/// ever that of the projects being compared.
 #[derive(Default)]
 struct Words {
     ids: HashMap<Arc<str>, u32>,
-    words: Vec<Arc<str>>,
+    words: Vec<Option<Arc<str>>>,
+    uses: Vec<u32>,
+    free: Vec<u32>,
+}
+
+impl Words {
+    fn take(&mut self, word: &str) -> u32 {
+        let id = match self.ids.get(word) {
+            Some(id) => *id,
+            None => {
+                let arc: Arc<str> = Arc::from(word);
+                let id = match self.free.pop() {
+                    Some(id) => {
+                        self.words[id as usize] = Some(arc.clone());
+                        id
+                    }
+                    None => {
+                        self.words.push(Some(arc.clone()));
+                        self.uses.push(0);
+                        (self.words.len() - 1) as u32
+                    }
+                };
+                self.ids.insert(arc, id);
+                id
+            }
+        };
+        self.uses[id as usize] += 1;
+        id
+    }
+
+    fn drop_use(&mut self, id: u32) {
+        let uses = &mut self.uses[id as usize];
+        *uses -= 1;
+        if *uses == 0 {
+            if let Some(w) = self.words[id as usize].take() {
+                self.ids.remove(&w);
+            }
+            self.free.push(id);
+        }
+    }
 }
 
 static WORDS: LazyLock<Mutex<Words>> = LazyLock::new(Default::default);
 
-/// The id of `word`.
-pub fn word_id(word: &str) -> u32 {
-    let mut w = WORDS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(id) = w.ids.get(word) {
-        return *id;
-    }
-    let id = w.words.len() as u32;
-    let arc: Arc<str> = Arc::from(word);
-    w.words.push(arc.clone());
-    w.ids.insert(arc, id);
-    id
+fn words() -> std::sync::MutexGuard<'static, Words> {
+    WORDS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn word(id: u32) -> String {
-    let w = WORDS.lock().unwrap_or_else(|e| e.into_inner());
-    w.words
+    words()
+        .words
         .get(id as usize)
-        .map(|s| s.to_string())
+        .and_then(|w| w.as_deref())
+        .map(str::to_string)
         .unwrap_or_default()
+}
+
+/// A project's words (ids, sorted) with how often each is used; holds its
+/// words in the vocabulary for as long as it lives.
+#[derive(Debug, Default)]
+pub struct Terms(Box<[(u32, f32)]>);
+
+impl Terms {
+    fn new<'a>(terms: impl IntoIterator<Item = (&'a str, f32)>) -> Self {
+        let mut terms: Vec<(&str, f32)> = terms.into_iter().collect();
+        terms.sort_by(|a, b| a.0.cmp(b.0));
+        terms.dedup_by(|a, b| a.0 == b.0);
+        let mut w = words();
+        let mut ids: Vec<(u32, f32)> = terms.into_iter().map(|(t, n)| (w.take(t), n)).collect();
+        ids.sort_by_key(|(id, _)| *id);
+        Terms(ids.into_boxed_slice())
+    }
+}
+
+impl std::ops::Deref for Terms {
+    type Target = [(u32, f32)];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Clone for Terms {
+    fn clone(&self) -> Self {
+        if !self.0.is_empty() {
+            let mut w = words();
+            for (id, _) in self.0.iter() {
+                w.uses[*id as usize] += 1;
+            }
+        }
+        Terms(self.0.clone())
+    }
+}
+
+impl Drop for Terms {
+    fn drop(&mut self) {
+        if !self.0.is_empty() {
+            let mut w = words();
+            for (id, _) in self.0.iter() {
+                w.drop_use(*id);
+            }
+        }
+    }
 }
 
 // ------------------------------------------------------------- samples ----
@@ -316,7 +396,7 @@ pub struct Signature {
     pub entities: Sample,
     entity_refs: Box<[EntityRef]>,
     /// Most used words (ids), with how often (dampened), sorted by id.
-    pub terms: Box<[(u32, f32)]>,
+    pub terms: Terms,
     /// Average embedding of the project's text, when there is one.
     pub embedding: Option<Embedding>,
 }
@@ -347,11 +427,44 @@ impl Signature {
 
     /// Words with how often each is used.
     pub fn with_terms<'a>(mut self, terms: impl IntoIterator<Item = (&'a str, f32)>) -> Self {
-        let mut terms: Vec<(u32, f32)> = terms.into_iter().map(|(t, n)| (word_id(t), n)).collect();
-        terms.sort_by_key(|(id, _)| *id);
-        terms.dedup_by_key(|(id, _)| *id);
-        self.terms = terms.into_boxed_slice();
+        self.terms = Terms::new(terms);
         self
+    }
+}
+
+/// Inverse document frequency: of `projects` that could have an item,
+/// `holders` do; rarer items weigh more. Never zero, so even an item every
+/// project has still counts a little.
+fn idf(projects: usize, holders: Option<&u32>) -> f32 {
+    let holders = holders.copied().unwrap_or(1).max(1) as f64;
+    (((projects as f64 + 1.0) / holders).ln() + 0.1) as f32
+}
+
+/// How many samples hold each item, and the cutoff of every sample.
+///
+/// A sampled project only keeps items with hashes below its cutoff, so it
+/// can't show whether it has an item above it. Counting holders among all
+/// projects would make a common item with a high hash look rare (the big
+/// projects that have it dropped it from their samples); it is counted
+/// instead among the projects whose samples would hold it if they had it.
+#[derive(Debug, Default)]
+struct Holders {
+    counts: Counts<u64>,
+    /// Sorted.
+    cutoffs: Vec<u64>,
+}
+
+impl Holders {
+    fn add(&mut self, s: &Sample) {
+        for h in s.hashes.iter() {
+            *self.counts.entry(*h).or_default() += 1;
+        }
+        self.cutoffs.push(s.cutoff());
+    }
+
+    fn weight(&self, h: u64) -> f32 {
+        let eligible = self.cutoffs.len() - self.cutoffs.partition_point(|c| *c < h);
+        idf(eligible, self.counts.get(&h))
     }
 }
 
@@ -359,9 +472,9 @@ impl Signature {
 #[derive(Debug, Default)]
 pub struct Rarity {
     projects: usize,
-    files: Counts<u64>,
-    paths: Counts<u64>,
-    entities: Counts<u64>,
+    files: Holders,
+    paths: Holders,
+    entities: Holders,
     terms: Counts<u32>,
 }
 
@@ -370,27 +483,17 @@ impl Rarity {
         let mut r = Rarity::default();
         for s in signatures {
             r.projects += 1;
-            for h in s.files.hashes.iter() {
-                *r.files.entry(*h).or_default() += 1;
-            }
-            for h in s.paths.hashes.iter() {
-                *r.paths.entry(*h).or_default() += 1;
-            }
-            for h in s.entities.hashes.iter() {
-                *r.entities.entry(*h).or_default() += 1;
-            }
+            r.files.add(&s.files);
+            r.paths.add(&s.paths);
+            r.entities.add(&s.entities);
             for (t, _) in s.terms.iter() {
                 *r.terms.entry(*t).or_default() += 1;
             }
         }
+        for h in [&mut r.files, &mut r.paths, &mut r.entities] {
+            h.cutoffs.sort_unstable();
+        }
         r
-    }
-
-    /// Inverse document frequency: rarer items weigh more. Never zero, so
-    /// even an item every project has still counts a little.
-    fn weight(&self, holders: Option<&u32>) -> f32 {
-        let holders = holders.copied().unwrap_or(1).max(1) as f64;
-        (((self.projects as f64 + 1.0) / holders).ln() + 0.1) as f32
     }
 }
 
@@ -411,26 +514,16 @@ impl Weights {
         let terms: Box<[f32]> = s
             .terms
             .iter()
-            .map(|(t, n)| n * r.weight(r.terms.get(t)))
+            .map(|(t, n)| n * idf(r.projects, r.terms.get(t)))
             .collect();
         Weights {
-            files: s
-                .files
-                .hashes
-                .iter()
-                .map(|h| r.weight(r.files.get(h)))
-                .collect(),
-            paths: s
-                .paths
-                .hashes
-                .iter()
-                .map(|h| r.weight(r.paths.get(h)))
-                .collect(),
+            files: s.files.hashes.iter().map(|h| r.files.weight(*h)).collect(),
+            paths: s.paths.hashes.iter().map(|h| r.paths.weight(*h)).collect(),
             entities: s
                 .entities
                 .hashes
                 .iter()
-                .map(|h| r.weight(r.entities.get(h)))
+                .map(|h| r.entities.weight(*h))
                 .collect(),
             terms_norm: terms
                 .iter()
@@ -884,7 +977,8 @@ struct Store {
     /// When the fingerprints were last read, for how many projects, and at
     /// which count of project writes.
     checked: Option<(Instant, usize, u64)>,
-    /// The last graph pairs: for which projects, and the pairs.
+    /// The last graph pairs: for which projects, and the pairs, worked out
+    /// from `loaded` (cleared whenever it is replaced).
     pairs: Option<(u64, usize, Arc<Vec<Pair>>)>,
 }
 
@@ -1004,14 +1098,27 @@ pub async fn cached_pairs(
     let mut ids = among.to_vec();
     ids.sort();
     let key = hash_of(&ids);
-    let mut store = STORE.lock().await;
-    if let Some((k, per, pairs)) = &store.pairs {
-        if *k == key && *per == per_project {
-            return Ok(pairs.clone());
+    let current = |store: &Store| {
+        store
+            .loaded
+            .as_ref()
+            .is_some_and(|l| Arc::ptr_eq(l, &loaded))
+    };
+    {
+        let store = STORE.lock().await;
+        if let (true, Some((k, per, pairs))) = (current(&store), &store.pairs) {
+            if *k == key && *per == per_project {
+                return Ok(pairs.clone());
+            }
         }
     }
+    // Worked out without holding the cache, so loads aren't kept waiting;
+    // kept only if no newer load replaced the signatures meanwhile.
     let computed = Arc::new(pairs(&loaded, &ids, per_project));
-    store.pairs = Some((key, per_project, computed.clone()));
+    let mut store = STORE.lock().await;
+    if current(&store) {
+        store.pairs = Some((key, per_project, computed.clone()));
+    }
     Ok(computed)
 }
 
@@ -1437,6 +1544,51 @@ mod tests {
             ranked.len(),
             p.len()
         );
+    }
+
+    /// A path every project has, but whose hash sits above the cutoff of
+    /// the big projects' samples, is still common, not rare.
+    #[test]
+    fn sampled_projects_dont_make_common_items_look_rare() {
+        // A path with a high hash: every big sample (256 of 2,001) drops it.
+        let common = (0..)
+            .map(|k| format!("readme{k}.md"))
+            .find(|p| hash_of(p.as_str()) > u64::MAX / 2)
+            .unwrap();
+        let small = |p: u128| {
+            Signature::default().with_paths(
+                [common.clone(), format!("only{p}.md")]
+                    .iter()
+                    .map(|s| s.as_str()),
+            )
+        };
+        let big = |p: u128| {
+            let paths: Vec<String> = (0..2000)
+                .map(|i| format!("big{p}/f{i}.md"))
+                .chain([common.clone()])
+                .collect();
+            Signature::default().with_paths(paths.iter().map(|s| s.as_str()))
+        };
+        let smalls: Vec<Signature> = (0..3).map(small).collect();
+        let bigs: Vec<Signature> = (0..20).map(big).collect();
+        let readme = hash_of(common.as_str());
+        assert!(bigs.iter().all(|b| b.paths.cutoff() < readme));
+        let r = Rarity::of(smalls.iter().chain(bigs.iter()));
+        let weight = r.paths.weight(readme);
+        let rare = r.paths.weight(hash_of("only0.md"));
+        assert!(weight < rare / 2.0, "common {weight}, a one-off {rare}");
+    }
+
+    #[test]
+    fn unused_words_are_forgotten() {
+        let a = Signature::default().with_terms([("reclaimed-word-abc", 1.0)]);
+        let id = a.terms[0].0;
+        assert_eq!(word(id), "reclaimed-word-abc");
+        let b = a.clone();
+        drop(a);
+        assert_eq!(word(id), "reclaimed-word-abc", "still used by the clone");
+        drop(b);
+        assert!(!words().ids.contains_key("reclaimed-word-abc"));
     }
 
     #[test]
