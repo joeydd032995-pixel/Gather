@@ -555,6 +555,19 @@ export interface GraphOverview {
     confidence: number;
   }[];
   mentions: { file_id: string; entity_id: string; count: number }[];
+  /** Projects (folders or .zip files uploaded whole). */
+  projects: { id: string; name: string; source: "folder" | "zip"; files: number }[];
+  /** Folders inside a project (only in a project's own graph). */
+  folders: { id: string; project_id: string; name: string; path: string }[];
+  /** A project or folder holding a folder or file (a file's id is its artifact's). */
+  contains: {
+    parent_type: "project" | "folder";
+    parent: string;
+    child_type: "folder" | "file";
+    child: string;
+  }[];
+  /** Two projects that are alike, and why. */
+  similar: { a: string; b: string; score: number; reasons: string[] }[];
   entity_total: number;
   truncated: boolean;
 }
@@ -818,6 +831,46 @@ export async function listProjects(): Promise<ProjectSummary[]> {
 
 export function getProject(id: string): Promise<ProjectDetail> {
   return getJson(`/projects/${id}`);
+}
+
+/** One project as a graph: its folders and files, what they mention, and
+ *  the projects most like it. Same shape as the whole-collection graph. */
+export function getProjectGraph(
+  id: string,
+  maxFiles = 250,
+  maxEntities = 80,
+): Promise<GraphOverview> {
+  return getJson(`/projects/${id}/graph?max_files=${maxFiles}&max_entities=${maxEntities}`);
+}
+
+export interface SimilarProject {
+  project_id: string;
+  name: string;
+  /** 0 to 1. */
+  score: number;
+  /** Each signal's score, or null when it doesn't apply to both projects. */
+  signals: {
+    files: number | null;
+    layout: number | null;
+    entities: number | null;
+    content: number | null;
+  };
+  shared: {
+    files: number;
+    paths: number;
+    path_examples: string[];
+    entities: { id: string; name: string }[];
+    terms: string[];
+    content_by: "meaning" | "words" | null;
+  };
+  /** Plain-language reasons, strongest first. */
+  reasons: string[];
+}
+
+/** The projects most like `id`, best first. */
+export async function getSimilarProjects(id: string, limit = 10): Promise<SimilarProject[]> {
+  const body = await getJson<{ items: SimilarProject[] }>(`/projects/${id}/similar?limit=${limit}`);
+  return body.items;
 }
 
 /** Remove a project's tree; its files stay in Gather. */

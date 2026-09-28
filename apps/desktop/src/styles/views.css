@@ -1480,6 +1480,16 @@
   background: transparent;
   box-shadow: inset 0 0 0 1.5px var(--cat-file);
 }
+.legend-project {
+  width: 11px;
+  height: 9px;
+  border-radius: 1.5px 3px 2px 2px;
+  background: var(--accent);
+}
+.legend-chip.off .legend-project {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+}
 
 .explorer-minimap {
   position: absolute;
@@ -1677,6 +1687,32 @@
   margin-top: var(--s-4);
   width: 100%;
 }
+.drawer-actions {
+  display: flex;
+  gap: var(--s-2);
+  margin-top: var(--s-4);
+}
+.drawer-actions > * {
+  flex: 1;
+}
+/* Projects are drawn in the accent colour on the canvas; the monogram too. */
+.monogram-project {
+  background: linear-gradient(
+    150deg,
+    color-mix(in srgb, var(--accent) 70%, #fff),
+    var(--accent) 60%
+  );
+  box-shadow: 0 8px 20px -8px var(--accent);
+}
+.monogram-project[data-type="folder"] {
+  background: var(--sunken);
+  color: var(--text-2);
+  box-shadow: none;
+}
+.monogram-project svg {
+  width: 22px;
+  height: 22px;
+}
 .drawer-section .section-label {
   margin: var(--s-6) 0 var(--s-2);
 }
@@ -1726,6 +1762,24 @@
 }
 .relation-verb {
   color: var(--text-3);
+}
+.relation-tall {
+  align-items: flex-start;
+}
+.relation-tall .relation-icon {
+  margin-top: 3px;
+}
+.relation-why {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--t-xs);
+  color: var(--text-3);
+}
+.relation-score {
+  flex-shrink: 0;
+  font-size: var(--t-xs);
+  font-weight: 600;
+  color: var(--accent-text, var(--accent));
 }
 .relation-go {
   width: 14px;
@@ -1965,4 +2019,76 @@ button.tree-row:focus-visible .tree-go {
   flex-wrap: wrap;
   justify-content: center;
   gap: var(--s-2);
+}
+
+/* Similar projects: name and score, a bar, and the reasons. */
+.similar-list {
+  display: flex;
+  flex-direction: column;
+  padding: var(--s-2);
+}
+.similar-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  padding: 10px 10px 12px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--d-1);
+}
+.similar-row:hover {
+  background: var(--hover);
+}
+.similar-row:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--focus);
+}
+.similar-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.similar-icon {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  color: var(--accent);
+}
+.similar-name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 560;
+  overflow-wrap: anywhere;
+}
+.similar-score {
+  font-size: var(--t-sm);
+  font-weight: 600;
+  color: var(--accent-text, var(--accent));
+}
+.similar-bar {
+  display: block;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--sunken);
+  overflow: hidden;
+}
+.similar-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+.similar-reasons {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding-left: 23px;
+  list-style: none;
+  font-size: var(--t-xs);
+  color: var(--text-2);
 }

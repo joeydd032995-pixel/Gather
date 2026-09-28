@@ -1,7 +1,8 @@
 //! Projects over REST: create one, send it files one at a time with their
-//! paths, or unpack a `.zip`; list projects and read one's folder tree.
+//! paths, or unpack a `.zip`; list projects, read one's folder tree, see it
+//! as a graph, and find the projects most like it.
 
-use axum::extract::{Multipart, Path, State};
+use axum::extract::{Multipart, Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -9,7 +10,8 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::error::ApiError;
-use crate::projects::{self, paths, store, Budget, ImportReport, ItemResult};
+use crate::library::GraphOverview;
+use crate::projects::{self, paths, similarity, store, Budget, ImportReport, ItemResult};
 use crate::routes::ingest::{create_job, finish_job, read_part};
 use crate::AppState;
 
@@ -229,4 +231,58 @@ pub async fn import_project(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(report)))
+}
+
+#[derive(Deserialize)]
+pub struct GraphParams {
+    pub max_files: Option<i64>,
+    pub max_entities: Option<i64>,
+}
+
+/// GET /projects/{id}/graph — the project as a graph: its folders and files,
+/// the entities they mention and how those relate, and similar projects.
+pub async fn project_graph(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Query(params): Query<GraphParams>,
+) -> Result<Json<GraphOverview>, ApiError> {
+    Ok(Json(
+        projects::graph::project_graph(
+            &state.pool,
+            id,
+            params.max_files.unwrap_or(250).clamp(1, 2000),
+            params.max_entities.unwrap_or(80).clamp(0, 1000),
+        )
+        .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct SimilarParams {
+    pub limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+pub struct SimilarResponse {
+    pub project_id: Uuid,
+    pub items: Vec<similarity::Similar>,
+}
+
+/// GET /projects/{id}/similar — the projects most like this one, best
+/// first, each with its score, the signals behind it and why.
+pub async fn similar_projects(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Query(params): Query<SimilarParams>,
+) -> Result<Json<SimilarResponse>, ApiError> {
+    store::exists(&state.pool, id).await?;
+    let signatures = similarity::load(&state.pool).await?;
+    let limit = params.limit.unwrap_or(10).clamp(1, 50);
+    // A project past the most recent ones compared has no signature: nothing
+    // to rank it against, rather than an error.
+    let items = similarity::rank(id, &signatures, limit).unwrap_or_default();
+    Ok(Json(SimilarResponse {
+        project_id: id,
+        items,
+    }))
 }

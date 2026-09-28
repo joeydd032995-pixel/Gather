@@ -57,6 +57,10 @@ photo out") rather than reviewing thousands of suggestions.
   and kept as its tree (project → folders → files). Every file counts: what Gather can read is
   read, anything else is kept as it is, zips are unpacked in place, and folders left out
   (`.git`, `node_modules`, caches) are shown with why
+- **Similar projects**: each project lists the ones most like it, with why — identical files,
+  files at the same paths, the same people and things mentioned, similar wording or meaning —
+  and projects, folders and their files appear in the graph, linked to what they mention and to
+  each other
 - Content-hash deduplication and versioning — re-importing the same export is idempotent
 
 **Understanding**

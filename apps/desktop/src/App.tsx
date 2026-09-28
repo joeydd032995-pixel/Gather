@@ -105,10 +105,20 @@ export default function App() {
   const uploads = useUploads();
 
   const [graphFocus, setGraphFocus] = useState(false);
+  /** The project whose graph the Graph view shows, or null for everything. */
+  const [graphProject, setGraphProject] = useState<string | null>(null);
   const go = useCallback((next: Tab) => {
     navigated.current = true;
     setGraphFocus(false);
+    // The Graph tab in the sidebar always means the whole graph.
+    if (next === "graph") setGraphProject(null);
     setTab(next);
+  }, []);
+  const showProjectGraph = useCallback((id: string | null) => {
+    navigated.current = true;
+    setGraphFocus(false);
+    setGraphProject(id);
+    setTab("graph");
   }, []);
   const openGraphFullView = useCallback(() => {
     navigated.current = true;
@@ -395,10 +405,19 @@ export default function App() {
                 onOpenFile={openFile}
                 onAddFolder={addFolder}
                 onAddZip={uploads.pickZip}
+                onShowGraph={showProjectGraph}
                 refreshKey={uploads.version}
               />
             )}
-            {tab === "graph" && <Graph onOpenFile={openFile} initialFocus={graphFocus} />}
+            {tab === "graph" && (
+              <Graph
+                onOpenFile={openFile}
+                initialFocus={graphFocus}
+                projectId={graphProject}
+                onOpenProject={openProject}
+                onShowProjectGraph={showProjectGraph}
+              />
+            )}
             {tab === "review" && <ReviewTray />}
             {tab === "clusters" && <Clusters />}
             {tab === "photos" && <Photos />}

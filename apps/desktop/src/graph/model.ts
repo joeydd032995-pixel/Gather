@@ -5,10 +5,10 @@ import type { SimulationLinkDatum, SimulationNodeDatum } from "d3-force";
 import type { GraphOverview } from "../api";
 
 export interface Node extends SimulationNodeDatum {
-  /** `e:<uuid>` for entities, `f:<uuid>` for files. */
+  /** `e:<uuid>` entities, `f:<uuid>` files, `p:<uuid>` projects, `d:<uuid>` folders. */
   key: string;
   id: string;
-  type: "entity" | "file";
+  type: "entity" | "file" | "project" | "folder";
   name: string;
   kind: string;
   weight: number;
@@ -20,9 +20,12 @@ export interface Node extends SimulationNodeDatum {
 }
 
 export interface Link extends SimulationLinkDatum<Node> {
-  type: "relation" | "mention";
+  type: "relation" | "mention" | "contains" | "similar";
   label: string;
   count: number;
+  /** For "similar": how alike (0 to 1) and why. */
+  score?: number;
+  reasons?: string[];
 }
 
 export interface Graph {
@@ -57,6 +60,8 @@ export function endpoint(end: string | number | Node | undefined): Node | null {
 
 interface BuildOptions {
   showFiles: boolean;
+  /** Projects and their folders, and the links between similar projects. */
+  showProjects: boolean;
   /** Entity kinds the legend has switched off. */
   hiddenKinds: ReadonlySet<string>;
   /** Positions from the previous layout, so toggling a filter doesn't reshuffle everything. */
@@ -89,6 +94,35 @@ export function buildGraph(data: GraphOverview, opts: BuildOptions): Graph {
         kind: f.kind,
         weight: f.mentions,
         r: 6 + Math.min(6, Math.sqrt(f.mentions) * 1.4),
+        degree: 0,
+        community: -1,
+      });
+    }
+  }
+
+  if (opts.showProjects) {
+    for (const p of data.projects ?? []) {
+      nodes.push({
+        key: `p:${p.id}`,
+        id: p.id,
+        type: "project",
+        name: p.name,
+        kind: p.source,
+        weight: p.files,
+        r: 11 + Math.min(10, Math.sqrt(p.files) * 1.2),
+        degree: 0,
+        community: -1,
+      });
+    }
+    for (const d of data.folders ?? []) {
+      nodes.push({
+        key: `d:${d.id}`,
+        id: d.id,
+        type: "folder",
+        name: d.name,
+        kind: d.name.toLowerCase().endsWith(".zip") ? "zip" : "folder",
+        weight: 0,
+        r: 7,
         degree: 0,
         community: -1,
       });
@@ -135,8 +169,84 @@ export function buildGraph(data: GraphOverview, opts: BuildOptions): Graph {
     }
   }
 
+  if (opts.showProjects) {
+    const prefix = { project: "p", folder: "d", file: "f" } as const;
+    for (const c of data.contains ?? []) {
+      const s = `${prefix[c.parent_type]}:${c.parent}`;
+      const t = `${prefix[c.child_type]}:${c.child}`;
+      connect(s, t, { source: s, target: t, type: "contains", label: "contains", count: 1 });
+    }
+    for (const x of data.similar ?? []) {
+      const s = `p:${x.a}`;
+      const t = `p:${x.b}`;
+      connect(s, t, {
+        source: s,
+        target: t,
+        type: "similar",
+        label: `${Math.round(x.score * 100)}% alike`,
+        count: 1,
+        score: x.score,
+        reasons: x.reasons,
+      });
+    }
+  }
+  // Folders with nothing left to show (their files are hidden) would float
+  // loose; they only mean something with their contents.
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    const n = nodes[i];
+    if (n.type === "folder" && !(opts.showFiles && hasFileBelow(n.key, links))) {
+      removeNode(nodes, links, byKey, adjacency, i);
+    }
+  }
+
   const communities = findCommunities(nodes, links);
   return { nodes, links, byKey, adjacency, communities };
+}
+
+const keyOf = (end: string | number | Node | undefined) =>
+  typeof end === "string" ? end : endpoint(end)?.key;
+
+/** Whether a folder holds a file, directly or through folders under it. */
+function hasFileBelow(key: string, links: Link[]): boolean {
+  const children = (k: string) =>
+    links
+      .filter((l) => l.type === "contains" && keyOf(l.source) === k)
+      .map((l) => keyOf(l.target)!);
+  const stack = [key];
+  const seen = new Set<string>();
+  while (stack.length > 0) {
+    const k = stack.pop()!;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    for (const c of children(k)) {
+      if (c.startsWith("f:")) return true;
+      stack.push(c);
+    }
+  }
+  return false;
+}
+
+function removeNode(
+  nodes: Node[],
+  links: Link[],
+  byKey: Map<string, Node>,
+  adjacency: Map<string, Set<string>>,
+  index: number,
+) {
+  const [gone] = nodes.splice(index, 1);
+  byKey.delete(gone.key);
+  for (let i = links.length - 1; i >= 0; i--) {
+    const s = keyOf(links[i].source)!;
+    const t = keyOf(links[i].target)!;
+    if (s !== gone.key && t !== gone.key) continue;
+    const other = byKey.get(s === gone.key ? t : s);
+    if (other) {
+      other.degree -= 1;
+      adjacency.get(other.key)?.delete(gone.key);
+    }
+    links.splice(i, 1);
+  }
+  adjacency.delete(gone.key);
 }
 
 /**

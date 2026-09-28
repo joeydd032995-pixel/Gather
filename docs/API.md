@@ -213,6 +213,44 @@ curl -X POST $API/projects/import -F file=@Atlas.zip
 The response is `{ project: ProjectSummary, files: [...], stopped }`, where `stopped` says why
 unpacking ended early (a limit reached), or is `null`.
 
+### `GET /projects/{id}/similar`
+
+The projects most like this one, best first. Query: `limit` (default 10, max 50). Two projects
+are compared on four signals, each from 0 to 1:
+
+| Signal | What it compares |
+|---|---|
+| `files` | Identical files (the same content) in both |
+| `layout` | Files at the same paths (`src/main.rs`, `docs/plan.md`), which matches two versions of one repository even when every file changed |
+| `entities` | The same people, organisations, tools and places mentioned |
+| `content` | What the text is about: the average embedding when embeddings are on, otherwise the words used most |
+
+Overlaps are weighted by rarity across projects, so what every project has (`README.md`,
+`LICENSE`, your own name, common words) counts for little. A signal is `null` when either
+project has nothing for it (a folder of photos has no text), and the score is the weighted
+average of the signals that apply (files 0.3, layout 0.2, entities 0.3, content 0.2). Projects
+scoring under 0.08 are left out. The 500 most recently changed projects are compared; what they
+are made of is cached until a project changes or more is read from its files.
+
+```json
+{ "project_id": "…",
+  "items": [ { "project_id": "…", "name": "Orbit tracker v2", "score": 0.588,
+    "signals": { "files": 0.1, "layout": 0.62, "entities": 0.5, "content": 0.71 },
+    "shared": { "files": 1, "paths": 3, "path_examples": ["cargo.toml", "docs/spec.md"],
+                "entities": [ { "id": "…", "name": "Dana Reyes" } ],
+                "terms": ["orbit", "tracker"], "content_by": "words" },
+    "reasons": [ "Both mention Dana Reyes", "3 files at the same place (cargo.toml, docs/spec.md and src/main.rs)", "1 identical file in common" ] } ] }
+```
+
+### `GET /projects/{id}/graph`
+
+One project as a graph, in the same shape as [`GET /graph`](#get-graph): the project, the
+folders and files in it (`contains` links), the entities its files mention and the
+relationships among them, and up to five similar projects (`similar` links). Query:
+`max_files` (default 250, max 2000; files with the most read from them come first, with the
+folders above them) and `max_entities` (default 80, max 1000). A file stored at two paths is one
+node held by both folders. `truncated` is true when files or entities were left out.
+
 ---
 
 ## Query
@@ -253,16 +291,26 @@ knowledge), `limit`, `offset`.
 ### `GET /graph`
 
 The whole collection at a glance: the most connected entities, the relationships among them,
-and the files they were extracted from. Query: `max_entities` (default 150, max 1000),
-`max_files` (default 100, max 1000; `0` leaves files out).
+the files they were extracted from, and your projects. Query: `max_entities` (default 150,
+max 1000), `max_files` (default 100, max 1000; `0` leaves files out), `projects` (default
+`true`; `false` leaves projects out).
 
 ```json
 { "entities": [ { "id": "…", "name": "Me", "kind": "person", "weight": 16 } ],
   "files": [ { "id": "…", "name": "notes.md", "kind": "document_markdown", "mentions": 4 } ],
   "relations": [ { "source": "…", "target": "…", "relation_type": "works_at", "count": 1, "confidence": 0.6 } ],
   "mentions": [ { "file_id": "…", "entity_id": "…", "count": 2 } ],
+  "projects": [ { "id": "…", "name": "Atlas", "source": "folder", "files": 12 } ],
+  "folders": [],
+  "contains": [ { "parent_type": "project", "parent": "…", "child_type": "file", "child": "…" } ],
+  "similar": [ { "a": "…", "b": "…", "score": 0.59, "reasons": ["3 files at the same place (…)"] } ],
   "entity_total": 10, "truncated": false }
 ```
+
+Projects are the 60 most recently changed. `contains` links a project to those of the returned
+`files` it holds (the overview has no folders; a project's own graph does). `similar` links
+projects that are alike, up to three per project, with why. gRPC's `GetGraphOverview` returns
+entities and files only.
 
 An entity's `weight` is its relationships plus the units about it; entities with neither are
 left out. `truncated` is true when more connected entities exist than were returned.

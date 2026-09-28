@@ -50,6 +50,8 @@ pub fn build_router(state: AppState) -> Router {
             get(projects::get_project).delete(projects::delete_project),
         )
         .route("/projects/{id}/files", post(projects::add_files))
+        .route("/projects/{id}/graph", get(projects::project_graph))
+        .route("/projects/{id}/similar", get(projects::similar_projects))
         // query
         .route("/artifacts", get(query::list_artifacts))
         .route(

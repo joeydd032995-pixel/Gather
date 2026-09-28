@@ -564,6 +564,182 @@ async fn a_zip_becomes_a_project_named_after_its_folder() {
 }
 
 #[tokio::test]
+async fn similar_projects_are_found_and_drawn_as_a_graph() {
+    let _guard = LOCK.lock().await;
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let app = routes::build_router(state.clone());
+    let t = &Uuid::new_v4().simple().to_string()[..8];
+    let create = |name: String| {
+        let app = app.clone();
+        async move {
+            let (s, p) = call(
+                &app,
+                Method::POST,
+                "/projects",
+                Some(json!({ "name": name })),
+            )
+            .await;
+            assert_eq!(s, StatusCode::CREATED, "{p}");
+            p["id"].as_str().unwrap().to_string()
+        }
+    };
+    let v1 = create(format!("Orbit {t} v1")).await;
+    let v2 = create(format!("Orbit {t} v2")).await;
+    let other = create(format!("Garden {t}")).await;
+
+    // Two versions of one repository: one file unchanged, the rest edited,
+    // all at the same paths. The third project has nothing in common.
+    let spec = format!("# Orbit{t} spec\n\nOrbit{t} tracks satellites for Kepler{t}.\n");
+    let main_v1 = format!("fn main() {{ orbit{t}::run(1) }}\n");
+    let main_v2 = format!("fn main() {{ orbit{t}::run(2) }}\n");
+    let lib_v1 = format!("pub fn run(n: u8) {{ /* orbit{t} v1 */ }}\n");
+    let lib_v2 = format!("pub fn run(n: u8) {{ /* orbit{t} v2 */ }}\n");
+    let send = |id: String, files: Vec<(&'static str, String)>| {
+        let app = app.clone();
+        async move {
+            let mut parts = Vec::new();
+            for (path, body) in &files {
+                parts.push(Part::Text("path", path));
+                parts.push(Part::File(
+                    path.rsplit('/').next().unwrap(),
+                    body.as_bytes(),
+                ));
+            }
+            let (s, body) = multipart(&app, &format!("/projects/{id}/files"), &parts).await;
+            assert_eq!(s, StatusCode::ACCEPTED, "{body}");
+        }
+    };
+    send(
+        v1.clone(),
+        vec![
+            ("docs/spec.md", spec.clone()),
+            ("src/main.rs", main_v1),
+            ("src/lib.rs", lib_v1),
+        ],
+    )
+    .await;
+    send(
+        v2.clone(),
+        vec![
+            ("docs/spec.md", spec.clone()),
+            ("src/main.rs", main_v2),
+            ("src/lib.rs", lib_v2),
+        ],
+    )
+    .await;
+    send(
+        other.clone(),
+        vec![(
+            "notes/tomatoes.txt",
+            format!("Tomatoes{t} need full sun and deep watering.\n"),
+        )],
+    )
+    .await;
+
+    let (s, similar) = call(&app, Method::GET, &format!("/projects/{v1}/similar"), None).await;
+    assert_eq!(s, StatusCode::OK, "{similar}");
+    let items = similar["items"].as_array().unwrap();
+    assert_eq!(items[0]["project_id"], v2.as_str(), "{similar}");
+    assert!(items[0]["score"].as_f64().unwrap() >= 0.3, "{similar}");
+    assert_eq!(items[0]["signals"]["layout"], 1.0, "{similar}");
+    assert_eq!(items[0]["shared"]["files"], 1, "{similar}");
+    let reasons: Vec<&str> = items[0]["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap())
+        .collect();
+    assert!(
+        reasons.iter().any(|r| r.contains("identical file")),
+        "{reasons:?}"
+    );
+    assert!(
+        reasons.iter().any(|r| r.contains("at the same place")),
+        "{reasons:?}"
+    );
+    assert!(
+        !items.iter().any(|i| i["project_id"] == other.as_str()),
+        "{similar}"
+    );
+    let (s, _) = call(
+        &app,
+        Method::GET,
+        &format!("/projects/{}/similar", Uuid::new_v4()),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // The project as a graph: project -> folders -> files, and v2 linked as
+    // similar.
+    let (s, graph) = call(&app, Method::GET, &format!("/projects/{v1}/graph"), None).await;
+    assert_eq!(s, StatusCode::OK, "{graph}");
+    assert_eq!(graph["projects"][0]["id"], v1.as_str());
+    assert_eq!(graph["files"].as_array().unwrap().len(), 3, "{graph}");
+    let folders: Vec<&str> = graph["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(folders.len(), 2, "{graph}");
+    assert!(folders.contains(&"docs") && folders.contains(&"src"));
+    let contains = graph["contains"].as_array().unwrap();
+    assert_eq!(
+        contains
+            .iter()
+            .filter(|c| c["parent_type"] == "project" && c["child_type"] == "folder")
+            .count(),
+        2,
+        "{graph}"
+    );
+    assert_eq!(
+        contains
+            .iter()
+            .filter(|c| c["parent_type"] == "folder" && c["child_type"] == "file")
+            .count(),
+        3,
+        "{graph}"
+    );
+    assert!(graph["similar"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|x| x["b"] == v2.as_str()));
+    assert!(graph["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["id"] == v2.as_str()));
+    let (s, _) = call(
+        &app,
+        Method::GET,
+        &format!("/projects/{}/graph", Uuid::new_v4()),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // The whole-collection graph shows the projects and the link between the
+    // two versions; asked to, it leaves projects out.
+    let (s, overview) = call(&app, Method::GET, "/graph", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(overview["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["id"] == other.as_str()));
+    assert!(overview["similar"].as_array().unwrap().iter().any(|x| {
+        (x["a"] == v1.as_str() && x["b"] == v2.as_str())
+            || (x["a"] == v2.as_str() && x["b"] == v1.as_str())
+    }));
+    let (_, bare) = call(&app, Method::GET, "/graph?projects=false", None).await;
+    assert!(bare["projects"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn the_projects_migration_is_reversible() {
     let _guard = LOCK.lock().await;
     let Some(state) = test_state().await else {

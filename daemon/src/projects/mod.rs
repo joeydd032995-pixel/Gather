@@ -11,7 +11,9 @@
 //! history, installed dependencies, tool caches) are in the tree too.
 
 pub mod archive;
+pub mod graph;
 pub mod paths;
+pub mod similarity;
 pub mod store;
 
 use serde::Serialize;

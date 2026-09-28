@@ -27,6 +27,9 @@ export interface Palette {
   accent: string;
   file: string;
   fileFold: string;
+  /** Uploaded projects (not "project" entities, which have a kind colour). */
+  project: KindInk;
+  folder: KindInk;
   kinds: Record<string, KindInk>;
   font: string;
 }
@@ -97,6 +100,11 @@ export function readPalette(): Palette {
     accent: v("--accent"),
     file: v("--cat-file"),
     fileFold: mix(v("--cat-file"), dark ? "#000000" : "#ffffff", 0.35),
+    project: { base: v("--accent"), light: mix(v("--accent"), "#ffffff", dark ? 0.3 : 0.4) },
+    folder: {
+      base: mix(v("--cat-file"), v("--accent"), 0.25),
+      light: mix(v("--cat-file"), "#ffffff", dark ? 0.2 : 0.45),
+    },
     kinds,
     font: css.getPropertyValue("--font-ui").trim() || "system-ui, sans-serif",
   };
@@ -198,7 +206,15 @@ function drawCommunities(ctx: CanvasRenderingContext2D, scene: Scene) {
 }
 
 function nodeInk(p: Palette, n: Node): KindInk {
-  return n.type === "file" ? { base: p.file, light: p.fileFold } : p.kinds[kindKey(n.kind)];
+  if (n.type === "file") return { base: p.file, light: p.fileFold };
+  if (n.type === "project") return p.project;
+  if (n.type === "folder") return p.folder;
+  return p.kinds[kindKey(n.kind)];
+}
+
+/** How far a node's shape reaches from its centre, for labels and hits. */
+function reachOf(n: Node): number {
+  return n.type === "entity" ? n.r : n.r * 1.05;
 }
 
 function drawLinks(ctx: CanvasRenderingContext2D, scene: Scene) {
@@ -218,6 +234,19 @@ function drawLinks(ctx: CanvasRenderingContext2D, scene: Scene) {
       ctx.setLineDash([2.5 / view.k, 4 / view.k]);
       ctx.strokeStyle = alpha(p.text3, faded ? 0.05 : touchesFocus ? 0.6 : 0.24);
       ctx.lineWidth = (touchesFocus ? 1.4 : 1) / view.k;
+    } else if (l.type === "contains") {
+      ctx.setLineDash([]);
+      ctx.strokeStyle = alpha(p.folder.base, faded ? 0.06 : touchesFocus ? 0.75 : 0.35);
+      ctx.lineWidth = (touchesFocus ? 1.6 : 1.1) / view.k;
+    } else if (l.type === "similar") {
+      // Heavier the more alike.
+      const score = l.score ?? 0;
+      ctx.setLineDash([7 / view.k, 5 / view.k]);
+      ctx.strokeStyle = alpha(
+        p.project.base,
+        faded ? 0.08 : touchesFocus ? 0.95 : 0.3 + score * 0.5,
+      );
+      ctx.lineWidth = (1.5 + score * 3.5 + (touchesFocus ? 0.8 : 0)) / view.k;
     } else {
       ctx.setLineDash([]);
       const a = faded ? 0.05 : touchesFocus ? 0.95 : p.dark ? 0.34 : 0.42;
@@ -310,6 +339,55 @@ function drawFile(ctx: CanvasRenderingContext2D, scene: Scene, n: Node) {
   }
 }
 
+/** A folder: a tab on top of a rounded body. Projects are big and solid,
+ *  folders small; an unpacked .zip gets a zipper down the middle. */
+function drawFolder(ctx: CanvasRenderingContext2D, scene: Scene, n: Node) {
+  const { palette: p, view } = scene;
+  const ink = nodeInk(p, n);
+  const w = n.r * 2;
+  const h = n.r * 1.6;
+  const x = n.x! - w / 2;
+  const y = n.y! - h / 2 + n.r * 0.1;
+  const tab = h * 0.22;
+  ctx.beginPath();
+  ctx.moveTo(x, y + 2);
+  ctx.quadraticCurveTo(x, y, x + 2, y);
+  ctx.lineTo(x + w * 0.38, y);
+  ctx.lineTo(x + w * 0.48, y + tab);
+  ctx.lineTo(x + w - 2, y + tab);
+  ctx.quadraticCurveTo(x + w, y + tab, x + w, y + tab + 2);
+  ctx.lineTo(x + w, y + h - 2);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - 2, y + h);
+  ctx.lineTo(x + 2, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - 2);
+  ctx.closePath();
+  const g = ctx.createLinearGradient(x, y, x, y + h);
+  g.addColorStop(0, ink.light);
+  g.addColorStop(1, ink.base);
+  ctx.fillStyle = g;
+  ctx.fill();
+  ctx.lineWidth = (n.type === "project" ? 2 : 1.5) / view.k;
+  ctx.strokeStyle = p.bg;
+  ctx.stroke();
+  // The front flap.
+  ctx.beginPath();
+  ctx.moveTo(x, y + tab * 1.6);
+  ctx.lineTo(x + w, y + tab * 1.6);
+  ctx.lineWidth = 1 / view.k;
+  ctx.strokeStyle = alpha(p.bg, 0.5);
+  ctx.stroke();
+  if (n.kind === "zip" && n.r * view.k > 5) {
+    ctx.setLineDash([1.5 / view.k, 1.5 / view.k]);
+    ctx.beginPath();
+    ctx.moveTo(n.x!, y + tab * 1.6);
+    ctx.lineTo(n.x!, y + h);
+    ctx.lineWidth = 1.5 / view.k;
+    ctx.strokeStyle = alpha(p.bg, 0.8);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+}
+
 function drawEntity(ctx: CanvasRenderingContext2D, scene: Scene, n: Node, glow: boolean) {
   const { palette: p, view, dpr } = scene;
   const ink = nodeInk(p, n);
@@ -339,7 +417,7 @@ function drawNodes(ctx: CanvasRenderingContext2D, scene: Scene) {
   // Files underneath, then entities from light to heavy; the focus on top.
   const order = [...graph.nodes].sort((a, b) => {
     const rank = (n: Node) =>
-      (n.type === "entity" ? 1 : 0) +
+      (n.type === "entity" || n.type === "project" ? 1 : 0) +
       (neighbours?.has(n.key) ? 2 : 0) +
       (n.key === scene.focus ? 4 : 0);
     return rank(a) - rank(b) || a.weight - b.weight;
@@ -355,6 +433,7 @@ function drawNodes(ctx: CanvasRenderingContext2D, scene: Scene) {
         (neighbours?.has(n.key) ?? false) ||
         (scene.focus === null && scene.anchors.has(n.key) && n.r > 12));
     if (n.type === "file") drawFile(ctx, scene, n);
+    else if (n.type === "project" || n.type === "folder") drawFolder(ctx, scene, n);
     else drawEntity(ctx, scene, n, glow);
     ctx.globalAlpha = 1;
 
@@ -450,7 +529,7 @@ function drawLabels(ctx: CanvasRenderingContext2D, scene: Scene) {
   if (scene.focus && view.k >= 0.7) {
     ctx.font = `600 10.5px ${p.font}`;
     for (const l of graph.links) {
-      if (l.type !== "relation") continue;
+      if (l.type !== "relation" && l.type !== "similar") continue;
       const s = endpoint(l.source);
       const t = endpoint(l.target);
       if (!s || !t || (s.key !== scene.focus && t.key !== scene.focus)) continue;
@@ -478,7 +557,7 @@ function drawLabels(ctx: CanvasRenderingContext2D, scene: Scene) {
     const h = strong ? 22 : 20;
     const cx = n.x! * view.k + view.x;
     const cy = n.y! * view.k + view.y;
-    const reach = (n.type === "file" ? n.r * 0.95 : n.r) * view.k + 6;
+    const reach = reachOf(n) * view.k + 6;
     // Below the dot reads best; then above, right and left.
     const spots: Box[] = [
       { x: cx - w / 2, y: cy + reach, w, h },
@@ -523,7 +602,7 @@ export function hitTest(graph: Graph, view: View, sx: number, sy: number): Node 
   for (const n of graph.nodes) {
     if (n.x === undefined || n.y === undefined) continue;
     const d = Math.hypot(n.x - x, n.y - y);
-    const reach = (n.type === "file" ? n.r * 1.05 : n.r) + slack;
+    const reach = reachOf(n) + slack;
     if (d <= reach && d - n.r < bestDist) {
       best = n;
       bestDist = d - n.r;

@@ -10,7 +10,11 @@ import {
   type Simulation,
 } from "d3-force";
 import {
+  ArrowLeft,
   FileText,
+  Folder,
+  FolderArchive,
+  FolderTree,
   Maximize2,
   Minimize2,
   Minus,
@@ -20,8 +24,8 @@ import {
   Waypoints,
   X,
 } from "lucide-react";
-import { getGraphOverview, type GraphOverview } from "./api";
-import { EntityPanel, FilePanel } from "./graph/Panels";
+import { getGraphOverview, getProjectGraph, type GraphOverview } from "./api";
+import { EntityPanel, FilePanel, FolderPanel, ProjectPanel } from "./graph/Panels";
 import {
   ENTITY_KINDS,
   buildGraph,
@@ -42,7 +46,7 @@ import {
 } from "./graph/render";
 import { kindLabel, plural } from "./kinds";
 import { isTauri, setFullscreen } from "./native";
-import { Callout, EmptyState, IconButton, Kbd, Spinner, Toolbar, errorText } from "./ui";
+import { Button, Callout, EmptyState, IconButton, Kbd, Spinner, Toolbar, errorText } from "./ui";
 
 const SIZES = [50, 150, 400];
 const MIN_K = 0.15;
@@ -60,6 +64,30 @@ interface GraphProps {
   onOpenFile: (id: string) => void;
   /** Open straight into full view, as the Overview preview does. */
   initialFocus?: boolean;
+  /** Show one project's graph instead of the whole collection's. */
+  projectId?: string | null;
+  /** Open a project in the Projects view. */
+  onOpenProject?: (id: string) => void;
+  /** Switch to a project's graph (`null` for the whole collection). */
+  onShowProjectGraph?: (id: string | null) => void;
+}
+
+/** Search results and hover cards: a node's icon and what it is. */
+function NodeGlyph({ node }: { node: Node }) {
+  if (node.type === "file") return <FileText className="explorer-result-icon" aria-hidden />;
+  if (node.type === "project") return <FolderTree className="explorer-result-icon" aria-hidden />;
+  if (node.type === "folder") {
+    const Icon = node.kind === "zip" ? FolderArchive : Folder;
+    return <Icon className="explorer-result-icon" aria-hidden />;
+  }
+  return <span className="relation-dot" data-kind={kindKey(node.kind)} aria-hidden />;
+}
+
+function nodeKindLabel(node: Node): string {
+  if (node.type === "file") return kindLabel(node.kind);
+  if (node.type === "project") return "Project";
+  if (node.type === "folder") return node.kind === "zip" ? "Unpacked .zip" : "Folder";
+  return node.kind;
 }
 
 function isTyping(target: EventTarget | null): boolean {
@@ -70,9 +98,16 @@ function isTyping(target: EventTarget | null): boolean {
   );
 }
 
-export default function Graph({ onOpenFile, initialFocus = false }: GraphProps) {
+export default function Graph({
+  onOpenFile,
+  initialFocus = false,
+  projectId = null,
+  onOpenProject,
+  onShowProjectGraph,
+}: GraphProps) {
   const [size, setSize] = useState(150);
   const [showFiles, setShowFiles] = useState(true);
+  const [showProjects, setShowProjects] = useState(true);
   const [hiddenKinds, setHiddenKinds] = useState<ReadonlySet<string>>(new Set());
   const [data, setData] = useState<GraphOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -300,9 +335,17 @@ export default function Graph({ onOpenFile, initialFocus = false }: GraphProps) 
   }, [focus, select]);
 
   // --------------------------------------------------------------- data
+  // Another project (or back to everything): start from a clean slate.
+  useEffect(() => {
+    setData(null);
+    graphRef.current = null;
+    setSelected(null);
+    interacted.current = false;
+  }, [projectId]);
+
   useEffect(() => {
     let cancelled = false;
-    getGraphOverview(size, 100)
+    (projectId ? getProjectGraph(projectId, 250, Math.min(size, 150)) : getGraphOverview(size, 100))
       .then((d) => {
         if (cancelled) return;
         setData(d);
@@ -312,18 +355,21 @@ export default function Graph({ onOpenFile, initialFocus = false }: GraphProps) 
     return () => {
       cancelled = true;
     };
-  }, [size]);
+  }, [size, projectId]);
 
   // Build and lay out. Positions carry over, so filters rearrange gently.
   useEffect(() => {
     if (!data) return;
     const previous = graphRef.current?.byKey;
-    const graph = buildGraph(data, { showFiles, hiddenKinds, previous });
+    const graph = buildGraph(data, { showFiles, showProjects, hiddenKinds, previous });
     graphRef.current = graph;
     anchorsRef.current = new Set(
       graph.nodes
-        .filter((n) => n.type === "entity")
-        .sort((a, b) => b.weight - a.weight)
+        .filter((n) => n.type === "entity" || n.type === "project")
+        .sort(
+          (a, b) =>
+            (b.type === "project" ? 1 : 0) - (a.type === "project" ? 1 : 0) || b.weight - a.weight,
+        )
         .slice(0, 16)
         .map((n) => n.key),
     );
@@ -336,8 +382,24 @@ export default function Graph({ onOpenFile, initialFocus = false }: GraphProps) 
         "link",
         forceLink<Node, Link>(graph.links)
           .id((n) => n.key)
-          .distance((l) => (l.type === "mention" ? 80 : 64))
-          .strength((l) => (l.type === "mention" ? 0.18 : 0.55)),
+          .distance((l) =>
+            l.type === "mention"
+              ? 80
+              : l.type === "contains"
+                ? 42
+                : l.type === "similar"
+                  ? 150
+                  : 64,
+          )
+          .strength((l) =>
+            l.type === "mention"
+              ? 0.18
+              : l.type === "contains"
+                ? 0.6
+                : l.type === "similar"
+                  ? 0.08 + (l.score ?? 0) * 0.3
+                  : 0.55,
+          ),
       )
       .force("charge", forceManyBody<Node>().strength(-220).distanceMax(520))
       .force("center", forceCenter(0, 0))
@@ -352,7 +414,9 @@ export default function Graph({ onOpenFile, initialFocus = false }: GraphProps) 
       )
       .force(
         "collide",
-        forceCollide<Node>((n) => n.r + (n.type === "entity" ? 14 : 6)).strength(0.9),
+        forceCollide<Node>(
+          (n) => n.r + (n.type === "entity" || n.type === "project" ? 14 : 6),
+        ).strength(0.9),
       )
       .alpha(warm ? 0.35 : 1)
       .alphaDecay(0.04)
@@ -367,7 +431,7 @@ export default function Graph({ onOpenFile, initialFocus = false }: GraphProps) 
       clearTimeout(early);
       simulation.stop();
     };
-  }, [data, showFiles, hiddenKinds, fit, requestDraw, select]);
+  }, [data, showFiles, showProjects, hiddenKinds, fit, requestDraw, select]);
 
   // ------------------------------------------------------ size and theme
   useEffect(() => {
@@ -692,10 +756,11 @@ export default function Graph({ onOpenFile, initialFocus = false }: GraphProps) 
   };
 
   // --------------------------------------------------------------- view
+  const projectName = projectId ? data?.projects.find((p) => p.id === projectId)?.name : undefined;
   const header = (
     <Toolbar
-      title="Graph"
-      icon={Waypoints}
+      title={projectId ? (projectName ?? "Project") : "Graph"}
+      icon={projectId ? FolderTree : Waypoints}
       count={
         data && data.entities.length > 0
           ? data.truncated
@@ -704,6 +769,21 @@ export default function Graph({ onOpenFile, initialFocus = false }: GraphProps) 
           : undefined
       }
     >
+      {projectId && onShowProjectGraph && (
+        <Button variant="ghost" size="sm" icon={ArrowLeft} onClick={() => onShowProjectGraph(null)}>
+          Whole graph
+        </Button>
+      )}
+      {projectId && onOpenProject && (
+        <Button
+          variant="ghost"
+          size="sm"
+          icon={FolderTree}
+          onClick={() => onOpenProject(projectId)}
+        >
+          Open project
+        </Button>
+      )}
       <IconButton icon={Maximize2} label="Full view (F)" size="sm" onClick={() => setFocus(true)} />
       <span className="toolbar-sep" aria-hidden />
       <label className="toolbar-field">
@@ -739,7 +819,7 @@ export default function Graph({ onOpenFile, initialFocus = false }: GraphProps) 
       </>
     );
   }
-  if (data.entities.length === 0) {
+  if (data.entities.length === 0 && data.projects.length === 0 && data.files.length === 0) {
     return (
       <>
         {header}
@@ -853,15 +933,9 @@ export default function Graph({ onOpenFile, initialFocus = false }: GraphProps) 
                   onMouseMove={() => setActiveResult(i)}
                   onClick={() => pick(n)}
                 >
-                  {n.type === "file" ? (
-                    <FileText className="explorer-result-icon" aria-hidden />
-                  ) : (
-                    <span className="relation-dot" data-kind={kindKey(n.kind)} aria-hidden />
-                  )}
+                  <NodeGlyph node={n} />
                   <span className="explorer-result-name">{n.name}</span>
-                  <span className="explorer-result-meta">
-                    {n.type === "file" ? kindLabel(n.kind) : n.kind}
-                  </span>
+                  <span className="explorer-result-meta">{nodeKindLabel(n)}</span>
                 </li>
               ))}
             </ul>
@@ -931,6 +1005,22 @@ export default function Graph({ onOpenFile, initialFocus = false }: GraphProps) 
             files
             <span className="legend-count num">{data.files.length}</span>
           </button>
+          {data.projects.length > 0 && (
+            <button
+              type="button"
+              className={showProjects ? "legend-chip" : "legend-chip off"}
+              aria-pressed={showProjects}
+              onClick={() => {
+                noteInteraction();
+                setShowProjects((s) => !s);
+              }}
+              title={showProjects ? "Hide projects" : "Show projects"}
+            >
+              <span className="legend-project" aria-hidden />
+              projects
+              <span className="legend-count num">{data.projects.length}</span>
+            </button>
+          )}
         </div>
 
         {/* minimap */}
@@ -969,15 +1059,11 @@ export default function Graph({ onOpenFile, initialFocus = false }: GraphProps) 
           {hoveredNode && (
             <>
               <span className="explorer-card-name">
-                {hoveredNode.type === "file" ? (
-                  <FileText className="explorer-result-icon" />
-                ) : (
-                  <span className="relation-dot" data-kind={kindKey(hoveredNode.kind)} />
-                )}
+                <NodeGlyph node={hoveredNode} />
                 {hoveredNode.name}
               </span>
               <span className="explorer-card-meta">
-                {hoveredNode.type === "file" ? kindLabel(hoveredNode.kind) : hoveredNode.kind}
+                {nodeKindLabel(hoveredNode)}
                 <span className="dot-sep">{plural(hoveredNode.degree, "link")}</span>
               </span>
             </>
@@ -999,6 +1085,26 @@ export default function Graph({ onOpenFile, initialFocus = false }: GraphProps) 
             <div className="drawer-body" key={selectedNode.key}>
               {selectedNode.type === "entity" ? (
                 <EntityPanel
+                  node={selectedNode}
+                  graph={graph}
+                  onSelect={(key) => select(key)}
+                  onOpenFile={onOpenFile}
+                />
+              ) : selectedNode.type === "project" ? (
+                <ProjectPanel
+                  node={selectedNode}
+                  graph={graph}
+                  onSelect={(key) => select(key)}
+                  onOpenFile={onOpenFile}
+                  onOpenProject={onOpenProject}
+                  onShowProjectGraph={
+                    onShowProjectGraph && selectedNode.id !== projectId
+                      ? (id) => onShowProjectGraph(id)
+                      : undefined
+                  }
+                />
+              ) : selectedNode.type === "folder" ? (
+                <FolderPanel
                   node={selectedNode}
                   graph={graph}
                   onSelect={(key) => select(key)}

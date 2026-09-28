@@ -2,7 +2,7 @@
 //! an artifact's readable content, and the whole-collection graph overview.
 //! Shared by the REST routes (`routes::library`) and gRPC (`grpc::query`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 use sqlx::{PgPool, Row};
@@ -259,12 +259,56 @@ pub struct GraphMention {
     pub count: i64,
 }
 
+/// A project (a folder or .zip uploaded as a whole).
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphProject {
+    pub id: Uuid,
+    pub name: String,
+    /// `folder` or `zip`.
+    pub source: String,
+    pub files: i64,
+}
+
+/// A folder inside a project (a `project_items` row).
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphFolder {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub name: String,
+    pub path: String,
+}
+
+/// A project or folder holding a folder or file.
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphContains {
+    /// `project` or `folder`.
+    pub parent_type: &'static str,
+    pub parent: Uuid,
+    /// `folder` or `file` (a file's id is its artifact's).
+    pub child_type: &'static str,
+    pub child: Uuid,
+}
+
+/// Two projects that are alike, and why.
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphSimilar {
+    pub a: Uuid,
+    pub b: Uuid,
+    /// 0 to 1.
+    pub score: f64,
+    pub reasons: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct GraphOverview {
     pub entities: Vec<GraphEntity>,
     pub files: Vec<GraphFile>,
     pub relations: Vec<GraphRelation>,
     pub mentions: Vec<GraphMention>,
+    pub projects: Vec<GraphProject>,
+    pub folders: Vec<GraphFolder>,
+    pub contains: Vec<GraphContains>,
+    pub similar: Vec<GraphSimilar>,
     /// Connected entities in the whole collection (the overview shows the
     /// top `max_entities` of them by weight).
     pub entity_total: i64,
@@ -277,6 +321,7 @@ pub async fn graph_overview(
     pool: &PgPool,
     max_entities: i64,
     max_files: i64,
+    include_projects: bool,
 ) -> Result<GraphOverview, ApiError> {
     let ranked = sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"
@@ -317,7 +362,36 @@ pub async fn graph_overview(
         .collect();
     let ids: Vec<Uuid> = entities.iter().map(|e| e.id).collect();
 
-    let relations = sqlx::query(
+    let relations = relations_among(pool, &ids).await?;
+
+    let (files, mentions) = if max_files > 0 && !ids.is_empty() {
+        file_mentions(pool, &ids, max_files).await?
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let (projects, contains, similar) = if include_projects {
+        projects_overview(pool, &files).await?
+    } else {
+        (Vec::new(), Vec::new(), Vec::new())
+    };
+
+    Ok(GraphOverview {
+        truncated: entity_total > entities.len() as i64,
+        entities,
+        files,
+        relations,
+        mentions,
+        projects,
+        folders: Vec::new(),
+        contains,
+        similar,
+        entity_total,
+    })
+}
+
+/// Active relationships among `ids`, one edge per type and direction.
+pub async fn relations_among(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<GraphRelation>, ApiError> {
+    Ok(sqlx::query(
         r#"
         SELECT source_entity_id, target_entity_id, relation_type,
                count(*)::bigint AS n, max(confidence) AS confidence
@@ -328,7 +402,7 @@ pub async fn graph_overview(
         ORDER BY n DESC
         "#,
     )
-    .bind(&ids)
+    .bind(ids)
     .fetch_all(pool)
     .await?
     .iter()
@@ -339,22 +413,71 @@ pub async fn graph_overview(
         count: r.get("n"),
         confidence: r.get("confidence"),
     })
-    .collect();
+    .collect())
+}
 
-    let (files, mentions) = if max_files > 0 && !ids.is_empty() {
-        file_mentions(pool, &ids, max_files).await?
-    } else {
-        (Vec::new(), Vec::new())
-    };
+/// Most projects the overview shows.
+const OVERVIEW_PROJECTS: i64 = 60;
+/// Similar projects linked per project in the overview.
+const OVERVIEW_SIMILAR: usize = 3;
 
-    Ok(GraphOverview {
-        truncated: entity_total > entities.len() as i64,
-        entities,
-        files,
-        relations,
-        mentions,
-        entity_total,
+/// The projects for the overview (the most recently changed), which of the
+/// overview's `files` each holds, and which projects are alike.
+async fn projects_overview(
+    pool: &PgPool,
+    files: &[GraphFile],
+) -> Result<(Vec<GraphProject>, Vec<GraphContains>, Vec<GraphSimilar>), ApiError> {
+    let projects: Vec<GraphProject> = sqlx::query(
+        "SELECT p.id, p.name, p.source, \
+                count(i.id) FILTER (WHERE i.item_kind = 'file') AS files \
+         FROM projects p LEFT JOIN project_items i ON i.project_id = p.id \
+         GROUP BY p.id ORDER BY p.updated_at DESC, p.id LIMIT $1",
+    )
+    .bind(OVERVIEW_PROJECTS)
+    .fetch_all(pool)
+    .await?
+    .iter()
+    .map(|r| GraphProject {
+        id: r.get("id"),
+        name: r.get("name"),
+        source: r.get("source"),
+        files: r.get("files"),
     })
+    .collect();
+    if projects.is_empty() {
+        return Ok((projects, Vec::new(), Vec::new()));
+    }
+    let project_ids: Vec<Uuid> = projects.iter().map(|p| p.id).collect();
+    let file_ids: Vec<Uuid> = files.iter().map(|f| f.id).collect();
+    let contains = sqlx::query(
+        "SELECT DISTINCT project_id, artifact_id FROM project_items \
+         WHERE project_id = ANY($1) AND artifact_id = ANY($2) AND item_kind = 'file'",
+    )
+    .bind(&project_ids)
+    .bind(&file_ids)
+    .fetch_all(pool)
+    .await?
+    .iter()
+    .map(|r| GraphContains {
+        parent_type: "project",
+        parent: r.get("project_id"),
+        child_type: "file",
+        child: r.get("artifact_id"),
+    })
+    .collect();
+    let shown: HashSet<Uuid> = project_ids.iter().copied().collect();
+    let signatures = crate::projects::similarity::load(pool).await?;
+    let similar = crate::projects::similarity::pairs(&signatures, OVERVIEW_SIMILAR)
+        .into_iter()
+        .filter(|p| shown.contains(&p.a) && shown.contains(&p.b))
+        .map(|p| GraphSimilar {
+            a: p.a,
+            b: p.b,
+            score: p.score,
+            reasons: p.reasons,
+        })
+        .collect();
+    Ok((projects, contains, similar))
 }
 
 /// Files that units about `entity_ids` came from, the top `max_files` by

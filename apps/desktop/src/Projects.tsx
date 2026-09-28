@@ -15,12 +15,16 @@ import {
   FolderOpen,
   FolderPlus,
   FolderTree,
+  Sparkles,
   Trash2,
+  Waypoints,
 } from "lucide-react";
 import {
   deleteProject,
   getProject,
+  getSimilarProjects,
   listProjects,
+  type SimilarProject,
   type ProjectDetail,
   type ProjectItem,
   type ProjectSummary,
@@ -237,16 +241,99 @@ function Tree({
   );
 }
 
+/** The projects most like this one, with why. */
+function SimilarPanel({
+  id,
+  refreshKey,
+  onSelect,
+}: {
+  id: string;
+  refreshKey: number;
+  onSelect: (id: string) => void;
+}) {
+  const [items, setItems] = useState<SimilarProject[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setItems(null);
+    getSimilarProjects(id, 8)
+      .then((list) => {
+        if (cancelled) return;
+        setItems(list);
+        setError(null);
+      })
+      .catch((e) => !cancelled && setError(errorText(e)));
+    return () => {
+      cancelled = true;
+    };
+  }, [id, refreshKey]);
+
+  return (
+    <Panel
+      title="Similar projects"
+      icon={Sparkles}
+      actions={items && items.length > 0 && <span className="hint num">{items.length}</span>}
+    >
+      {error ? (
+        <p className="panel-pad hint">{error}</p>
+      ) : !items ? (
+        <div className="panel-pad">
+          <Skeleton rows={2} />
+        </div>
+      ) : items.length === 0 ? (
+        <p className="panel-pad hint">
+          No other project is much like this one yet. Gather compares the files they share, how
+          their folders are laid out, the people and things they mention, and what their text is
+          about.
+        </p>
+      ) : (
+        <ul className="similar-list">
+          {items.map((p) => (
+            <li key={p.project_id}>
+              <button
+                type="button"
+                className="similar-row"
+                onClick={() => onSelect(p.project_id)}
+                title={`Open ${p.name}`}
+              >
+                <span className="similar-head">
+                  <FolderTree className="similar-icon" aria-hidden />
+                  <span className="similar-name">{p.name}</span>
+                  <span className="similar-score num">{Math.round(p.score * 100)}%</span>
+                </span>
+                <span className="similar-bar" aria-hidden>
+                  <span style={{ width: `${Math.round(p.score * 100)}%` }} />
+                </span>
+                {p.reasons.length > 0 && (
+                  <ul className="similar-reasons">
+                    {p.reasons.map((r) => (
+                      <li key={r}>{r}</li>
+                    ))}
+                  </ul>
+                )}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Panel>
+  );
+}
+
 function ProjectView({
   id,
   refreshKey,
   onOpenFile,
   onRemoved,
+  onSelectProject,
+  onShowGraph,
 }: {
   id: string;
   refreshKey: number;
   onOpenFile: (artifactId: string) => void;
   onRemoved: () => void;
+  onSelectProject: (id: string) => void;
+  onShowGraph?: (id: string) => void;
 }) {
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -394,7 +481,14 @@ function ProjectView({
         )}
       </Panel>
 
+      <SimilarPanel id={id} refreshKey={refreshKey} onSelect={onSelectProject} />
+
       <div className="inspector-actions">
+        {onShowGraph && (
+          <Button variant="secondary" icon={Waypoints} onClick={() => onShowGraph(id)}>
+            Show as graph
+          </Button>
+        )}
         <span className="hint">Removing the project keeps its files in Gather.</span>
         <span className="spacer" />
         {confirming ? (
@@ -422,6 +516,7 @@ export default function Projects({
   onOpenFile,
   onAddFolder,
   onAddZip,
+  onShowGraph,
   refreshKey,
 }: {
   selected: string | null;
@@ -429,6 +524,8 @@ export default function Projects({
   onOpenFile: (artifactId: string) => void;
   onAddFolder: () => void;
   onAddZip: () => void;
+  /** Show a project's own graph. */
+  onShowGraph?: (id: string) => void;
   /** Changes whenever an upload finishes. */
   refreshKey: number;
 }) {
@@ -534,6 +631,8 @@ export default function Projects({
                 id={selected}
                 refreshKey={refreshKey}
                 onOpenFile={onOpenFile}
+                onSelectProject={onSelect}
+                onShowGraph={onShowGraph}
                 onRemoved={() => {
                   onSelect(null);
                   setRemovedKey((k) => k + 1);
