@@ -3,12 +3,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Archive,
   ArrowUpRight,
   ChevronRight,
   CircleSlash,
   Copy,
   FileArchive,
   Folder,
+  FolderArchive,
+  FolderMinus,
   FolderOpen,
   FolderPlus,
   FolderTree,
@@ -46,8 +49,17 @@ function summaryLine(p: ProjectSummary): string {
   const parts = [plural(p.files, "file")];
   if (p.folders > 0) parts.push(plural(p.folders, "folder"));
   if (p.skipped + p.failed > 0) parts.push(`${p.skipped + p.failed} skipped`);
+  if (p.left_out > 0) parts.push(`${plural(p.left_out, "folder")} left out`);
   return parts.join(" · ");
 }
+
+/** A folder left out whole (version control, dependencies, caches). */
+const isLeftOut = (item: ProjectItem) => item.item_kind === "folder" && item.status === "skipped";
+/** A .zip unpacked where it sat is a folder named after it. */
+const isUnpackedZip = (item: ProjectItem) =>
+  item.item_kind === "folder" && item.name.toLowerCase().endsWith(".zip");
+
+const KEPT_HINT = "Kept as it is. Gather can't read text from this kind of file.";
 
 /** Children by parent (null = the project root), folders first, then files. */
 function childrenOf(items: ProjectItem[]): Map<string | null, ProjectItem[]> {
@@ -96,6 +108,12 @@ function FileStatus({ item }: { item: ProjectItem }) {
       return (
         <span className="tree-status tone-warning" title="The same content is already in Gather">
           <Copy aria-hidden /> Already in Gather
+        </span>
+      );
+    case "stored":
+      return (
+        <span className="tree-status" title={item.detail ?? KEPT_HINT}>
+          <Archive aria-hidden /> Kept as is
         </span>
       );
     default:
@@ -161,7 +179,20 @@ function Tree({
   return (
     <ul className="tree" role={parent === null ? "tree" : "group"}>
       {items.map((item) =>
-        item.item_kind === "folder" ? (
+        isLeftOut(item) ? (
+          <li key={item.id} role="treeitem">
+            <div className="tree-row tree-folder skipped">
+              <span className="tree-chevron-space" aria-hidden />
+              <span className="tree-icon" aria-hidden>
+                <FolderMinus />
+              </span>
+              <span className="tree-name">{item.name}</span>
+              <span className="tree-status tone-neutral">
+                <CircleSlash aria-hidden /> Left out: {item.detail}
+              </span>
+            </div>
+          </li>
+        ) : item.item_kind === "folder" ? (
           <li key={item.id} role="treeitem" aria-expanded={expanded.has(item.id)}>
             <button
               type="button"
@@ -173,9 +204,16 @@ function Tree({
                 aria-hidden
               />
               <span className="tree-icon" aria-hidden>
-                {expanded.has(item.id) ? <FolderOpen /> : <Folder />}
+                {isUnpackedZip(item) ? (
+                  <FolderArchive />
+                ) : expanded.has(item.id) ? (
+                  <FolderOpen />
+                ) : (
+                  <Folder />
+                )}
               </span>
               <span className="tree-name">{item.name}</span>
+              {isUnpackedZip(item) && <span className="tree-kind">Unpacked .zip</span>}
               <span className="tree-status">{plural(counts.get(item.id) ?? 0, "file")}</span>
             </button>
             {expanded.has(item.id) && (
@@ -297,13 +335,19 @@ function ProjectView({
         {detail.deduplicated > 0 && (
           <span className="dot-sep">{detail.deduplicated} already in Gather</span>
         )}
-        {skipped.length > 0 && <span className="dot-sep">{skipped.length} skipped</span>}
+        {detail.stored > 0 && <span className="dot-sep">{detail.stored} kept as they are</span>}
+        {detail.skipped + detail.failed > 0 && (
+          <span className="dot-sep">{detail.skipped + detail.failed} skipped</span>
+        )}
+        {detail.left_out > 0 && (
+          <span className="dot-sep">{plural(detail.left_out, "folder")} left out</span>
+        )}
         <span className="dot-sep">{sizeLabel(detail.bytes)}</span>
       </p>
       {error && <Callout>{error}</Callout>}
 
       <Panel
-        title={filter === "all" ? "Folders and files" : "Skipped files"}
+        title={filter === "all" ? "Folders and files" : "Not read"}
         icon={FolderTree}
         className="doc-panel"
         actions={
@@ -314,7 +358,7 @@ function ProjectView({
               onChange={setFilter}
               options={[
                 { value: "all", label: "All" },
-                { value: "skipped", label: "Skipped", count: skipped.length },
+                { value: "skipped", label: "Not read", count: skipped.length },
               ]}
             />
           )
@@ -337,10 +381,12 @@ function ProjectView({
               <li key={item.id}>
                 <div className={`tree-row tree-file ${item.status}`}>
                   <span className="tree-icon" aria-hidden>
-                    <CircleSlash />
+                    {isLeftOut(item) ? <FolderMinus /> : <CircleSlash />}
                   </span>
-                  <span className="tree-name">{item.path}</span>
-                  <span className="tree-status">{item.detail ?? "Skipped"}</span>
+                  <span className="tree-name">{isLeftOut(item) ? `${item.path}/` : item.path}</span>
+                  <span className="tree-status">
+                    {isLeftOut(item) ? `Left out: ${item.detail}` : (item.detail ?? "Skipped")}
+                  </span>
                 </div>
               </li>
             ))}

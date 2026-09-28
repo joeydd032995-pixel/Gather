@@ -1,13 +1,16 @@
 -- Projects: a folder (or .zip) uploaded as a whole, kept as the tree it came
--- in: project -> folders -> files. Each file that Gather can read becomes an
--- ordinary artifact; the tree only records where it sat and what happened to
--- it (ingested, the same as a file already in Gather, skipped with a reason).
+-- in: project -> folders -> files. Every file becomes an ordinary artifact;
+-- the tree only records where it sat and what happened to it (read, the same
+-- as a file already in Gather, kept as it is when Gather can't read text from
+-- it, or skipped with a reason).
 --
--- Also two artifact kinds for the office formats projects bring along.
+-- Also artifact kinds for the office formats projects bring along, and
+-- 'file_other' for a file kept as it is, without text.
 -- The reverse script is migrations-down/0016_projects.down.sql.
 
 ALTER TYPE artifact_kind ADD VALUE IF NOT EXISTS 'document_docx';
 ALTER TYPE artifact_kind ADD VALUE IF NOT EXISTS 'document_spreadsheet';
+ALTER TYPE artifact_kind ADD VALUE IF NOT EXISTS 'file_other';
 
 CREATE TABLE projects (
     id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -34,13 +37,21 @@ CREATE TABLE project_items (
     -- NULL when the artifact is deleted.
     artifact_id uuid REFERENCES artifacts (id) ON DELETE SET NULL
                 DEFERRABLE INITIALLY IMMEDIATE,
-    status      text NOT NULL
-                CHECK (status IN ('folder', 'ingested', 'deduplicated', 'skipped', 'failed')),
-    -- Why a file was skipped or failed, in plain language.
+    -- Folders: 'folder', or 'skipped' for one left out whole (version
+    -- control history, installed dependencies, caches).
+    -- Files: 'ingested' (read), 'deduplicated' (already in Gather), 'stored'
+    -- (kept as it is, no text read), 'skipped' or 'failed'.
+    status      text NOT NULL,
+    -- Why a file or folder was skipped, failed or only stored, in plain
+    -- language.
     detail      text,
     byte_size   bigint CHECK (byte_size >= 0),
     created_at  timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT project_items_kind_status_ck CHECK ((item_kind = 'folder') = (status = 'folder')),
+    CONSTRAINT project_items_kind_status_ck CHECK (
+        (item_kind = 'folder' AND status IN ('folder', 'skipped'))
+        OR (item_kind = 'file'
+            AND status IN ('ingested', 'deduplicated', 'stored', 'skipped', 'failed'))
+    ),
     CONSTRAINT project_items_path_uq UNIQUE (project_id, path)
 );
 CREATE INDEX project_items_parent_idx ON project_items (project_id, parent_id);

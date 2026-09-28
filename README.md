@@ -53,9 +53,10 @@ photo out") rather than reviewing thousands of suggestions.
 - Files: **PDF** (text extraction), **Word** (`.docx`), **spreadsheets** (`.xlsx`, `.xls`,
   `.ods`), **Markdown / text**, **CSV, JSON, YAML, XML, HTML** and **source code**, **images**
   (EXIF + Tesseract OCR)
-- **Projects**: a whole folder or `.zip` uploaded at once and kept as its tree (project →
-  folders → files), with every file it held accounted for — read, already in Gather, or
-  skipped with the reason
+- **Projects**: a whole folder — documents, a code repository, `.zip` files — uploaded at once
+  and kept as its tree (project → folders → files). Every file counts: what Gather can read is
+  read, anything else is kept as it is, zips are unpacked in place, and folders left out
+  (`.git`, `node_modules`, caches) are shown with why
 - Content-hash deduplication and versioning — re-importing the same export is idempotent
 
 **Understanding**

@@ -340,7 +340,9 @@ function FileDetail({ id, refreshKey }: { id: string; refreshKey: number }) {
           <p className="panel-pad hint">
             {content.source === "image"
               ? "No text was found in this image."
-              : "No readable text was stored for this file."}
+              : detail.kind === "file_other"
+                ? "Gather keeps this file as it is; it can't read text from this kind of file."
+                : "No readable text was stored for this file."}
           </p>
         ) : (
           <div className={content.source === "conversation" ? "passages chat" : "passages"}>

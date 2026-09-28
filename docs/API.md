@@ -100,6 +100,7 @@ type:
 | `document_spreadsheet` | `.xlsx`, `.xlsm`, `.xls`, `.ods` | every sheet, one row per line, cells separated by tabs |
 | `document_text` | `.txt`, `.csv`, `.tsv`, `.json`, `.yaml`, `.xml`, `.html`, `.log`, source code (`.rs`, `.py`, `.ts`, `.go`, `.java`, `.sql`, `.sh`, …) | as text; HTML without its tags, scripts and styles |
 | `image` | `.jpg`, `.png`, `.webp`, `.heic`, … | EXIF, then OCR, in the extraction worker |
+| `file_other` | anything, when the part is named `file_other` | nothing: the file is kept as it is |
 
 Word documents and spreadsheets are turned into text when they arrive; a damaged one, or one
 that unpacks to far more than its size (over 256 MB, or 200× its compressed size), is refused
@@ -117,20 +118,36 @@ Per-request size is capped by `GATHER_MAX_UPLOAD_MB`; larger requests get `413 p
 
 ## Projects
 
-A project is a folder uploaded as a whole and kept as the tree it came in: the project, the
-folders in it, and the files in those. Every file is stored exactly as a single upload would be
-(so it is deduplicated by content, read, and linked into the graph like any other file); the
-project records where each file sat and what happened to it.
+A project is a folder — of documents, a code repository, `.zip` files, anything — uploaded as
+a whole and kept as the tree it came in: the project, the folders in it, and the files in
+those. Every file counts. Each is stored exactly as a single upload would be (so it is
+deduplicated by content, read, and linked into the graph like any other file); the project
+records where each file sat and what happened to it.
+
+- A file of a kind Gather reads is read. One whose kind Gather doesn't know by name is read as
+  text when its content is text (a `Makefile`, `.gitignore`, a config file by another name).
+- Anything else — a program, a design file, audio, a `.7z` — is **kept as it is**
+  (`file_other`, status `stored`), and so is a known kind whose text couldn't be read (a
+  damaged Word file), with why in `detail`.
+- A `.zip` in a project is **unpacked where it sits**, as a folder of the same name
+  (`archive/drafts.zip/…`); one holding a single folder is unpacked without repeating it. Zips
+  inside zips are unpacked too, up to three deep; a fourth is kept as it is. One that can't be
+  unpacked is kept as it is.
 
 | Status | Meaning |
 |---|---|
 | `ingested` | Read into Gather |
 | `deduplicated` | The same content was already in Gather; the project links to that file |
-| `skipped` | Not read, with the reason in `detail`: a kind of file Gather can't read, an empty or oversized file, a nested archive, or a file that looks like it holds keys or passwords (`.env`, `id_rsa`, `.pem`, `.key`, …), which is never opened |
+| `stored` | Kept as it is, without text read from it |
+| `skipped` | Not kept, with the reason in `detail`: an empty or oversized file, a clash with the tree, or a file that looks like it holds keys or passwords (`.env`, `id_rsa`, `.pem`, `.key`, …), which is never opened |
 | `failed` | It couldn't be stored; sending it again retries |
 
-Tooling and clutter — `.git`, `node_modules`, `__pycache__`, virtualenvs, `__MACOSX`,
-`.DS_Store`, `Thumbs.db` and the like — are left out without a record.
+Folders that aren't the project's own work are **left out whole** and appear in the tree as a
+folder with status `skipped` and the reason in `detail`: version-control history (`.git`,
+`.hg`, `.svn`), installed dependencies (`node_modules`, `bower_components`, `.venv`, `venv`)
+and tool caches (`__pycache__`, `.mypy_cache`, `.pytest_cache`, `.ruff_cache`, `.tox`,
+`.gradle`, `.next`, `.nuxt`, `.terraform`). Only operating-system clutter — `.DS_Store`,
+`Thumbs.db`, `desktop.ini`, `._*` files and `__MACOSX` folders — is dropped without a record.
 
 | Method | Path | Notes |
 |---|---|---|
@@ -142,7 +159,8 @@ Tooling and clutter — `.git`, `node_modules`, `__pycache__`, virtualenvs, `__M
 | DELETE | `/projects/{id}` | Removes the project and its tree → `204`. Its files stay in Gather |
 
 A `ProjectSummary` is `{ id, name, source ("folder" or "zip"), created_at, updated_at, files,
-folders, ingested, deduplicated, skipped, failed, bytes }`. Each item of `GET /projects/{id}`
+folders, ingested, deduplicated, stored, skipped, failed, left_out, bytes }`, where `skipped`
+counts files and `left_out` folders left out whole. Each item of `GET /projects/{id}`
 is `{ id, parent_id, item_kind ("folder" or "file"), name, path, depth, status, detail,
 artifact_id, artifact_kind, units, byte_size }`, where `units` counts the statements found in
 the file so far.
@@ -151,7 +169,17 @@ the file so far.
 
 `multipart/form-data`. Each file part may be preceded by a text part named `path` giving the
 file's path inside the project; without one the part's file name is used. Folders are created
-as needed. Sending a path again replaces that file's record, so a partly failed upload can be
+as needed. Text parts describe what the sender didn't send:
+
+- `left_out` — a folder left out whole instead of sending its files
+  (`-F left_out=web/node_modules`); only the folder names above are taken.
+- `withheld` — a file not sent because it looks like it holds keys or passwords
+  (`-F withheld=.env`), so its bytes never leave the sender; it is listed as skipped. Only paths
+  Gather wouldn't read are taken.
+- `folder` — an empty folder, so the tree keeps it.
+
+Anything else in those parts comes back `skipped` and isn't recorded. Requests adding to the
+same project are handled one at a time. Sending a path again replaces that file's record, so a partly failed upload can be
 resumed. Paths are relative and `/`-separated; absolute paths, drive letters, `..` and control
 characters are skipped per file, as is a file where the project already has a folder, or one
 inside what the project already has as a file; such a file isn't stored.
@@ -164,17 +192,19 @@ curl -X POST $API/projects/$ID/files \
 ```
 
 The response is `{ project_id, job_id, files: [{ path, status, kind, artifact_id, detail,
-segments }] }`. As with `/ingest/files`, one file per request keeps memory at one file; the
+segments }], stopped }`: one result per file, so a `.zip` gives one for each file in it, and
+`left_out` for each folder left out (its `path` is the folder). `stopped` says why unpacking
+stopped early, or is `null`. As with `/ingest/files`, one file per request keeps memory at one file; the
 desktop app sends a picked or dropped folder that way.
 
 ### `POST /projects/import`
 
 `multipart/form-data` with one `.zip` part and, optionally, a text part `name`. Without a name
 the project is named after the folder the archive holds, or else the archive. Entries are
-unpacked one at a time. Limits: `GATHER_PROJECT_MAX_FILES` files, `GATHER_MAX_UPLOAD_MB` per
-file and `GATHER_PROJECT_MAX_MB` in all; an entry that would unpack to more than 200× its
-compressed size is skipped. Links inside the archive are skipped, and archives inside it are
-recorded but not unpacked.
+unpacked one at a time, and zips inside it are unpacked in place as above. Limits, shared by
+every zip in the request however deeply nested: `GATHER_PROJECT_MAX_FILES` files,
+`GATHER_MAX_UPLOAD_MB` per file and `GATHER_PROJECT_MAX_MB` in all; an entry that would unpack
+to more than 200× its compressed size is skipped. Links inside the archive are skipped.
 
 ```bash
 curl -X POST $API/projects/import -F file=@Atlas.zip

@@ -36,6 +36,12 @@ pub enum Entry {
         reason: String,
         size: Option<u64>,
     },
+    /// A folder left out whole (version control, dependencies, caches);
+    /// sent once, however many entries it holds.
+    LeftOut {
+        folder: String,
+        reason: &'static str,
+    },
     /// A limit was reached; nothing after this was read.
     Stopped(String),
 }
@@ -77,15 +83,40 @@ fn strip<'a>(path: &'a str, root: &Option<String>) -> Option<&'a str> {
     }
 }
 
+const NOT_A_ZIP: &str = "this isn't a .zip file Gather can read";
+
+/// Whether `bytes` open as a zip, without taking or copying them.
+pub fn check(bytes: &[u8]) -> Result<(), String> {
+    zip::ZipArchive::new(Cursor::new(bytes))
+        .map(|_| ())
+        .map_err(|_| NOT_A_ZIP.to_string())
+}
+
+/// Count one more entry that will be recorded (a file, or one skipped or
+/// left out): each costs a row, so all of them count toward the file limit.
+/// `Some` is the entry that stops the stream once the limit is passed.
+fn over_limit(files: &mut usize, limits: &Limits) -> Option<Entry> {
+    *files += 1;
+    (*files > limits.max_files).then(|| {
+        Entry::Stopped(format!(
+            "the project has more than {} files; the rest weren't read",
+            limits.max_files
+        ))
+    })
+}
+
 /// Open `bytes` as a zip and start streaming its entries.
 pub fn open(bytes: Vec<u8>, limits: Limits) -> Result<Opened, String> {
-    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
-        .map_err(|_| "this isn't a .zip file Gather can read".to_string())?;
+    let mut archive =
+        zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| NOT_A_ZIP.to_string())?;
+    // Clutter such as a Finder archive's `__MACOSX/` is left out, so it
+    // mustn't stop the real top folder from naming the project.
     let names: Vec<String> = (0..archive.len())
         .filter_map(|i| {
             let e = archive.by_index_raw(i).ok()?;
             entry_path(&e)
         })
+        .filter(|name| !paths::is_clutter(name))
         .collect();
     let root = common_root(&names);
     let (tx, rx) = mpsc::channel(1);
@@ -101,12 +132,27 @@ fn stream(
     tx: mpsc::Sender<Entry>,
 ) {
     let send = |e: Entry| tx.blocking_send(e).is_ok();
+    let mut left_out = std::collections::HashSet::new();
     let mut files = 0usize;
     let mut total = 0u64;
+    // Entries that aren't recorded (clutter, the contents of a folder left
+    // out) are cheap, but an archive of millions of them still takes time:
+    // they are bounded too.
+    let max_entries = limits.max_files.saturating_mul(10).max(10_000);
     for i in 0..archive.len() {
+        if i >= max_entries {
+            send(Entry::Stopped(format!(
+                "the archive has more than {max_entries} entries; the rest weren't read"
+            )));
+            return;
+        }
         let (path, is_dir, is_link, size, compressed) = match archive.by_index_raw(i) {
             Ok(raw) => {
                 let Some(path) = entry_path(&raw) else {
+                    if let Some(stop) = over_limit(&mut files, &limits) {
+                        send(stop);
+                        return;
+                    }
                     let name = raw.name().to_string();
                     if !send(Entry::Skipped {
                         path: name,
@@ -131,9 +177,32 @@ fn stream(
         let Some(rel) = strip(&path, &root).map(str::to_string) else {
             continue; // the root folder itself
         };
-        match paths::screen(&rel) {
+        let screen = match paths::left_out_reason(paths::file_name(&rel)) {
+            Some(reason) if is_dir => paths::Screen::LeftOut {
+                folder: rel.clone(),
+                reason,
+            },
+            _ => paths::screen(&rel),
+        };
+        match screen {
             paths::Screen::Ignore => continue,
+            paths::Screen::LeftOut { folder, reason } => {
+                if left_out.insert(folder.clone()) {
+                    if let Some(stop) = over_limit(&mut files, &limits) {
+                        send(stop);
+                        return;
+                    }
+                    if !send(Entry::LeftOut { folder, reason }) {
+                        return;
+                    }
+                }
+                continue;
+            }
             paths::Screen::Skip(reason) if !is_dir => {
+                if let Some(stop) = over_limit(&mut files, &limits) {
+                    send(stop);
+                    return;
+                }
                 if !send(Entry::Skipped {
                     path: rel,
                     reason: reason.into(),
@@ -151,6 +220,10 @@ fn stream(
             }
             continue;
         }
+        if let Some(stop) = over_limit(&mut files, &limits) {
+            send(stop);
+            return;
+        }
         if is_link {
             if !send(Entry::Skipped {
                 path: rel,
@@ -160,14 +233,6 @@ fn stream(
                 return;
             }
             continue;
-        }
-        files += 1;
-        if files > limits.max_files {
-            send(Entry::Stopped(format!(
-                "the project has more than {} files; the rest weren't read",
-                limits.max_files
-            )));
-            return;
         }
         if size > limits.max_file_bytes {
             if !send(Entry::Skipped {
@@ -273,7 +338,10 @@ mod tests {
             ("Atlas/README.md", b"# Atlas"),
             ("Atlas/docs/plan.txt", b"plan"),
             ("Atlas/empty/", b""),
+            ("Atlas/.git/", b""),
             ("Atlas/.git/HEAD", b"ref"),
+            ("Atlas/.git/objects/ab", b"obj"),
+            ("Atlas/web/node_modules/x/i.js", b"1"),
             ("Atlas/.env", b"SECRET=1"),
         ]);
         let (root, entries) = collect(zip, LIMITS).await;
@@ -292,7 +360,15 @@ mod tests {
         assert!(entries
             .iter()
             .any(|e| matches!(e, Entry::Skipped { path, .. } if path == ".env")));
-        assert!(!entries.iter().any(|e| format!("{e:?}").contains(".git")));
+        // Left-out folders are reported once each, their contents unread.
+        let left_out: Vec<&str> = entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::LeftOut { folder, .. } => Some(folder.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(left_out, vec![".git", "web/node_modules"]);
     }
 
     #[tokio::test]
@@ -346,9 +422,52 @@ mod tests {
         assert!(matches!(&entries[1], Entry::File { path, .. } if path == "ok.md"));
     }
 
+    #[tokio::test]
+    async fn skipped_entries_count_toward_the_file_limit() {
+        let secrets: Vec<(String, Vec<u8>)> = (0..5)
+            .map(|i| (format!("k{i}.pem"), b"x".to_vec()))
+            .collect();
+        let refs: Vec<(&str, &[u8])> = secrets
+            .iter()
+            .map(|(n, d)| (n.as_str(), d.as_slice()))
+            .collect();
+        let limits = Limits {
+            max_files: 3,
+            ..LIMITS
+        };
+        let (_, entries) = collect(zip_of(&refs), limits).await;
+        let skipped = entries
+            .iter()
+            .filter(|e| matches!(e, Entry::Skipped { .. }))
+            .count();
+        assert_eq!(skipped, 3);
+        assert!(matches!(entries.last(), Some(Entry::Stopped(_))));
+    }
+
+    #[tokio::test]
+    async fn mac_metadata_doesnt_hide_the_root() {
+        let zip = zip_of(&[
+            ("Atlas/README.md", b"# Atlas"),
+            ("Atlas/docs/a.md", b"a"),
+            ("__MACOSX/Atlas/._README.md", b"meta"),
+        ]);
+        let (root, entries) = collect(zip, LIMITS).await;
+        assert_eq!(root.as_deref(), Some("Atlas"));
+        let files: Vec<&str> = entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::File { path, .. } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(files, vec!["README.md", "docs/a.md"]);
+    }
+
     #[test]
     fn roots_and_bad_archives() {
         assert!(open(b"not a zip".to_vec(), LIMITS).is_err());
+        assert!(check(b"not a zip").is_err());
+        assert!(check(&zip_of(&[("a.md", b"a")])).is_ok());
         assert_eq!(
             common_root(&["a/b".into(), "a/c".into()]).as_deref(),
             Some("a")

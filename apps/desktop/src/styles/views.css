@@ -1879,6 +1879,14 @@ button.tree-row:focus-visible {
 .tree-chevron.open {
   transform: rotate(90deg);
 }
+/* Keeps a left-out folder's icon in line with the folders that open. */
+.tree-chevron-space {
+  flex-shrink: 0;
+  width: 13px;
+}
+.tree-folder.skipped .tree-name {
+  color: var(--text-3);
+}
 .tree-file {
   padding-left: 28px;
 }

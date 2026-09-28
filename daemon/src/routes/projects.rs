@@ -9,7 +9,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::error::ApiError;
-use crate::projects::{self, store, ImportReport, ItemResult};
+use crate::projects::{self, paths, store, Budget, ImportReport, ItemResult};
 use crate::routes::ingest::{create_job, finish_job, read_part};
 use crate::AppState;
 
@@ -58,32 +58,112 @@ pub struct FilesResponse {
     pub project_id: Uuid,
     pub job_id: Uuid,
     pub files: Vec<ItemResult>,
+    /// Why unpacking a `.zip` among the files stopped early, if it did.
+    pub stopped: Option<String>,
 }
 
 /// POST /projects/{id}/files — multipart. Each file part may be preceded by
 /// a text part named `path` holding its path inside the project
 /// (`docs/plan.md`); without one, the part's file name is used as the path.
+/// A `.zip` is unpacked where it sits. Text parts that describe what the
+/// sender didn't send:
+/// - `left_out`: a folder left out whole (`web/node_modules`); only the
+///   folder names Gather leaves out are taken;
+/// - `withheld`: a file not sent because it looks like it holds keys or
+///   passwords (`.env`); only paths Gather wouldn't read are taken;
+/// - `folder`: an empty folder, so the tree keeps it.
 pub async fn add_files(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    mut multipart: Multipart,
+    multipart: Multipart,
 ) -> Result<(StatusCode, Json<FilesResponse>), ApiError> {
     store::exists(&state.pool, id).await?;
-    let max_bytes = state.config.max_upload_mb * 1024 * 1024;
+    // One request at a time per project, so two can't both pass the check
+    // for a path that clashes with the other's.
+    let _lock = projects::lock(id).await;
     let job_id = create_job(&state.pool, "rest").await?;
-    let mut pending_path: Option<String> = None;
+    let mut budget = Budget::new(&state.config);
     let mut files = Vec::new();
+    let read = read_parts(&state, id, job_id, multipart, &mut budget, &mut files).await;
+    // Every way out finishes the job, so none is left "processing".
+    let outcome = match read {
+        Ok(0) => Err(ApiError::BadRequest(
+            "multipart body contained no file parts".into(),
+        )),
+        Ok(_) => Ok(()),
+        Err(e) => Err(e),
+    };
+    let ok = outcome.is_ok() && files.iter().all(|f| f.status != "failed");
+    let summary = match &outcome {
+        Ok(()) => json!({ "project": id, "files": files.len() }),
+        Err(e) => json!({ "project": id, "files": files.len(), "error": e.to_string() }),
+    };
+    finish_job(&state.pool, job_id, ok, summary).await?;
+    outcome?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(FilesResponse {
+            project_id: id,
+            job_id,
+            files,
+            stopped: budget.stopped,
+        }),
+    ))
+}
+
+/// The parts of one `POST /projects/{id}/files`, taken in order. Returns how
+/// many parts there were.
+async fn read_parts(
+    state: &AppState,
+    id: Uuid,
+    job_id: Uuid,
+    mut multipart: Multipart,
+    budget: &mut Budget,
+    files: &mut Vec<ItemResult>,
+) -> Result<usize, ApiError> {
+    let max_bytes = state.config.max_upload_mb * 1024 * 1024;
+    let mut pending_path: Option<String> = None;
+    let mut parts = 0;
     while let Some(field) = multipart
         .next_field()
         .await
         .map_err(|e| ApiError::BadRequest(format!("malformed multipart body: {e}")))?
     {
         let part = field.name().unwrap_or("file").to_string();
-        if part == "path" && field.file_name().is_none() {
+        let described = ["path", "left_out", "withheld", "folder"].contains(&part.as_str());
+        if field.file_name().is_none() && described {
             let bytes = read_part(field, &part, 8 * 1024, None).await?;
-            pending_path = Some(String::from_utf8_lossy(&bytes).into_owned());
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            if part == "path" {
+                pending_path = Some(text);
+                continue;
+            }
+            parts += 1;
+            let path = paths::normalize(&text);
+            match (part.as_str(), path) {
+                (_, Err(reason)) => files.push(ItemResult::skipped(&text, reason)),
+                ("left_out", Ok(folder)) => match paths::left_out_reason(paths::file_name(&folder))
+                {
+                    Some(reason) => {
+                        files.push(projects::left_out(state, id, &folder, reason).await?)
+                    }
+                    None => files.push(ItemResult::skipped(
+                        &text,
+                        "not a folder Gather leaves out; send its files instead",
+                    )),
+                },
+                ("withheld", Ok(path)) => files.push(projects::withheld(state, id, &path).await?),
+                (_, Ok(folder)) => {
+                    if let Err(ApiError::BadRequest(clash)) =
+                        store::ensure_folder(&state.pool, id, &folder).await
+                    {
+                        files.push(ItemResult::skipped(&folder, &clash));
+                    }
+                }
+            }
             continue;
         }
+        parts += 1;
         let path = pending_path
             .take()
             .or_else(|| field.file_name().map(String::from))
@@ -93,29 +173,9 @@ pub async fn add_files(
             .map(String::from)
             .filter(|t| t != "application/octet-stream");
         let bytes = read_part(field, &part, max_bytes, None).await?;
-        files.push(projects::add_file(&state, id, job_id, &path, declared, &bytes).await?);
+        projects::add_file(state, id, job_id, &path, declared, bytes, 0, budget, files).await?;
     }
-    let ok = files.iter().all(|f| f.status != "failed");
-    finish_job(
-        &state.pool,
-        job_id,
-        ok,
-        json!({ "project": id, "files": files.len() }),
-    )
-    .await?;
-    if files.is_empty() {
-        return Err(ApiError::BadRequest(
-            "multipart body contained no file parts".into(),
-        ));
-    }
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(FilesResponse {
-            project_id: id,
-            job_id,
-            files,
-        }),
-    ))
+    Ok(parts)
 }
 
 /// POST /projects/import — multipart with one `.zip` part and, optionally, a

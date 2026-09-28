@@ -29,6 +29,8 @@ enum ArtifactKind {
   ARTIFACT_KIND_IMAGE_SCREENSHOT = 7;
   ARTIFACT_KIND_DOCUMENT_DOCX = 8;
   ARTIFACT_KIND_DOCUMENT_SPREADSHEET = 9;
+  // A file kept as it is, without text read from it.
+  ARTIFACT_KIND_FILE_OTHER = 10;
 }
 
 enum UnitKind {

@@ -244,6 +244,20 @@ fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8192).any(|&b| b == 0)
 }
 
+/// Whether a file of a kind Gather doesn't know by name is text after all
+/// (a `Makefile`, `.gitignore`, a `.cfg` by another name): no NUL bytes and
+/// valid UTF-8 in its first 8 KB, allowing a character cut off at the end.
+pub fn looks_like_text(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(8192)];
+    if head.is_empty() || looks_binary(head) {
+        return false;
+    }
+    match std::str::from_utf8(head) {
+        Ok(_) => true,
+        Err(e) => e.error_len().is_none() && head.len() == 8192,
+    }
+}
+
 // ---------------------------------------------------------------- HTML ----
 
 fn html_to_text(html: &str) -> String {
@@ -494,6 +508,20 @@ fn spreadsheet_to_text(bytes: &[u8]) -> Result<String, String> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn text_is_recognised_by_content() {
+        assert!(looks_like_text(b"all: build\n\tcargo build\n"));
+        assert!(looks_like_text("caf\u{e9} notes".as_bytes()));
+        assert!(!looks_like_text(b"MZ\x90\x00\x03"));
+        assert!(!looks_like_text(&[0xff, 0xfe, 0x41, 0x00]));
+        assert!(!looks_like_text(b"\xff\xd8\xff\xe0 jpeg"));
+        assert!(!looks_like_text(b""));
+        // A multi-byte character cut by the 8 KB window is still text.
+        let mut long = "a".repeat(8191).into_bytes();
+        long.extend_from_slice("\u{e9}".as_bytes());
+        assert!(looks_like_text(&long));
+    }
 
     fn zip_with(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));

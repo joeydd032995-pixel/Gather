@@ -3,6 +3,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  Archive,
   ArrowUpRight,
   ChevronDown,
   CircleCheck,
@@ -16,6 +17,7 @@ import {
 import {
   createProject,
   importProjectZip,
+  describeProject,
   uploadFiles,
   uploadProjectFile,
   type ProjectFileResult,
@@ -24,22 +26,112 @@ import { kindIcon, kindLabel, plural } from "./kinds";
 import { isTauri } from "./native";
 import { IconButton } from "./ui";
 
+/** What "Add files" offers: every kind Gather reads (the daemon's lists).
+ *  Inside a project folder every file is taken, whatever its kind. */
 const EXTENSIONS = [
   "pdf",
   "md",
   "markdown",
-  "txt",
   "docx",
+  "docm",
   "xlsx",
+  "xlsm",
+  "xlsb",
   "xls",
   "ods",
-  "csv",
-  "json",
   "html",
   "htm",
+  "xhtml",
+  "txt",
+  "text",
+  "log",
+  "csv",
+  "tsv",
+  "json",
+  "jsonl",
+  "ndjson",
   "yaml",
   "yml",
+  "toml",
+  "ini",
+  "cfg",
+  "conf",
+  "properties",
   "xml",
+  "svg",
+  "css",
+  "scss",
+  "less",
+  "sql",
+  "graphql",
+  "gql",
+  "proto",
+  "sh",
+  "bash",
+  "zsh",
+  "fish",
+  "ps1",
+  "bat",
+  "cmd",
+  "py",
+  "pyi",
+  "ipynb",
+  "rs",
+  "go",
+  "rb",
+  "php",
+  "pl",
+  "lua",
+  "r",
+  "jl",
+  "js",
+  "mjs",
+  "cjs",
+  "ts",
+  "mts",
+  "cts",
+  "tsx",
+  "jsx",
+  "vue",
+  "svelte",
+  "java",
+  "kt",
+  "kts",
+  "scala",
+  "groovy",
+  "gradle",
+  "swift",
+  "m",
+  "mm",
+  "c",
+  "h",
+  "cc",
+  "cpp",
+  "cxx",
+  "hpp",
+  "hh",
+  "cs",
+  "fs",
+  "vb",
+  "dart",
+  "ex",
+  "exs",
+  "erl",
+  "hs",
+  "clj",
+  "elm",
+  "zig",
+  "nim",
+  "tf",
+  "hcl",
+  "rst",
+  "adoc",
+  "asciidoc",
+  "org",
+  "tex",
+  "bib",
+  "srt",
+  "vtt",
   "png",
   "jpg",
   "jpeg",
@@ -50,38 +142,91 @@ const EXTENSIONS = [
 ];
 export const ACCEPT = EXTENSIONS.map((e) => `.${e}`).join(",");
 
-/** Tooling folders and clutter a project upload leaves out (the daemon
- *  applies the same rules; skipping them here saves sending them). */
-const IGNORED_DIRS = new Set([
+/** Folders a project upload leaves out whole: version-control history,
+ *  installed dependencies and tool caches. Their files aren't sent; the
+ *  folders are reported so the project's tree still shows them. The daemon
+ *  applies the same list. */
+const LEFT_OUT_DIRS = new Set([
   ".git",
   ".hg",
   ".svn",
   "node_modules",
   "bower_components",
-  "__macosx",
-  "__pycache__",
   ".venv",
   "venv",
+  "__pycache__",
   ".tox",
   ".mypy_cache",
   ".pytest_cache",
   ".ruff_cache",
   ".gradle",
-  ".idea",
   ".next",
   ".nuxt",
   ".terraform",
 ]);
-const IGNORED_FILES = new Set([".ds_store", "thumbs.db", "desktop.ini", ".localized"]);
+/** Files that usually hold keys or passwords. Their bytes are never read
+ *  or sent; only their paths, so the project lists them as skipped. The
+ *  daemon applies the same rules. */
+const SECRET_NAMES = new Set([
+  "id_rsa",
+  "id_dsa",
+  "id_ecdsa",
+  "id_ed25519",
+  ".npmrc",
+  ".pypirc",
+  ".netrc",
+  ".pgpass",
+  ".htpasswd",
+  "credentials",
+  "credentials.json",
+  "secrets.json",
+  "secrets.yaml",
+  "secrets.yml",
+]);
+const SECRET_EXTENSIONS = new Set([
+  "pem",
+  "key",
+  "p12",
+  "pfx",
+  "jks",
+  "keystore",
+  "kdbx",
+  "ppk",
+  "asc",
+  "gpg",
+]);
+
+/** Operating-system and archive-tool clutter, left out without a trace. */
+const CLUTTER_DIRS = new Set(["__macosx"]);
+const CLUTTER_FILES = new Set([".ds_store", "thumbs.db", "desktop.ini", ".localized"]);
 /** Most files added from one folder, as the desktop app's folder listing allows. */
 const MAX_PROJECT_FILES = 20_000;
 
-/** Whether a project-relative path should be sent at all. */
-function keepPath(path: string): boolean {
-  const parts = path.toLowerCase().split("/");
-  const name = parts[parts.length - 1];
-  if (parts.slice(0, -1).some((p) => IGNORED_DIRS.has(p))) return false;
-  return !IGNORED_FILES.has(name) && !name.startsWith("._");
+/** What a project upload does with a path inside the project: send it,
+ *  drop it as clutter, leave out the folder it sits in, or withhold it
+ *  unread (secrets). */
+type Screen =
+  | { action: "send" }
+  | { action: "drop" }
+  | { action: "leave-out"; folder: string }
+  | { action: "withhold" };
+
+function screenPath(path: string): Screen {
+  const parts = path.split("/");
+  const lower = parts.map((p) => p.toLowerCase());
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (CLUTTER_DIRS.has(lower[i])) return { action: "drop" };
+    if (LEFT_OUT_DIRS.has(lower[i])) {
+      return { action: "leave-out", folder: parts.slice(0, i + 1).join("/") };
+    }
+  }
+  const name = lower[lower.length - 1];
+  if (CLUTTER_FILES.has(name) || name.startsWith("._")) return { action: "drop" };
+  const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1) : "";
+  if (name.startsWith(".env") || SECRET_NAMES.has(name) || SECRET_EXTENSIONS.has(ext)) {
+    return { action: "withhold" };
+  }
+  return { action: "send" };
 }
 
 const isZip = (name: string) => name.toLowerCase().endsWith(".zip");
@@ -109,6 +254,7 @@ export type UploadStatus =
   | "uploading"
   | "accepted"
   | "deduplicated"
+  | "stored"
   | "skipped"
   | "rejected";
 
@@ -152,7 +298,43 @@ async function pickWithNativeDialog(): Promise<UploadSource[]> {
 interface FolderListing {
   name: string;
   files: { path: string; abs: string; size: number }[];
+  /** Folders left out whole, by their path in the project. */
+  left_out: string[];
+  /** Folders with nothing in them, so the tree keeps them. */
+  empty_folders: string[];
   truncated: boolean;
+}
+
+/** A folder's files to send, and what it held that isn't sent. */
+interface PickedProject {
+  entries: ProjectEntry[];
+  /** Folders left out whole, by their path in the project. */
+  leftOut: string[];
+  /** Secret-looking files, by path: never read, listed as skipped. */
+  withheld: string[];
+  /** Empty folders, so the project's tree keeps them. */
+  folders: string[];
+}
+
+const emptyPick = (): PickedProject => ({ entries: [], leftOut: [], withheld: [], folders: [] });
+
+/** Sort one file of a picked folder into `pick`. `source` is only called
+ *  for a file that will be sent. Returns whether anything was recorded. */
+function pickFile(pick: PickedProject, path: string, source: () => UploadSource): boolean {
+  const screen = screenPath(path);
+  switch (screen.action) {
+    case "send":
+      pick.entries.push({ path, source: source() });
+      return true;
+    case "withhold":
+      pick.withheld.push(path);
+      return true;
+    case "leave-out":
+      if (!pick.leftOut.includes(screen.folder)) pick.leftOut.push(screen.folder);
+      return true;
+    case "drop":
+      return false;
+  }
 }
 
 async function pickFolderWithNativeDialog(): Promise<FolderListing | null> {
@@ -163,56 +345,67 @@ async function pickFolderWithNativeDialog(): Promise<FolderListing | null> {
   return invoke<FolderListing>("list_project_folder", { path: selection });
 }
 
-/** Every file under a dropped folder, with its path inside that folder. */
-async function readDroppedFolder(dir: FileSystemDirectoryEntry): Promise<ProjectEntry[]> {
-  const out: ProjectEntry[] = [];
+/** Everything under a dropped folder, with paths inside that folder. */
+async function readDroppedFolder(dir: FileSystemDirectoryEntry): Promise<PickedProject> {
+  const pick = emptyPick();
   const prefix = `${dir.fullPath}/`;
-  const walk = async (d: FileSystemDirectoryEntry) => {
-    // One past the limit is enough for addProject to say it was reached.
-    if (out.length > MAX_PROJECT_FILES) return;
+  const full = () => pick.entries.length > MAX_PROJECT_FILES;
+  const relative = (entry: FileSystemEntry) =>
+    entry.fullPath.startsWith(prefix) ? entry.fullPath.slice(prefix.length) : entry.name;
+  /** Walks `d`; returns whether anything under it was recorded. */
+  const walk = async (d: FileSystemDirectoryEntry): Promise<boolean> => {
+    let recorded = false;
     const reader = d.createReader();
     // readEntries returns the folder in batches until an empty one.
     for (;;) {
+      // One past the limit is enough for addProject to say it was reached.
+      if (full()) return true;
       const batch = await new Promise<FileSystemEntry[]>((resolve, reject) =>
         reader.readEntries(resolve, reject),
       );
       if (batch.length === 0) break;
       for (const entry of batch) {
-        const path = entry.fullPath.startsWith(prefix)
-          ? entry.fullPath.slice(prefix.length)
-          : entry.name;
+        if (full()) return true;
+        const path = relative(entry);
         if (entry.isDirectory) {
-          if (!IGNORED_DIRS.has(entry.name.toLowerCase())) {
-            await walk(entry as FileSystemDirectoryEntry);
+          // Screened as if it held a file, so its own name counts.
+          const screen = screenPath(`${path}/-`);
+          if (screen.action === "leave-out") {
+            if (!pick.leftOut.includes(screen.folder)) pick.leftOut.push(screen.folder);
+            recorded = true;
+          } else if (screen.action !== "drop") {
+            if (!(await walk(entry as FileSystemDirectoryEntry))) pick.folders.push(path);
+            recorded = true;
           }
-        } else if (keepPath(path)) {
+        } else {
           const fileEntry = entry as FileSystemFileEntry;
-          out.push({
-            path,
-            source: {
+          recorded =
+            pickFile(pick, path, () => ({
               name: entry.name,
               load: () => new Promise<File>((resolve, reject) => fileEntry.file(resolve, reject)),
-            },
-          });
+            })) || recorded;
         }
       }
     }
+    return recorded;
   };
   await walk(dir);
-  return out.sort((a, b) => (a.path < b.path ? -1 : 1));
+  pick.entries.sort((a, b) => (a.path < b.path ? -1 : 1));
+  pick.leftOut.sort();
+  return pick;
 }
 
-/** Files from an <input webkitdirectory>, grouped by the folder picked. */
-function groupPickedFolder(files: File[]): Map<string, ProjectEntry[]> {
-  const projects = new Map<string, ProjectEntry[]>();
+/** Files from an <input webkitdirectory>, grouped by the folder picked.
+ *  (Browsers don't list empty folders here.) */
+function groupPickedFolder(files: File[]): Map<string, PickedProject> {
+  const projects = new Map<string, PickedProject>();
   for (const file of files) {
     const rel = file.webkitRelativePath || file.name;
     const [root, ...rest] = rel.split("/");
     const path = rest.length > 0 ? rest.join("/") : root;
-    if (!keepPath(path)) continue;
-    const list = projects.get(root) ?? [];
-    list.push({ path, source: { name: file.name, load: async () => file } });
-    projects.set(root, list);
+    const project = projects.get(root) ?? emptyPick();
+    projects.set(root, project);
+    pickFile(project, path, () => ({ name: file.name, load: async () => file }));
   }
   return projects;
 }
@@ -220,10 +413,26 @@ function groupPickedFolder(files: File[]): Map<string, ProjectEntry[]> {
 const PROJECT_STATUS: Record<ProjectFileResult["status"], UploadStatus> = {
   ingested: "accepted",
   deduplicated: "deduplicated",
+  stored: "stored",
   skipped: "skipped",
+  left_out: "skipped",
   ignored: "skipped",
   failed: "rejected",
 };
+
+/** "3 files read, 1 kept as it is, 2 skipped" for a .zip unpacked in place. */
+function unpackedSummary(files: ProjectFileResult[], stopped: string | null): string {
+  const count = (status: ProjectFileResult["status"]) =>
+    files.filter((f) => f.status === status).length;
+  const parts = [`${plural(count("ingested"), "file")} read`];
+  if (count("deduplicated") > 0) parts.push(`${count("deduplicated")} already in Gather`);
+  if (count("stored") > 0) parts.push(`${count("stored")} kept as they are`);
+  const skipped = count("skipped") + count("failed");
+  if (skipped > 0) parts.push(`${skipped} skipped`);
+  if (count("left_out") > 0) parts.push(`${plural(count("left_out"), "folder")} left out`);
+  if (stopped) parts.push(stopped);
+  return parts.join(", ");
+}
 
 let nextKey = 0;
 
@@ -260,20 +469,33 @@ export function useUploads() {
         const file =
           blob instanceof File ? blob : new File([blob], source.name, { type: blob.type });
         if (target.type === "project") {
-          const r = await uploadProjectFile(target.projectId, target.path, file);
-          patch(key, {
-            status: PROJECT_STATUS[r.status] ?? "rejected",
-            kind: r.kind,
-            artifactId: r.artifact_id,
-            detail: r.status === "ignored" ? "Left out (tooling or clutter)" : r.detail,
-            segments: r.segments,
-          });
+          const response = await uploadProjectFile(target.projectId, target.path, file);
+          const [r] = response.files;
+          const unpacked = response.files.length > 1 || (r && r.path !== target.path);
+          if (!r || unpacked) {
+            // A .zip unpacked where it sat: one line for everything in it.
+            patch(key, {
+              status: "accepted",
+              kind: null,
+              detail: `Unpacked: ${unpackedSummary(response.files, response.stopped)}`,
+            });
+          } else {
+            patch(key, {
+              status: PROJECT_STATUS[r.status] ?? "rejected",
+              kind: r.kind,
+              artifactId: r.artifact_id,
+              detail: r.status === "ignored" ? "Left out (system clutter)" : r.detail,
+              segments: r.segments,
+            });
+          }
         } else if (target.type === "zip") {
           const report = await importProjectZip(file);
           const p = report.project;
           const parts = [`${plural(p.ingested, "file")} read`];
           if (p.deduplicated > 0) parts.push(`${p.deduplicated} already in Gather`);
-          if (p.skipped > 0) parts.push(`${p.skipped} skipped`);
+          if (p.stored > 0) parts.push(`${p.stored} kept as they are`);
+          if (p.skipped + p.failed > 0) parts.push(`${p.skipped + p.failed} skipped`);
+          if (p.left_out > 0) parts.push(`${plural(p.left_out, "folder")} left out`);
           if (report.stopped) parts.push(report.stopped);
           patch(key, {
             status: "accepted",
@@ -340,8 +562,10 @@ export function useUploads() {
 
   /** A folder: create the project, then queue its files with their paths. */
   const addProject = useCallback(
-    async (name: string, entries: ProjectEntry[]) => {
-      if (entries.length === 0) {
+    async (name: string, pick: PickedProject) => {
+      let { entries } = pick;
+      const { leftOut, withheld, folders } = pick;
+      if (entries.length + leftOut.length + withheld.length + folders.length === 0) {
         setPickError(`“${name}” has no files Gather can add.`);
         return;
       }
@@ -353,6 +577,25 @@ export function useUploads() {
       }
       try {
         const project = await createProject(name);
+        if (leftOut.length + withheld.length + folders.length > 0) {
+          // Shown in the tray and the project's tree, so nothing a folder
+          // held disappears without a word.
+          const results = await describeProject(project.id, { leftOut, withheld, folders });
+          setItems((prev) => [
+            ...results.map((r) => ({
+              key: `u${nextKey++}`,
+              name: r.path,
+              status: PROJECT_STATUS[r.status] ?? "skipped",
+              kind: null,
+              artifactId: null,
+              project: project.name,
+              projectId: project.id,
+              detail: r.status === "left_out" ? `Folder left out: ${r.detail}` : r.detail,
+              segments: 0,
+            })),
+            ...prev,
+          ]);
+        }
         enqueue(
           entries.map(({ path, source }) => ({
             source,
@@ -447,13 +690,16 @@ export function useUploads() {
           `“${listing.name}” has more than ${listing.files.length.toLocaleString()} files; only those were added.`,
         );
       }
-      await addProject(
-        listing.name,
-        listing.files.map((f) => ({
-          path: f.path,
-          source: { name: f.path.split("/").pop() ?? f.path, load: () => readNative(f.abs) },
-        })),
-      );
+      const pick = emptyPick();
+      for (const f of listing.files) {
+        pickFile(pick, f.path, () => ({
+          name: f.path.split("/").pop() ?? f.path,
+          load: () => readNative(f.abs),
+        }));
+      }
+      pick.leftOut.push(...listing.left_out.filter((f) => !pick.leftOut.includes(f)));
+      pick.folders.push(...listing.empty_folders);
+      await addProject(listing.name, pick);
     } catch (e) {
       setPickError(e instanceof Error ? e.message : String(e));
     }
@@ -625,6 +871,7 @@ const STATUS: Record<UploadStatus, { label: string; icon: typeof CircleCheck; to
   uploading: { label: "Adding", icon: LoaderCircle, tone: "accent" },
   accepted: { label: "Added", icon: CircleCheck, tone: "success" },
   deduplicated: { label: "Already added", icon: Copy, tone: "warning" },
+  stored: { label: "Kept", icon: Archive, tone: "success" },
   skipped: { label: "Skipped", icon: CircleSlash, tone: "neutral" },
   rejected: { label: "Not added", icon: CircleSlash, tone: "danger" },
 };
@@ -656,7 +903,10 @@ export function UploadTray({
           <strong>
             {busy
               ? `Adding ${done + 1} of ${items.length}…`
-              : `${plural(items.filter((i) => i.status === "accepted").length, "file")} added`}
+              : `${plural(
+                  items.filter((i) => i.status === "accepted" || i.status === "stored").length,
+                  "file",
+                )} added`}
           </strong>
           <span className="hint">
             {busy ? "Reading happens on this computer" : "Gather is reading them in the background"}

@@ -439,8 +439,10 @@ pub struct FilesResponse {
 /// Multipart contract (matches the Tauri UI):
 ///   - each file is a part named `file` (kind auto-detected from
 ///     content-type + extension), or named with an explicit artifact kind
-///     (`document_pdf`, `document_markdown`, `document_text`, `image_photo`,
-///     `image_screenshot`) to override detection.
+///     (`document_pdf`, `document_markdown`, `document_text`,
+///     `document_docx`, `document_spreadsheet`, `image_photo`,
+///     `image_screenshot`, or `file_other` to keep a file without reading
+///     it) to override detection.
 pub async fn ingest_files(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -545,6 +547,8 @@ const EXPLICIT_KINDS: &[&str] = &[
     "document_spreadsheet",
     "image_photo",
     "image_screenshot",
+    // Kept as it is, without reading text from it.
+    "file_other",
 ];
 
 fn classify(
@@ -646,6 +650,29 @@ pub(crate) async fn ingest_one_file(
             .to_string()
     });
 
+    // Text formats are read before the transaction opens, so no connection
+    // is held while they are. Plain text is only decoded (and borrowed, so it
+    // isn't a second copy of the upload); HTML, Word files and spreadsheets
+    // are parsed on a blocking thread, keeping the async workers free.
+    let text = match kind.as_str() {
+        "document_markdown" | "document_text" | "document_docx" | "document_spreadsheet" => {
+            let format = formats::format_for(&kind, filename);
+            let text = if format == formats::Format::Plain {
+                formats::to_text(format, bytes)
+            } else {
+                let owned = bytes.to_vec();
+                tokio::task::spawn_blocking(move || {
+                    formats::to_text(format, &owned)
+                        .map(|t| std::borrow::Cow::<str>::Owned(t.into_owned()))
+                })
+                .await
+                .map_err(|e| ApiError::Internal(anyhow::anyhow!("text extraction failed: {e}")))?
+            };
+            Some((format, text.map_err(ApiError::BadRequest)?))
+        }
+        _ => None,
+    };
+
     let mut tx = state.pool.begin().await?;
     let stored = store_artifact(
         &mut tx,
@@ -668,10 +695,7 @@ pub(crate) async fn ingest_one_file(
             // spreadsheets): extraction is quick and in memory, so it
             // completes synchronously at ingest time, including segmentation.
             "document_markdown" | "document_text" | "document_docx" | "document_spreadsheet" => {
-                let format = formats::format_for(&kind, filename);
-                // Borrowed for plain UTF-8 (the usual case), so the text
-                // isn't a second copy of the upload.
-                let text = formats::to_text(format, bytes).map_err(ApiError::BadRequest)?;
+                let (format, text) = text.expect("text formats are read above");
                 let (document_id,): (Uuid,) = sqlx::query_as(
                     r#"
                     INSERT INTO documents
@@ -740,6 +764,8 @@ pub(crate) async fn ingest_one_file(
                     .execute(&mut *tx)
                     .await?;
             }
+            // Kept as it is: the stored bytes are the whole of it.
+            "file_other" => {}
             other => {
                 return Err(ApiError::UnsupportedMedia(other.to_string()));
             }
@@ -791,5 +817,9 @@ mod tests {
             "image_photo"
         );
         assert!(classify("file", "archive.zip", Some("application/zip")).is_err());
+        assert_eq!(
+            classify("file_other", "archive.zip", Some("application/zip")).unwrap(),
+            "file_other"
+        );
     }
 }

@@ -20,8 +20,12 @@ pub struct ProjectSummary {
     pub files: i64,
     pub ingested: i64,
     pub deduplicated: i64,
+    /// Files kept as they are, without text read from them.
+    pub stored: i64,
     pub skipped: i64,
     pub failed: i64,
+    /// Folders left out whole (version control, dependencies, caches).
+    pub left_out: i64,
     /// Total size of the project's files, as uploaded.
     pub bytes: i64,
 }
@@ -130,24 +134,32 @@ pub async fn ensure_folder(pool: &PgPool, project: Uuid, path: &str) -> Result<U
     Ok(id)
 }
 
-/// Why a file can't sit at `path`: a folder above it is already a file, or
-/// the path itself is already a folder. Checked before a file is read, so a
-/// clash doesn't store the file for nothing; [`record_file`] still refuses
+/// Why nothing new can sit at `path`: a folder above it is already a file,
+/// or `path` itself is already the other kind of item (`as_folder` says which
+/// kind is wanted). Checked before a file is read, so a clash doesn't store
+/// the file for nothing; [`record_file`] and [`ensure_folder`] still refuse
 /// one that appears in between.
-pub async fn clash(pool: &PgPool, project: Uuid, path: &str) -> Result<Option<String>, ApiError> {
+pub async fn clash(
+    pool: &PgPool,
+    project: Uuid,
+    path: &str,
+    as_folder: bool,
+) -> Result<Option<String>, ApiError> {
     let ancestors: Vec<String> = paths::ancestors(path)
         .into_iter()
         .map(String::from)
         .collect();
+    let other_kind = if as_folder { "file" } else { "folder" };
     let found: Option<(String, String)> = sqlx::query_as(
         "SELECT path, item_kind FROM project_items \
          WHERE project_id = $1 \
-           AND ((item_kind = 'file' AND path = ANY($2)) OR (item_kind = 'folder' AND path = $3)) \
+           AND ((item_kind = 'file' AND path = ANY($2)) OR (item_kind = $4 AND path = $3)) \
          ORDER BY depth LIMIT 1",
     )
     .bind(project)
     .bind(&ancestors)
     .bind(path)
+    .bind(other_kind)
     .fetch_optional(pool)
     .await?;
     Ok(found.map(|(at, kind)| {
@@ -157,6 +169,45 @@ pub async fn clash(pool: &PgPool, project: Uuid, path: &str) -> Result<Option<St
             format!("'{at}' is a folder in this project, not a file")
         }
     }))
+}
+
+/// Record the folder at `path` as left out whole, for `reason`, creating the
+/// folders above it. `Err(BadRequest)` if `path` is a file in the project.
+pub async fn record_left_out(
+    pool: &PgPool,
+    project: Uuid,
+    path: &str,
+    reason: &str,
+) -> Result<(), ApiError> {
+    let mut tx = pool.begin().await?;
+    let ancestors = paths::ancestors(path);
+    let parent = match ancestors.last() {
+        Some(folder) => Some(folder_chain(&mut tx, project, folder).await?),
+        None => None,
+    };
+    let id: Option<Uuid> = sqlx::query_scalar(
+        "INSERT INTO project_items \
+           (project_id, parent_id, item_kind, name, path, depth, status, detail) \
+         VALUES ($1, $2, 'folder', $3, $4, $5, 'skipped', $6) \
+         ON CONFLICT (project_id, path) DO UPDATE SET status = 'skipped', detail = EXCLUDED.detail \
+           WHERE project_items.item_kind = 'folder' \
+         RETURNING id",
+    )
+    .bind(project)
+    .bind(parent)
+    .bind(paths::file_name(path))
+    .bind(path)
+    .bind(ancestors.len() as i32)
+    .bind(reason)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if id.is_none() {
+        return Err(ApiError::BadRequest(format!(
+            "'{path}' is a file in this project, not a folder"
+        )));
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Record (or replace) the file at `path`, creating the folders above it.
@@ -205,12 +256,14 @@ pub async fn record_file(
 }
 
 const SUMMARY: &str = "SELECT p.id, p.name, p.source, p.created_at, p.updated_at, \
-       count(i.id) FILTER (WHERE i.item_kind = 'folder') AS folders, \
+       count(i.id) FILTER (WHERE i.status = 'folder') AS folders, \
        count(i.id) FILTER (WHERE i.item_kind = 'file') AS files, \
        count(i.id) FILTER (WHERE i.status = 'ingested') AS ingested, \
        count(i.id) FILTER (WHERE i.status = 'deduplicated') AS deduplicated, \
-       count(i.id) FILTER (WHERE i.status = 'skipped') AS skipped, \
+       count(i.id) FILTER (WHERE i.status = 'stored') AS stored, \
+       count(i.id) FILTER (WHERE i.item_kind = 'file' AND i.status = 'skipped') AS skipped, \
        count(i.id) FILTER (WHERE i.status = 'failed') AS failed, \
+       count(i.id) FILTER (WHERE i.item_kind = 'folder' AND i.status = 'skipped') AS left_out, \
        coalesce(sum(i.byte_size) FILTER (WHERE i.item_kind = 'file'), 0)::bigint AS bytes \
      FROM projects p LEFT JOIN project_items i ON i.project_id = p.id \
      WHERE ($1::uuid IS NULL OR p.id = $1) \
@@ -227,8 +280,10 @@ fn summary_row(r: &sqlx::postgres::PgRow) -> ProjectSummary {
         files: r.get("files"),
         ingested: r.get("ingested"),
         deduplicated: r.get("deduplicated"),
+        stored: r.get("stored"),
         skipped: r.get("skipped"),
         failed: r.get("failed"),
+        left_out: r.get("left_out"),
         bytes: r.get("bytes"),
     }
 }

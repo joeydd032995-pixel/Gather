@@ -1,28 +1,45 @@
 //! Paths inside an uploaded project: normalized, never escaping the project,
 //! and screened for what shouldn't be read at all.
 
-/// Folders whose contents are tooling rather than the project: version
-/// control, installed dependencies, caches. They are left out silently.
-const IGNORED_DIRS: &[&str] = &[
-    ".git",
-    ".hg",
-    ".svn",
-    "node_modules",
-    "bower_components",
-    "__macosx",
-    "__pycache__",
-    ".venv",
-    "venv",
-    ".tox",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".gradle",
-    ".idea",
-    ".next",
-    ".nuxt",
-    ".terraform",
+/// Folders left out whole, with why: version-control history, installed
+/// dependencies, and what tools rebuild. Each appears in the project's tree
+/// as a folder that wasn't read, so nothing disappears without a trace.
+const LEFT_OUT_DIRS: &[(&str, &str)] = &[
+    (
+        ".git",
+        "version-control history, not the project's own files",
+    ),
+    (
+        ".hg",
+        "version-control history, not the project's own files",
+    ),
+    (
+        ".svn",
+        "version-control history, not the project's own files",
+    ),
+    (
+        "node_modules",
+        "installed dependencies, which can be reinstalled",
+    ),
+    (
+        "bower_components",
+        "installed dependencies, which can be reinstalled",
+    ),
+    (".venv", "installed dependencies, which can be reinstalled"),
+    ("venv", "installed dependencies, which can be reinstalled"),
+    ("__pycache__", "made by tools and rebuilt when needed"),
+    (".tox", "made by tools and rebuilt when needed"),
+    (".mypy_cache", "made by tools and rebuilt when needed"),
+    (".pytest_cache", "made by tools and rebuilt when needed"),
+    (".ruff_cache", "made by tools and rebuilt when needed"),
+    (".gradle", "made by tools and rebuilt when needed"),
+    (".next", "made by tools and rebuilt when needed"),
+    (".nuxt", "made by tools and rebuilt when needed"),
+    (".terraform", "made by tools and rebuilt when needed"),
 ];
+/// Folders of archive-tool metadata (copies of the real files' attributes),
+/// left out silently.
+const CLUTTER_DIRS: &[&str] = &["__macosx"];
 /// Operating-system clutter, left out silently.
 const IGNORED_FILES: &[&str] = &[".ds_store", "thumbs.db", "desktop.ini", ".localized"];
 /// Files that usually hold keys or passwords. They are recorded as skipped,
@@ -46,9 +63,6 @@ const SECRET_NAMES: &[&str] = &[
 const SECRET_EXTENSIONS: &[&str] = &[
     "pem", "key", "p12", "pfx", "jks", "keystore", "kdbx", "ppk", "asc", "gpg",
 ];
-/// Archives inside a project are not unpacked.
-const ARCHIVE_EXTENSIONS: &[&str] = &["zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "xz", "zst"];
-
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_SEGMENT_BYTES: usize = 255;
 const MAX_DEPTH: usize = 64;
@@ -84,24 +98,47 @@ pub fn normalize(raw: &str) -> Result<String, &'static str> {
 }
 
 /// What to do with a (normalized) path before reading it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Screen {
     /// Read it.
     Read,
-    /// Leave it out without a trace (tooling folders, OS clutter).
+    /// Leave it out without a trace (operating-system clutter).
     Ignore,
+    /// It sits in `folder`, which is left out whole for `reason`.
+    LeftOut {
+        folder: String,
+        reason: &'static str,
+    },
     /// Record it as skipped, with this reason, without reading it.
     Skip(&'static str),
 }
 
+/// Why a folder named `name` is left out whole, if it is.
+pub fn left_out_reason(name: &str) -> Option<&'static str> {
+    let lower = name.to_ascii_lowercase();
+    LEFT_OUT_DIRS
+        .iter()
+        .find(|(dir, _)| *dir == lower)
+        .map(|(_, reason)| *reason)
+}
+
 pub fn screen(path: &str) -> Screen {
-    let segments: Vec<String> = path.split('/').map(str::to_ascii_lowercase).collect();
+    let segments: Vec<&str> = path.split('/').collect();
     let (name, folders) = segments
         .split_last()
         .expect("normalized paths are non-empty");
-    if folders.iter().any(|f| IGNORED_DIRS.contains(&f.as_str())) {
-        return Screen::Ignore;
+    for (i, folder) in folders.iter().enumerate() {
+        if CLUTTER_DIRS.contains(&folder.to_ascii_lowercase().as_str()) {
+            return Screen::Ignore;
+        }
+        if let Some(reason) = left_out_reason(folder) {
+            return Screen::LeftOut {
+                folder: segments[..=i].join("/"),
+                reason,
+            };
+        }
     }
+    let name = name.to_ascii_lowercase();
     if IGNORED_FILES.contains(&name.as_str()) || name.starts_with("._") {
         return Screen::Ignore;
     }
@@ -112,10 +149,20 @@ pub fn screen(path: &str) -> Screen {
     {
         return Screen::Skip("looks like it holds keys or passwords, so it wasn't read");
     }
-    if ARCHIVE_EXTENSIONS.contains(&ext) {
-        return Screen::Skip("archives inside a project aren't unpacked");
-    }
     Screen::Read
+}
+
+/// Whether `path` is operating-system or archive-tool clutter, or inside
+/// such a folder (`__MACOSX/…`, `.DS_Store`).
+pub fn is_clutter(path: &str) -> bool {
+    path.split('/')
+        .any(|s| CLUTTER_DIRS.contains(&s.to_ascii_lowercase().as_str()))
+        || screen(path) == Screen::Ignore
+}
+
+/// Whether the file at `path` is a `.zip`, unpacked where it sits.
+pub fn is_zip(path: &str) -> bool {
+    file_name(path).to_ascii_lowercase().ends_with(".zip")
 }
 
 /// Folder paths above `path`, outermost first: `a/b/c.md` → `a`, `a/b`.
@@ -148,14 +195,36 @@ mod tests {
     #[test]
     fn tooling_clutter_and_secrets_are_screened() {
         assert_eq!(screen("p/src/main.rs"), Screen::Read);
-        assert_eq!(screen("p/.git/config"), Screen::Ignore);
-        assert_eq!(screen("p/web/node_modules/x/index.js"), Screen::Ignore);
+        assert_eq!(
+            screen("p/.git/config"),
+            Screen::LeftOut {
+                folder: "p/.git".into(),
+                reason: "version-control history, not the project's own files"
+            }
+        );
+        assert!(matches!(
+            screen("p/web/node_modules/x/node_modules/y.js"),
+            Screen::LeftOut { folder, .. } if folder == "p/web/node_modules"
+        ));
         assert_eq!(screen("p/.DS_Store"), Screen::Ignore);
-        assert_eq!(screen("p/__MACOSX/._a.md"), Screen::Ignore);
+        assert_eq!(screen("p/__MACOSX/a/._a.md"), Screen::Ignore);
+        assert!(is_clutter("__MACOSX"));
+        assert!(is_clutter("__MACOSX/Atlas/._a.md"));
+        assert!(is_clutter("Atlas/.DS_Store"));
+        assert!(!is_clutter("Atlas/README.md"));
+        assert_eq!(
+            left_out_reason("Node_Modules"),
+            left_out_reason("node_modules")
+        );
+        assert_eq!(left_out_reason("docs"), None);
         assert!(matches!(screen("p/.env.local"), Screen::Skip(_)));
         assert!(matches!(screen("p/deploy/server.pem"), Screen::Skip(_)));
         assert!(matches!(screen("p/.ssh/id_ed25519"), Screen::Skip(_)));
-        assert!(matches!(screen("p/old/backup.zip"), Screen::Skip(_)));
+        // Archives and files of any kind are read (or kept) like the rest.
+        assert_eq!(screen("p/old/backup.zip"), Screen::Read);
+        assert_eq!(screen("p/tools/setup.exe"), Screen::Read);
+        assert!(is_zip("p/old/Backup.ZIP"));
+        assert!(!is_zip("p/old/backup.tar.gz"));
     }
 
     #[test]

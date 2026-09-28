@@ -716,8 +716,12 @@ export interface ProjectSummary {
   files: number;
   ingested: number;
   deduplicated: number;
+  /** Files kept as they are, without text read from them. */
+  stored: number;
   skipped: number;
   failed: number;
+  /** Folders left out whole (version control, dependencies, caches). */
+  left_out: number;
   bytes: number;
 }
 
@@ -728,7 +732,8 @@ export interface ProjectItem {
   name: string;
   path: string;
   depth: number;
-  status: "folder" | "ingested" | "deduplicated" | "skipped" | "failed";
+  /** A folder is "folder", or "skipped" when left out whole. */
+  status: "folder" | "ingested" | "deduplicated" | "stored" | "skipped" | "failed";
   detail: string | null;
   byte_size: number | null;
   artifact_id: string | null;
@@ -744,7 +749,8 @@ export interface ProjectDetail extends ProjectSummary {
 /** What happened to one file sent to a project. */
 export interface ProjectFileResult {
   path: string;
-  status: "ingested" | "deduplicated" | "skipped" | "failed" | "ignored";
+  /** "left_out" is a folder left out whole; `path` is the folder. */
+  status: "ingested" | "deduplicated" | "stored" | "skipped" | "failed" | "left_out" | "ignored";
   kind: string | null;
   artifact_id: string | null;
   detail: string | null;
@@ -755,17 +761,40 @@ export function createProject(name: string): Promise<ProjectSummary> {
   return postJson("/projects", { name });
 }
 
+export interface ProjectFilesResponse {
+  project_id: string;
+  job_id: string;
+  /** One result per file; a .zip unpacked in place gives one per file in it. */
+  files: ProjectFileResult[];
+  /** Why unpacking a .zip stopped early, if it did. */
+  stopped: string | null;
+}
+
 /** Send one file to a project at `path` (relative to the project folder). */
-export async function uploadProjectFile(
+export function uploadProjectFile(
   projectId: string,
   path: string,
   file: File,
-): Promise<ProjectFileResult> {
+): Promise<ProjectFilesResponse> {
   const form = new FormData();
   form.append("path", path);
   form.append("file", file, file.name);
-  const body = await postForm<{ files: ProjectFileResult[] }>(`/projects/${projectId}/files`, form);
-  return body.files[0];
+  return postForm(`/projects/${projectId}/files`, form);
+}
+
+/** Tell a project what a folder held that wasn't sent: folders left out
+ *  whole (`.git`, `node_modules`, …), secret-looking files withheld unread,
+ *  and empty folders. The tree then shows all of it. */
+export async function describeProject(
+  projectId: string,
+  held: { leftOut: string[]; withheld: string[]; folders: string[] },
+): Promise<ProjectFileResult[]> {
+  const form = new FormData();
+  for (const folder of held.leftOut) form.append("left_out", folder);
+  for (const path of held.withheld) form.append("withheld", path);
+  for (const folder of held.folders) form.append("folder", folder);
+  const body = await postForm<ProjectFilesResponse>(`/projects/${projectId}/files`, form);
+  return body.files;
 }
 
 export interface ImportReport {

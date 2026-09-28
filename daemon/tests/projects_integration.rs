@@ -1,6 +1,7 @@
 //! Projects end to end against pgvector: a folder uploaded file by file with
-//! its paths, a .zip unpacked into a project, the tree they produce, the new
-//! document formats, and what is skipped (and why). Skipped without
+//! its paths, a .zip unpacked into a project (and zips inside it), the tree
+//! they produce, the new document formats, files kept as they are, and what
+//! is left out or skipped (and why). Skipped without
 //! DATABASE_URL. Tests share one database, so every test holds one lock.
 
 use std::io::{Cursor, Write};
@@ -164,6 +165,21 @@ async fn a_folder_uploaded_file_by_file_keeps_its_tree() {
         "Launch is planned for May.",
     ]);
     let page = format!("<html><body><h1>Atlas{t}</h1><p>Hosted on Fly.</p></body></html>");
+    // Every file counts: a program is kept as it is, text with a name Gather
+    // doesn't know is read as text, a damaged Word file is still kept, and a
+    // .zip is unpacked where it sits (the one inside it too).
+    let mut tool = b"MZ\x00\x01binary".to_vec();
+    tool.extend_from_slice(t.as_bytes());
+    let todo = format!("- ship Atlas{t}\n");
+    let broken = format!("PK not really a Word file {t}");
+    let a_md = format!("# Bundle {t}\n");
+    let c_md = format!("# Deeper {t}\n");
+    let deeper = zip_of(&[("c.md", c_md.as_bytes())]);
+    let bundle = zip_of(&[
+        ("bundle/", b""),
+        ("bundle/a.md", a_md.as_bytes()),
+        ("bundle/deeper.zip", &deeper),
+    ]);
     let (s, body) = multipart(
         &app,
         &format!("/projects/{id}/files"),
@@ -189,7 +205,15 @@ async fn a_folder_uploaded_file_by_file_keeps_its_tree() {
             Part::Text("path", ".git/config"),
             Part::File("config", b"[core]"),
             Part::Text("path", "bin/tool.exe"),
-            Part::File("tool.exe", b"MZ\x00\x01binary"),
+            Part::File("tool.exe", &tool),
+            Part::Text("path", "notes/todo.xyz"),
+            Part::File("todo.xyz", todo.as_bytes()),
+            Part::Text("path", "docs/broken.docx"),
+            Part::File("broken.docx", broken.as_bytes()),
+            Part::Text("path", "archive/bundle.zip"),
+            Part::File("bundle.zip", &bundle),
+            Part::Text("left_out", "web/node_modules"),
+            Part::Text("left_out", "docs2"),
             Part::Text("path", "../escape.md"),
             Part::File("escape.md", b"# nope"),
         ],
@@ -210,9 +234,25 @@ async fn a_folder_uploaded_file_by_file_keeps_its_tree() {
     assert_eq!(by_path("src/app.ts")["kind"], "document_text");
     assert_eq!(by_path("site/index.html")["status"], "ingested");
     assert_eq!(by_path(".env")["status"], "skipped");
-    assert_eq!(by_path(".git/config")["status"], "ignored");
-    assert_eq!(by_path("bin/tool.exe")["status"], "skipped");
+    assert_eq!(by_path(".git")["status"], "left_out");
+    assert_eq!(by_path("bin/tool.exe")["status"], "stored");
+    assert_eq!(by_path("bin/tool.exe")["kind"], "file_other");
+    assert_eq!(by_path("notes/todo.xyz")["status"], "ingested");
+    assert_eq!(by_path("notes/todo.xyz")["kind"], "document_text");
+    assert_eq!(by_path("docs/broken.docx")["status"], "stored");
+    assert!(by_path("docs/broken.docx")["detail"]
+        .as_str()
+        .unwrap()
+        .contains("its text couldn't be read"));
+    assert_eq!(by_path("archive/bundle.zip/a.md")["status"], "ingested");
+    assert_eq!(
+        by_path("archive/bundle.zip/deeper.zip/c.md")["status"],
+        "ingested"
+    );
+    assert_eq!(by_path("web/node_modules")["status"], "left_out");
+    assert_eq!(by_path("docs2")["status"], "skipped");
     assert_eq!(by_path("../escape.md")["status"], "skipped");
+    assert!(body["stopped"].is_null());
 
     // The HTML was read as text, not markup.
     let html_artifact = by_path("site/index.html")["artifact_id"]
@@ -245,23 +285,43 @@ async fn a_folder_uploaded_file_by_file_keeps_its_tree() {
         .as_str()
         .unwrap()
         .contains("passwords"));
+    assert_eq!(item(&detail, "bin/tool.exe")["status"], "stored");
+    assert_eq!(item(&detail, "bin/tool.exe")["artifact_kind"], "file_other");
+    assert_eq!(item(&detail, "archive/bundle.zip")["item_kind"], "folder");
     assert_eq!(
-        item(&detail, "bin/tool.exe")["detail"],
-        "Gather can't read this kind of file yet"
+        item(&detail, "archive/bundle.zip/deeper.zip")["item_kind"],
+        "folder"
     );
+    // Left-out folders are in the tree, with why, and nothing inside them.
+    let git = item(&detail, ".git");
+    assert_eq!(git["item_kind"], "folder");
+    assert_eq!(git["status"], "skipped");
+    assert!(git["detail"].as_str().unwrap().contains("version-control"));
+    assert_eq!(item(&detail, "web/node_modules")["status"], "skipped");
     assert!(!detail["items"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|i| i["path"].as_str().unwrap().contains(".git")));
+        .any(|i| i["path"].as_str().unwrap().starts_with(".git/")));
+    assert!(!detail["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|i| i["path"] == "docs2"));
     assert!(!detail["items"]
         .as_array()
         .unwrap()
         .iter()
         .any(|i| i["path"].as_str().unwrap().contains("escape")));
-    assert_eq!(detail["files"], 7);
-    assert_eq!(detail["ingested"], 5);
-    assert_eq!(detail["skipped"], 2);
+    assert_eq!(detail["files"], 11);
+    assert_eq!(detail["ingested"], 8);
+    assert_eq!(detail["stored"], 2);
+    assert_eq!(detail["skipped"], 1);
+    assert_eq!(detail["left_out"], 2);
+    // docs, docs/reports, src, data, site, bin, notes, archive, the two
+    // unpacked zips, and web (holding node_modules); the left-out folders
+    // themselves aren't counted as folders.
+    assert_eq!(detail["folders"], 11);
 
     // Extraction runs over project files like any other.
     for _ in 0..20 {
@@ -327,6 +387,61 @@ async fn a_folder_uploaded_file_by_file_keeps_its_tree() {
     assert_eq!(item(&detail, "docs")["item_kind"], "folder");
     assert_eq!(item(&detail, "docs/plan.md")["item_kind"], "file");
 
+    // What a folder held but the sender didn't send: a secret-looking file
+    // withheld unread is listed as skipped; any other path must be sent;
+    // an empty folder keeps its place in the tree.
+    let (s, body) = multipart(
+        &app,
+        &format!("/projects/{id}/files"),
+        &[
+            Part::Text("withheld", ".ssh/id_rsa"),
+            Part::Text("withheld", "notes/plain.md"),
+            Part::Text("folder", "drafts/empty"),
+        ],
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{body}");
+    let files = body["files"].as_array().unwrap();
+    assert_eq!(files.len(), 2, "{body}");
+    assert_eq!(files[0]["status"], "skipped");
+    assert!(files[0]["detail"].as_str().unwrap().contains("passwords"));
+    assert_eq!(files[1]["status"], "skipped");
+    assert!(files[1]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("send this one"));
+    let (_, detail) = call(&app, Method::GET, &format!("/projects/{id}"), None).await;
+    assert_eq!(item(&detail, ".ssh/id_rsa")["status"], "skipped");
+    assert!(item(&detail, ".ssh/id_rsa")["artifact_id"].is_null());
+    assert_eq!(item(&detail, "drafts/empty")["item_kind"], "folder");
+    assert!(!detail["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|i| i["path"] == "notes/plain.md"));
+
+    // A request with nothing in it is refused, and its job is finished
+    // rather than left running.
+    let (s, _) = multipart(
+        &app,
+        &format!("/projects/{id}/files"),
+        &[Part::Text("path", "dangling.md")],
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let status: String = sqlx::query_scalar(
+        "SELECT status::text FROM ingestion_jobs WHERE stats->>'project' = $1 \
+         ORDER BY started_at DESC LIMIT 1",
+    )
+    .bind(&id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert!(
+        !["pending", "processing"].contains(&status.as_str()),
+        "{status}"
+    );
+
     // Removing the project keeps its files in Gather.
     let (s, _) = call(&app, Method::DELETE, &format!("/projects/{id}"), None).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
@@ -360,15 +475,23 @@ async fn a_zip_becomes_a_project_named_after_its_folder() {
         format!("{root}/node_modules/x/index.js"),
         format!("{root}/nested/old.zip"),
         format!("{root}/bomb.txt"),
+        format!("{root}/deep/z2.zip"),
     ];
+    // Three archives inside this one, one inside the other: the first two
+    // are unpacked, the third is kept as it is.
+    let z4 = zip_of(&[("c.md", format!("# Deepest {t}\n").as_bytes())]);
+    let z3 = zip_of(&[("z4.zip", &z4)]);
+    let z2 = zip_of(&[("z3.zip", &z3)]);
+    let not_a_zip = format!("PK not really a zip {t}");
     let zip = zip_of(&[
         (&names[0], b""),
         (&names[1], readme.as_bytes()),
         (&names[2], spec.as_bytes()),
         (&names[3], b""),
         (&names[4], b"module.exports = 1"),
-        (&names[5], b"PK"),
+        (&names[5], not_a_zip.as_bytes()),
         (&names[6], &zeros),
+        (&names[7], &z2),
     ]);
     let (s, report) = multipart(
         &app,
@@ -386,19 +509,29 @@ async fn a_zip_becomes_a_project_named_after_its_folder() {
     assert_eq!(item(&detail, "specs")["item_kind"], "folder");
     assert_eq!(item(&detail, "specs/api.txt")["status"], "ingested");
     assert_eq!(item(&detail, "empty")["item_kind"], "folder");
+    // Not really a zip: kept as it is, with why.
+    assert_eq!(item(&detail, "nested/old.zip")["status"], "stored");
     assert!(item(&detail, "nested/old.zip")["detail"]
         .as_str()
         .unwrap()
-        .contains("archives"));
+        .contains("couldn't be unpacked"));
+    assert_eq!(item(&detail, "deep/z2.zip/z3.zip")["item_kind"], "folder");
+    let z4_item = item(&detail, "deep/z2.zip/z3.zip/z4.zip");
+    assert_eq!(z4_item["status"], "stored");
+    assert!(z4_item["detail"]
+        .as_str()
+        .unwrap()
+        .contains("inside 3 others"));
     assert!(item(&detail, "bomb.txt")["detail"]
         .as_str()
         .unwrap()
         .contains("expands"));
+    assert_eq!(item(&detail, "node_modules")["status"], "skipped");
     assert!(!detail["items"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|i| i["path"].as_str().unwrap().contains("node_modules")));
+        .any(|i| i["path"].as_str().unwrap().starts_with("node_modules/")));
 
     // A name given with the upload wins; a non-zip is refused.
     let (_, named) = multipart(
@@ -458,6 +591,34 @@ async fn the_projects_migration_is_reversible() {
         .unwrap()
     };
     assert!(exists(pool.clone()).await);
+    // A Word file still in Gather: the reverse refuses, rather than delete it
+    // and leave what was learned from it without a source.
+    let docx: Uuid = sqlx::query_scalar(
+        "INSERT INTO artifacts (kind, byte_size, content_hash, raw_content) \
+         VALUES ('document_docx', 1, repeat('a', 64), '\\x00') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    // One connection: the refused script leaves its transaction aborted
+    // until rolled back.
+    let mut conn = pool.acquire().await.unwrap();
+    let refused = sqlx::raw_sql(include_str!("../migrations-down/0016_projects.down.sql"))
+        .execute(&mut *conn)
+        .await
+        .unwrap_err();
+    sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await.unwrap();
+    drop(conn);
+    assert!(
+        refused.to_string().contains("delete them through Gather"),
+        "{refused}"
+    );
+    assert!(exists(pool.clone()).await, "nothing changed");
+    sqlx::query("DELETE FROM artifacts WHERE id = $1")
+        .bind(docx)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::raw_sql(include_str!("../migrations-down/0016_projects.down.sql"))
         .execute(&pool)
         .await
