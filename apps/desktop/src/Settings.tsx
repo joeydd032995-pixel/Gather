@@ -17,7 +17,7 @@ import {
   Sparkles,
   Sun,
 } from "lucide-react";
-import { getStatus, type DaemonStatus } from "./api";
+import { cancelReread, getStatus, startReread, type DaemonStatus } from "./api";
 import type { ThemeChoice } from "./hooks/useTheme";
 import {
   checkForUpdate,
@@ -490,7 +490,8 @@ function AiSection() {
       )}
       <p className="hint panel-pad">
         Saving checks the search model with Ollama first, so keep Ollama running. Files already in
-        Gather keep what was found in them; the new model reads files you add from now on.
+        Gather keep what was found in them; a new model reads files you add from now on. To have it
+        go back over earlier files, use "Read earlier files with the model" under Reading and logs.
       </p>
     </Panel>
   );
@@ -498,17 +499,19 @@ function AiSection() {
 
 /** How far reading has got, and where the logs are. */
 function ReadingSection() {
-  const [status, setStatus] = useState<DaemonStatus["reading"] | null>(null);
+  const [full, setFull] = useState<DaemonStatus | null>(null);
+  const status = full?.reading ?? null;
   const [dir, setDir] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let cancelled = false;
     const poll = () =>
       getStatus()
-        .then((s) => !cancelled && setStatus(s.reading))
-        .catch(() => !cancelled && setStatus(null))
+        .then((s) => !cancelled && setFull(s))
+        .catch(() => !cancelled && setFull(null))
         .finally(() => {
           if (!cancelled) timer = setTimeout(poll, 10_000);
         });
@@ -521,6 +524,25 @@ function ReadingSection() {
       if (timer) clearTimeout(timer);
     };
   }, []);
+
+  const reread = async (stop: boolean) => {
+    setError(null);
+    setBusy(true);
+    try {
+      const { job } = await (stop ? cancelReread() : startReread());
+      setFull((f) => (f ? { ...f, reread: job ?? f.reread } : f));
+      if (!stop && !job) setError("Nothing to read again: the model has already read everything.");
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const model = full?.ai.model ?? null;
+  const job = full?.reread ?? null;
+  const rereading = job?.status === "running";
+  const readAlready = job ? job.done + job.failed : 0;
 
   const open = async () => {
     setError(null);
@@ -548,6 +570,33 @@ function ReadingSection() {
           </p>
         </div>
       </div>
+      {model && (
+        <div className="setting-row">
+          <div className="setting-text">
+            <span className="setting-label">Read earlier files with the model</span>
+            <p className="setting-desc">
+              {rereading
+                ? `Going back over earlier files with ${job.model}: ${readAlready.toLocaleString()} of ${job.total.toLocaleString()} sections. It works in the spare time, after new files, at your reading speed.`
+                : `A model only reads files added after it was switched on. This sends ${model} back over the files already in Gather and adds what it finds; nothing is removed.`}
+              {!rereading &&
+                job?.status === "done" &&
+                ` Last time: ${job.model} read ${job.done.toLocaleString()} sections${job.failed > 0 ? ` and couldn't read ${job.failed.toLocaleString()}` : ""}.`}
+              {!rereading &&
+                job?.status === "cancelled" &&
+                ` Stopped after ${readAlready.toLocaleString()} of ${job.total.toLocaleString()} sections; starting again continues where it left off.`}
+            </p>
+          </div>
+          {rereading ? (
+            <Button onClick={() => reread(true)} loading={busy}>
+              Stop
+            </Button>
+          ) : (
+            <Button variant="primary" onClick={() => reread(false)} loading={busy}>
+              Read earlier files
+            </Button>
+          )}
+        </div>
+      )}
       <div className="setting-row">
         <div className="setting-text">
           <span className="setting-label">Logs</span>

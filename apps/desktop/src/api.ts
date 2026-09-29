@@ -466,6 +466,29 @@ export interface DaemonStatus {
     /** Sections set aside after an error (details in daemon.log). */
     failed: number;
   };
+  /** The latest job to read earlier files with the AI model; null if none yet. */
+  reread: RereadJob | null;
+}
+
+export interface RereadJob {
+  id: string;
+  model: string;
+  status: "running" | "done" | "cancelled";
+  /** Sections to read when the job started. */
+  total: number;
+  /** Sections the model has read. */
+  done: number;
+  /** Sections the model couldn't read. */
+  failed: number;
+}
+
+/** Read earlier files again with the AI model; `job` is null when there is nothing left to read. */
+export async function startReread(): Promise<{ job: RereadJob | null }> {
+  return postJson("/reread");
+}
+
+export async function cancelReread(): Promise<{ job: RereadJob | null }> {
+  return postJson("/reread/cancel");
 }
 
 export async function getStatus(): Promise<DaemonStatus> {

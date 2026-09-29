@@ -187,7 +187,7 @@ Leave the model for reading files empty to use Ollama for search only, which nee
 memory.
 A model that reads files uses every processor core it can get. **Reading speed** in the same
 section limits how much of the time it works (Gentle is the default on a computer with little
-memory); if the computer still feels slow, clear the model for reading files and keep search. Files already in Gather keep what was found in them; the model reads files added after.
+memory); if the computer still feels slow, clear the model for reading files and keep search. Files already in Gather keep what was found in them; the model reads files added after. To have it go back over the earlier ones, press **Read earlier files** under **Settings → Reading and logs**: it works in the spare time, shows how far it has got, can be stopped, and continues where it left off if started again. It only adds what the model finds; nothing is removed.
 
 ## Updates
 

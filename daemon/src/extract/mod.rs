@@ -60,6 +60,15 @@ fn rest_after(worked: Duration, duty_percent: u8) -> Duration {
     let rest = worked.mul_f64((100.0 - duty) / duty);
     rest.clamp(BUSY_PAUSE, MAX_REST)
 }
+/// Rest after one model request that took `worked`, so that the model is
+/// working `duty_percent` of the time however long a pass runs. Done per
+/// request, not per pass: a slow model can keep a pass going for minutes.
+pub(crate) async fn pace(worked: Duration, duty_percent: u8) {
+    if duty_percent < 100 {
+        tokio::time::sleep(rest_after(worked, duty_percent)).await;
+    }
+}
+
 /// How often, while busy, the log says how much is left.
 const PROGRESS_EVERY: Duration = Duration::from_secs(60);
 
@@ -107,7 +116,6 @@ pub async fn worker_loop(pool: PgPool, config: Config) {
     let mut busy_since: Option<std::time::Instant> = None;
     let mut last_progress = std::time::Instant::now();
     loop {
-        let pass_started = std::time::Instant::now();
         let stats = match run_one_pass(&pool, &config, ollama.as_ref()).await {
             Ok(stats) => stats,
             Err(e) => {
@@ -137,15 +145,9 @@ pub async fn worker_loop(pool: PgPool, config: Config) {
                     );
                 }
             }
-            // More may be queued: go again. With a local AI model in use the
-            // pass was mostly the model working, so rest in proportion and
-            // leave the processor to everything else on the computer.
-            let rest = if ollama.is_some() {
-                rest_after(pass_started.elapsed(), config.extraction_ai_duty_percent)
-            } else {
-                BUSY_PAUSE
-            };
-            tokio::time::sleep(rest).await;
+            // More may be queued: go again. (The model's share of the time is
+            // kept request by request, see `pace`.)
+            tokio::time::sleep(BUSY_PAUSE).await;
         } else {
             if let Some(started) = busy_since.take() {
                 let failed = backlog(&pool).await.map(|b| b.failed).unwrap_or(0);
@@ -670,7 +672,10 @@ async fn process_unit_chunks(
 
         if let Some((client, chat_model)) = ollama.and_then(|c| c.model.as_deref().map(|m| (c, m)))
         {
-            match client.extract(&chunk.text).await {
+            let asked = std::time::Instant::now();
+            let answer = client.extract(&chunk.text).await;
+            pace(asked.elapsed(), config.extraction_ai_duty_percent).await;
+            match answer {
                 Ok(llm_units) => {
                     let model = Some(format!("ollama:{chat_model}"));
                     llm_model = model.clone();

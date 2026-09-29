@@ -206,7 +206,9 @@ pub async fn run_pass(
     };
     let stored = stored_model(model);
     for chunk in &chunks {
+        let asked = std::time::Instant::now();
         let answer = client.extract(&chunk.text).await;
+        super::pace(asked.elapsed(), config.extraction_ai_duty_percent).await;
         let units = match answer {
             Ok(found) => found
                 .into_iter()

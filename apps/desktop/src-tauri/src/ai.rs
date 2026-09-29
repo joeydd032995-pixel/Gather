@@ -54,6 +54,13 @@ impl Speed {
         }
     }
 
+    /// The speed a duty percentage stands for, when it is one of the three.
+    pub fn from_duty_percent(percent: u32) -> Option<Speed> {
+        [Speed::Gentle, Speed::Balanced, Speed::Full]
+            .into_iter()
+            .find(|s| u32::from(s.duty_percent()) == percent)
+    }
+
     /// What the daemon uses when nothing is chosen.
     pub fn for_profile(profile: Profile) -> Speed {
         match profile {
@@ -143,7 +150,11 @@ fn load_raw(data: &Path, profile: Profile) -> AiSettingsView {
                 },
                 embed_model: env("GATHER_OLLAMA_EMBED_MODEL")
                     .unwrap_or_else(|| DEFAULT_EMBED_MODEL.to_string()),
-                speed: None,
+                // A share set in the environment stays, when it is one of the
+                // three speeds: saving must not swap it for the default.
+                speed: env("GATHER_EXTRACTION_AI_DUTY_PERCENT")
+                    .and_then(|v| v.parse().ok())
+                    .and_then(Speed::from_duty_percent),
             },
             source: "environment",
         },
@@ -558,6 +569,8 @@ mod tests {
         assert!(
             daemon_env(&dir).contains(&("GATHER_EXTRACTION_AI_DUTY_PERCENT", "100".to_string()))
         );
+        assert_eq!(Speed::from_duty_percent(60), Some(Speed::Balanced));
+        assert_eq!(Speed::from_duty_percent(45), None);
         assert_eq!(Speed::Gentle.duty_percent(), 30);
         assert_eq!(Speed::Balanced.duty_percent(), 60);
         assert_eq!(fast.speed, Some(Speed::Full));
