@@ -34,16 +34,40 @@ pub struct PassStats {
     pub images_processed: usize,
     pub chunks_processed: usize,
     pub units_created: usize,
+    /// Chunks that failed and were set aside with their error.
+    pub chunks_failed: usize,
 }
+
+impl PassStats {
+    fn did_work(&self) -> bool {
+        self.pdfs_processed + self.images_processed + self.chunks_processed + self.chunks_failed > 0
+    }
+}
+
+/// Pause between passes while there is still work queued: enough to let
+/// requests from the app in, short enough that a big import is read in
+/// minutes or hours rather than days.
+const BUSY_PAUSE: Duration = Duration::from_millis(200);
+/// How often, while busy, the log says how much is left.
+const PROGRESS_EVERY: Duration = Duration::from_secs(60);
 
 /// Long-running worker entrypoint, spawned from main.
 pub async fn worker_loop(pool: PgPool, config: Config) {
     let ollama = match OllamaClient::from_config(&config) {
         Ok(client) => {
-            match client.as_ref().map(|c| c.model.is_some()) {
-                Some(true) => tracing::info!("extraction: Ollama enabled (llm + embeddings)"),
-                Some(false) => tracing::info!("extraction: Ollama enabled (embeddings only)"),
-                None => {}
+            match client.as_ref().map(|c| c.model.as_deref()) {
+                Some(Some(model)) => tracing::info!(
+                    url = config.ollama_url.as_deref().unwrap_or(""),
+                    model,
+                    embed_model = %config.ollama_embed_model,
+                    "extraction: Ollama enabled (AI reading + embeddings)"
+                ),
+                Some(None) => tracing::info!(
+                    url = config.ollama_url.as_deref().unwrap_or(""),
+                    embed_model = %config.ollama_embed_model,
+                    "extraction: Ollama enabled (embeddings only)"
+                ),
+                None => tracing::info!("extraction: no AI model set up; reading with rules only"),
             }
             client
         }
@@ -57,27 +81,113 @@ pub async fn worker_loop(pool: PgPool, config: Config) {
     if let Err(e) = reset_stale_processing(&pool).await {
         tracing::warn!(error = %e, "extraction: failed to reset stale processing rows");
     }
+    match backlog(&pool).await {
+        Ok(b) if b.chunks > 0 => tracing::info!(
+            sections = b.chunks,
+            files = b.files,
+            "extraction: resuming; still to read"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "extraction: could not count the backlog"),
+    }
 
-    let mut interval = tokio::time::interval(Duration::from_secs(config.extraction_interval_secs));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let idle = Duration::from_secs(config.extraction_interval_secs);
+    let mut busy_since: Option<std::time::Instant> = None;
+    let mut last_progress = std::time::Instant::now();
     loop {
-        interval.tick().await;
-        match run_one_pass(&pool, &config, ollama.as_ref()).await {
-            Ok(stats)
-                if stats.pdfs_processed + stats.images_processed + stats.chunks_processed > 0 =>
-            {
+        let stats = match run_one_pass(&pool, &config, ollama.as_ref()).await {
+            Ok(stats) => stats,
+            Err(e) => {
+                tracing::error!(error = %e, "extraction pass failed");
+                PassStats::default()
+            }
+        };
+        if stats.did_work() {
+            tracing::debug!(
+                pdfs = stats.pdfs_processed,
+                images = stats.images_processed,
+                chunks = stats.chunks_processed,
+                failed = stats.chunks_failed,
+                units = stats.units_created,
+                "extraction pass complete"
+            );
+            let started = *busy_since.get_or_insert_with(std::time::Instant::now);
+            if last_progress.elapsed() >= PROGRESS_EVERY {
+                last_progress = std::time::Instant::now();
+                if let Ok(b) = backlog(&pool).await {
+                    tracing::info!(
+                        sections = b.chunks,
+                        files = b.files,
+                        set_aside = b.failed,
+                        minutes = started.elapsed().as_secs() / 60,
+                        "extraction: still reading"
+                    );
+                }
+            }
+            // More may be queued: go again almost at once.
+            tokio::time::sleep(BUSY_PAUSE).await;
+        } else {
+            if let Some(started) = busy_since.take() {
+                let failed = backlog(&pool).await.map(|b| b.failed).unwrap_or(0);
                 tracing::info!(
-                    pdfs = stats.pdfs_processed,
-                    images = stats.images_processed,
-                    chunks = stats.chunks_processed,
-                    units = stats.units_created,
-                    "extraction pass complete"
+                    minutes = started.elapsed().as_secs() / 60,
+                    set_aside = failed,
+                    "extraction: everything queued has been read"
                 );
             }
-            Ok(_) => {}
-            Err(e) => tracing::error!(error = %e, "extraction pass failed"),
+            tokio::time::sleep(idle).await;
         }
     }
+}
+
+/// What is still waiting to be read into units.
+#[derive(Debug, Default, Clone, Copy, serde::Serialize)]
+pub struct Backlog {
+    /// Chunks (sections, messages, image text) not yet read.
+    pub chunks: i64,
+    /// Files with at least one chunk not yet read, or not yet opened.
+    pub files: i64,
+    /// Chunks set aside after an error.
+    pub failed: i64,
+}
+
+/// Count the queue. Cheap: every count runs on a partial index.
+pub async fn backlog(pool: &PgPool) -> Result<Backlog, sqlx::Error> {
+    let row = sqlx::query(
+        r#"
+        WITH pending AS (
+            SELECT d.artifact_id FROM document_segments s
+              JOIN documents d ON d.id = s.document_id
+             WHERE s.units_extracted_at IS NULL
+            UNION ALL
+            SELECT c.artifact_id FROM messages m
+              JOIN conversations c ON c.id = m.conversation_id
+             WHERE m.units_extracted_at IS NULL
+            UNION ALL
+            SELECT i.artifact_id FROM images i
+             WHERE i.units_extracted_at IS NULL AND i.ocr_status = 'completed'
+               AND length(trim(coalesce(i.ocr_text, ''))) > 0
+        ),
+        unopened AS (
+            SELECT artifact_id FROM documents WHERE extraction_status IN ('pending', 'processing')
+            UNION
+            SELECT artifact_id FROM images WHERE ocr_status IN ('pending', 'processing')
+        )
+        SELECT (SELECT count(*) FROM pending) AS chunks,
+               (SELECT count(*) FROM (SELECT artifact_id FROM pending
+                                      UNION SELECT artifact_id FROM unopened) f) AS files,
+               (SELECT count(*) FROM document_segments WHERE units_extract_error IS NOT NULL)
+             + (SELECT count(*) FROM messages WHERE units_extract_error IS NOT NULL)
+             + (SELECT count(*) FROM images WHERE units_extract_error IS NOT NULL) AS failed
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(Backlog {
+        chunks: row.get("chunks"),
+        files: row.get("files"),
+        failed: row.get("failed"),
+    })
 }
 
 async fn reset_stale_processing(pool: &PgPool) -> Result<(), sqlx::Error> {
@@ -99,14 +209,31 @@ pub async fn run_one_pass(
     config: &Config,
     ollama: Option<&OllamaClient>,
 ) -> anyhow::Result<PassStats> {
-    let pdfs_processed = process_pending_pdfs(pool, config).await?;
-    let images_processed = process_pending_images(pool, config).await?;
-    let (chunks_processed, units_created) = process_unit_chunks(pool, config, ollama).await?;
+    // Each queue on its own: one failing never keeps the others from moving.
+    let pdfs_processed = process_pending_pdfs(pool, config)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, "extraction: opening PDFs failed; will retry");
+            0
+        });
+    let images_processed = process_pending_images(pool, config)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, "extraction: reading images failed; will retry");
+            0
+        });
+    let chunks = process_unit_chunks(pool, config, ollama)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, "extraction: reading sections failed; will retry");
+            ChunkStats::default()
+        });
     let stats = PassStats {
         pdfs_processed,
         images_processed,
-        chunks_processed,
-        units_created,
+        chunks_processed: chunks.processed,
+        units_created: chunks.created,
+        chunks_failed: chunks.failed,
     };
 
     if let Some(client) = ollama {
@@ -337,11 +464,48 @@ async fn process_pending_images(pool: &PgPool, config: &Config) -> anyhow::Resul
 // Phase 3: unified atomic-unit extraction
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Default)]
+struct ChunkStats {
+    processed: usize,
+    created: usize,
+    failed: usize,
+}
+
+/// Errors are kept short: enough to tell what went wrong, not a whole
+/// statement echoed back.
+const MAX_ERROR_CHARS: usize = 500;
+
+/// Set a chunk aside after `error`: stamped as read, so it leaves the queue
+/// and its file stops showing as still being read, with the error kept for
+/// the log and for a later retry.
+async fn set_aside(pool: &PgPool, chunk: &Chunk, error: &str) -> Result<(), sqlx::Error> {
+    let (sql, id) = match chunk.anchor {
+        ChunkAnchor::Message(id) => (
+            "UPDATE messages SET units_extracted_at = now(), units_extract_error = $2 \
+             WHERE id = $1 AND units_extracted_at IS NULL",
+            id,
+        ),
+        ChunkAnchor::Segment(id) => (
+            "UPDATE document_segments SET units_extracted_at = now(), units_extract_error = $2 \
+             WHERE id = $1 AND units_extracted_at IS NULL",
+            id,
+        ),
+        ChunkAnchor::Image(id) => (
+            "UPDATE images SET units_extracted_at = now(), units_extract_error = $2 \
+             WHERE id = $1 AND units_extracted_at IS NULL",
+            id,
+        ),
+    };
+    let error: String = error.chars().take(MAX_ERROR_CHARS).collect();
+    sqlx::query(sql).bind(id).bind(error).execute(pool).await?;
+    Ok(())
+}
+
 async fn process_unit_chunks(
     pool: &PgPool,
     config: &Config,
     ollama: Option<&OllamaClient>,
-) -> anyhow::Result<(usize, usize)> {
+) -> anyhow::Result<ChunkStats> {
     let mut chunks: Vec<Chunk> = Vec::new();
 
     for row in sqlx::query(
@@ -353,7 +517,7 @@ async fn process_unit_chunks(
         JOIN conversations c ON c.id = m.conversation_id
         JOIN artifacts a ON a.id = c.artifact_id
         WHERE m.units_extracted_at IS NULL
-        ORDER BY m.id LIMIT $1
+        ORDER BY a.ingested_at, m.conversation_id, m.id LIMIT $1
         "#,
     )
     .bind(config.extraction_batch)
@@ -379,7 +543,9 @@ async fn process_unit_chunks(
         JOIN documents d ON d.id = s.document_id
         JOIN artifacts a ON a.id = d.artifact_id
         WHERE s.units_extracted_at IS NULL
-        ORDER BY s.id LIMIT $1
+        -- A file at a time, oldest first, so each finishes before the next
+        -- starts instead of every file waiting for the end of the queue.
+        ORDER BY a.ingested_at, s.document_id, s.seq LIMIT $1
         "#,
     )
     .bind(config.extraction_batch)
@@ -426,8 +592,7 @@ async fn process_unit_chunks(
     // Admission thresholds for this pass: tuned values from feedback when
     // present, env config otherwise.
     let live = LiveThresholds::load(pool, config).await?;
-    let mut processed = 0usize;
-    let mut created = 0usize;
+    let mut stats = ChunkStats::default();
     for chunk in &chunks {
         let mut units: Vec<(rules::ExtractedUnit, &'static str, Option<String>)> =
             rules::extract_units(&chunk.text)
@@ -457,11 +622,11 @@ async fn process_unit_chunks(
             live.admit_hold_below,
             live.admit_drop_below,
         )
-        .await?
+        .await
         {
-            Some(outcome) => {
-                processed += 1;
-                created += outcome.units_created;
+            Ok(Some(outcome)) => {
+                stats.processed += 1;
+                stats.created += outcome.units_created;
 
                 if let Some(client) = ollama {
                     if let Err(e) = persist::embed_new_units(pool, client, &outcome.new_units).await
@@ -470,10 +635,30 @@ async fn process_unit_chunks(
                     }
                 }
             }
-            None => {
+            Ok(None) => {
                 // Raced with another pass; nothing to do.
+            }
+            Err(e) => {
+                // This chunk alone: set it aside and carry on with the rest,
+                // rather than failing the pass and meeting it again first
+                // next time.
+                // The underlying cause: ApiError's own text is kept short
+                // for API clients ("database error").
+                let error = match &e {
+                    crate::error::ApiError::Db(inner) => inner.to_string(),
+                    crate::error::ApiError::Internal(inner) => format!("{inner:#}"),
+                    other => other.to_string(),
+                };
+                tracing::warn!(
+                    artifact_id = %chunk.artifact_id,
+                    chunk = ?chunk.anchor,
+                    error = %error,
+                    "extraction: could not read a section; set aside"
+                );
+                set_aside(pool, chunk, &error).await?;
+                stats.failed += 1;
             }
         }
     }
-    Ok((processed, created))
+    Ok(stats)
 }

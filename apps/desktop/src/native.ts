@@ -88,3 +88,43 @@ export function checkForUpdate(): Promise<UpdateCheck> {
 export function installUpdate(): Promise<void> {
   return call<void>("install_update");
 }
+
+/** The local AI model (Ollama) Gather uses; see src-tauri/src/ai.rs. */
+export interface AiSettings {
+  enabled: boolean;
+  /** Where Ollama listens, e.g. http://127.0.0.1:11434. */
+  url: string;
+  /** Model that reads files into items; empty for search only. */
+  chat_model: string;
+  /** Model for search by meaning. */
+  embed_model: string;
+}
+
+export interface AiSettingsView extends AiSettings {
+  /** Saved in Settings, taken from GATHER_OLLAMA_* variables, or the defaults. */
+  source: "saved" | "environment" | "default";
+}
+
+export function getAiSettings(): Promise<AiSettingsView> {
+  return call<AiSettingsView>("get_ai_settings");
+}
+
+/** Saves the choice and restarts Gather's background service with it. */
+export function saveAiSettings(settings: AiSettings): Promise<AiSettings> {
+  return call<AiSettings>("save_ai_settings", { settings });
+}
+
+/** The models Ollama at `url` has downloaded; rejects with why it couldn't be reached. */
+export function testOllama(url: string): Promise<{ models: string[] }> {
+  return call<{ models: string[] }>("test_ollama", { url });
+}
+
+/** Where daemon.log and postgres.log are written. */
+export function logsDir(): Promise<string> {
+  return call<string>("logs_dir");
+}
+
+/** Shows the logs folder in the system's file manager. */
+export function openLogsFolder(): Promise<void> {
+  return call<void>("open_logs_folder");
+}

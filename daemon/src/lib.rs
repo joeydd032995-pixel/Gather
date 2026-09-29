@@ -56,10 +56,13 @@ pub struct AppState {
 pub fn init_tracing(json: bool) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn,tower_http=info"));
+    // Colour codes only on a terminal: the desktop app sends this to
+    // daemon.log, where they would be noise in a text editor.
+    let ansi = std::io::IsTerminal::is_terminal(&std::io::stdout());
     let fmt_layer = if json {
         tracing_subscriber::fmt::layer().json().boxed()
     } else {
-        tracing_subscriber::fmt::layer().boxed()
+        tracing_subscriber::fmt::layer().with_ansi(ansi).boxed()
     };
     tracing_subscriber::registry()
         .with(filter)

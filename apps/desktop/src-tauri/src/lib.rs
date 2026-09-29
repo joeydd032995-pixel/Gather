@@ -3,6 +3,7 @@
 //! file's bytes for upload, the supervisor that runs the bundled database and
 //! daemon (`runtime`), and the opt-in update check (`updates`).
 
+mod ai;
 mod folders;
 mod memory;
 mod runtime;
@@ -130,6 +131,79 @@ async fn install_update(
     }
 }
 
+/// The app data folder: the database, logs and saved AI settings.
+fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|p| dunce::simplified(&p).to_path_buf())
+        .map_err(|e| format!("data dir: {e}"))
+}
+
+#[tauri::command]
+fn get_ai_settings(app: AppHandle) -> Result<ai::AiSettingsView, String> {
+    Ok(ai::load(&data_dir(&app)?, memory::current().profile))
+}
+
+/// Save the AI model choice and restart Gather's background service with it.
+/// The search model is checked first: the database stores 768-number
+/// vectors, and any other model would leave search quietly broken.
+#[tauri::command]
+async fn save_ai_settings(
+    app: AppHandle,
+    runtime: State<'_, Arc<Runtime>>,
+    settings: ai::AiSettings,
+) -> Result<ai::AiSettings, String> {
+    let settings = ai::validate(&settings)?;
+    if settings.enabled {
+        let (url, model) = (settings.url.clone(), settings.embed_model.clone());
+        tauri::async_runtime::spawn_blocking(move || ai::check_embed_model(&url, &model))
+            .await
+            .map_err(|e| e.to_string())??;
+    }
+    let saved = ai::save(&data_dir(&app)?, &settings)?;
+    runtime.restart("Applying your AI model settings")?;
+    Ok(saved)
+}
+
+/// Which models Ollama at `url` has, or why it couldn't be reached.
+#[tauri::command]
+async fn test_ollama(url: String) -> Result<ai::OllamaCheck, String> {
+    tauri::async_runtime::spawn_blocking(move || ai::check(&url))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Where daemon.log and postgres.log are.
+#[tauri::command]
+fn logs_dir(app: AppHandle, runtime: State<'_, Arc<Runtime>>) -> Result<String, String> {
+    let dir = match runtime.logs_dir() {
+        Some(dir) => dir,
+        None => data_dir(&app)?.join("logs"),
+    };
+    Ok(dir.display().to_string())
+}
+
+/// Show the logs folder in the system's file manager.
+#[tauri::command]
+fn open_logs_folder(app: AppHandle, runtime: State<'_, Arc<Runtime>>) -> Result<(), String> {
+    let dir = match runtime.logs_dir() {
+        Some(dir) => dir,
+        None => data_dir(&app)?.join("logs"),
+    };
+    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    #[cfg(windows)]
+    let opener = "explorer";
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let opener = "xdg-open";
+    std::process::Command::new(opener)
+        .arg(&dir)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("opening {}: {e}", dir.display()))
+}
+
 fn runtime_paths(app: &AppHandle) -> Result<Paths, String> {
     let resources = app
         .path()
@@ -189,6 +263,11 @@ pub fn run() {
             set_update_settings,
             check_for_update,
             install_update,
+            get_ai_settings,
+            save_ai_settings,
+            test_ollama,
+            logs_dir,
+            open_logs_folder,
         ])
         .build(tauri::generate_context!())
         .expect("error while building gather-desktop");

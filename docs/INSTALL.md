@@ -165,8 +165,26 @@ Your data is in Gather's app-data folder:
 | Linux | `~/.local/share/dev.gather.desktop/` |
 
 Inside: `pgdata/` (the database), `logs/` (`postgres.log`, `daemon.log`) and `db-password`
-(readable only by you). To back up, use the export (`GET /api/v1/export`) or the scheduled
+(readable only by you). **Settings → Reading and logs → Open folder** opens the logs folder. On
+Windows the folder is hidden and not searched by default: paste
+`%APPDATA%\dev.gather.desktop\logs` into File Explorer's address bar. To back up, use the export (`GET /api/v1/export`) or the scheduled
 backups in [BACKUP-RUNBOOK.md](BACKUP-RUNBOOK.md).
+
+## A local AI model (optional)
+
+Gather reads files with built-in rules. For search by meaning, and for more thorough reading,
+it can use a model running on this computer through [Ollama](https://ollama.com):
+
+1. Install Ollama and start it.
+2. Download the models, e.g. for a computer with about 4 GB of memory:
+   `ollama pull nomic-embed-text` (search) and `ollama pull llama3.2:1b` (reading files).
+3. In Gather, open **Settings → AI model**, turn on **Use a local AI model**, press **Test** to
+   check Gather can reach Ollama, pick the models and press **Save and restart**. Saving checks
+   that the search model gives the 768-number vectors Gather's search uses, so Ollama must be
+   running.
+
+Leave the model for reading files empty to use Ollama for search only, which needs far less
+memory. Files already in Gather keep what was found in them; the model reads files added after.
 
 ## Updates
 
@@ -188,6 +206,10 @@ explain the upgrade step.
 
 - **"did not become ready in time" or "stopped during start-up":** look at `logs/daemon.log`
   in the app-data folder above.
+- **Files stay on "Reading" for a long time:** **Settings → Reading and logs** shows how many
+  files and sections are left. Files are read one at a time, oldest first; a big folder of
+  code can take a while, and longer with an AI model reading files. A section that can't be
+  read is skipped and counted there, with the reason in `daemon.log`.
 - **"starting the database failed" / port in use:** something else is using port 7603. Quit
   it, or start Gather with `GATHER_PG_PORT=<free port>`.
 - **"The database folder … is incomplete or damaged":** Gather never repairs or deletes an

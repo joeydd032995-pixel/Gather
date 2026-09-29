@@ -449,6 +449,30 @@ export interface ArtifactDetail extends ArtifactSummary {
   conversations: { id: string; title: string | null }[];
 }
 
+/** What the daemon runs with, and how much is still waiting to be read. */
+export interface DaemonStatus {
+  version: string;
+  ai: {
+    enabled: boolean;
+    url: string | null;
+    model: string | null;
+    embed_model: string | null;
+  };
+  reading: {
+    /** Sections, messages and image text not yet read. */
+    chunks: number;
+    /** Files with something still to read. */
+    files: number;
+    /** Sections set aside after an error (details in daemon.log). */
+    failed: number;
+  };
+}
+
+export async function getStatus(): Promise<DaemonStatus> {
+  const res = await fetch(`${DAEMON_URL}/api/v1/status`, { headers: authHeaders() });
+  return jsonOrThrow<DaemonStatus>(res);
+}
+
 export async function listArtifacts(limit = 50, offset = 0): Promise<ArtifactSummary[]> {
   const res = await fetch(`${DAEMON_URL}/api/v1/artifacts?limit=${limit}&offset=${offset}`, {
     headers: authHeaders(),

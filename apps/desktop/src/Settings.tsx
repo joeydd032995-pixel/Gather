@@ -1,30 +1,42 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import {
   CircleCheck,
   Cpu,
   Download,
   ExternalLink,
+  FileText,
+  FolderOpen,
   Keyboard,
   Monitor,
   Moon,
   Palette as PaletteIcon,
+  PlugZap,
   RefreshCw,
   Settings as SettingsIcon,
   ShieldCheck,
+  Sparkles,
   Sun,
 } from "lucide-react";
+import { getStatus, type DaemonStatus } from "./api";
 import type { ThemeChoice } from "./hooks/useTheme";
 import {
   checkForUpdate,
+  getAiSettings,
   getUpdateSettings,
   installUpdate,
   isTauri,
+  logsDir,
   memoryProfile,
+  openLogsFolder,
+  saveAiSettings,
   setUpdateSettings,
+  testOllama,
+  type AiSettings,
+  type AiSettingsView,
   type MemoryInfo,
   type UpdateCheck,
 } from "./native";
-import { Badge, Button, Callout, Kbd, Panel, Switch, Toolbar } from "./ui";
+import { Badge, Button, Callout, Kbd, Panel, Switch, Toolbar, errorText } from "./ui";
 
 const RELEASES_URL = "https://github.com/joeydd032995-pixel/Gather/releases";
 const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";
@@ -145,12 +157,15 @@ export default function Settings({
             <p className="panel-pad setting-desc-lg">
               Gather runs entirely on this computer. It has no account, no cloud and no telemetry;
               its services listen only on this machine. The update check below is the one feature
-              that can go online, and it stays off unless you turn it on.
+              that can go online, and it stays off unless you turn it on. A local AI model, if you
+              set one up, runs on this computer too.
             </p>
           </Panel>
 
           {isTauri ? (
             <>
+              <AiSection />
+              <ReadingSection />
               <Panel title="Updates" icon={RefreshCw}>
                 <Switch
                   checked={checkOnStart}
@@ -183,7 +198,7 @@ export default function Settings({
             </>
           ) : (
             <Callout tone="neutral" icon={Monitor}>
-              Updates and memory settings are available in the desktop app.
+              AI model, update and memory settings are available in the desktop app.
             </Callout>
           )}
 
@@ -204,6 +219,325 @@ export default function Settings({
         </div>
       </div>
     </>
+  );
+}
+
+/** Suggested models, small enough for a 4 GB computer. */
+const SUGGESTED_CHAT = "llama3.2:1b";
+const SUGGESTED_EMBED = "nomic-embed-text";
+
+/** Whether Ollama lists `name` ("x" is listed as "x:latest"). */
+function hasModel(models: string[], name: string): boolean {
+  return models.some((m) => m === name || m === `${name}:latest`);
+}
+
+type Test =
+  | { state: "idle" | "testing" }
+  | { state: "ok"; models: string[] }
+  | { state: "error"; message: string };
+
+/** The local AI model: where Ollama is, and which models Gather uses. */
+function AiSection() {
+  const [view, setView] = useState<AiSettingsView | null>(null);
+  const [draft, setDraft] = useState<AiSettings | null>(null);
+  const [test, setTest] = useState<Test>({ state: "idle" });
+  const [running, setRunning] = useState<DaemonStatus["ai"] | null>(null);
+  const [lowMemory, setLowMemory] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const urlId = useId();
+  const chatId = useId();
+  const embedId = useId();
+  const listId = useId();
+
+  useEffect(() => {
+    getAiSettings()
+      .then((v) => {
+        setView(v);
+        setDraft(v);
+      })
+      .catch((e) => setError(errorText(e)));
+    getStatus()
+      .then((s) => setRunning(s.ai))
+      .catch(() => setRunning(null));
+    memoryProfile()
+      .then((m) => setLowMemory(m.profile === "low"))
+      .catch(() => {});
+  }, []);
+
+  if (!draft || !view) {
+    return error ? <Callout>{error}</Callout> : null;
+  }
+
+  const set = (patch: Partial<AiSettings>) => setDraft({ ...draft, ...patch });
+  const dirty =
+    draft.enabled !== view.enabled ||
+    draft.url.trim() !== view.url ||
+    draft.chat_model.trim() !== view.chat_model ||
+    draft.embed_model.trim() !== view.embed_model;
+
+  const runTest = async () => {
+    setTest({ state: "testing" });
+    try {
+      const { models } = await testOllama(draft.url.trim());
+      setTest({ state: "ok", models });
+    } catch (e) {
+      setTest({ state: "error", message: errorText(e) });
+    }
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      // Gather restarts to apply this: the start-up screen shows until it's back.
+      await saveAiSettings(draft);
+    } catch (e) {
+      setError(errorText(e));
+      setSaving(false);
+    }
+  };
+
+  const models = test.state === "ok" ? test.models : null;
+  const missing = (name: string) =>
+    models !== null && name.trim() !== "" && !hasModel(models, name.trim());
+
+  return (
+    <Panel
+      title="AI model"
+      icon={Sparkles}
+      actions={
+        running?.enabled ? <Badge tone="success">On</Badge> : <Badge tone="neutral">Off</Badge>
+      }
+    >
+      <Switch
+        checked={draft.enabled}
+        onChange={(enabled) => set({ enabled })}
+        label="Use a local AI model (Ollama)"
+        description="Search by meaning, and read files more thoroughly than Gather's built-in rules. Ollama runs on this computer; nothing is sent anywhere."
+      />
+      {draft.enabled && (
+        <>
+          <div className="setting-row setting-field">
+            <div className="setting-text">
+              <label htmlFor={urlId} className="setting-label">
+                Ollama address
+              </label>
+              <p className="setting-desc">
+                Install Ollama from ollama.com and start it. It listens on http://127.0.0.1:11434
+                unless you changed that.
+              </p>
+            </div>
+            <div className="setting-control">
+              <input
+                id={urlId}
+                className="input"
+                value={draft.url}
+                spellCheck={false}
+                onChange={(e) => {
+                  set({ url: e.target.value });
+                  setTest({ state: "idle" });
+                }}
+              />
+              <Button icon={PlugZap} onClick={runTest} loading={test.state === "testing"}>
+                Test
+              </Button>
+            </div>
+          </div>
+          {test.state === "ok" && (
+            <div className="panel-pad">
+              <Callout tone="success" icon={CircleCheck} title="Connected to Ollama">
+                {test.models.length === 0
+                  ? "It has no models yet: download them with the commands below."
+                  : `Models on this computer: ${test.models.join(", ")}.`}
+              </Callout>
+            </div>
+          )}
+          {test.state === "error" && (
+            <div className="panel-pad">
+              <Callout title="Couldn't reach Ollama">{test.message}</Callout>
+            </div>
+          )}
+
+          <datalist id={listId}>
+            {(models ?? []).map((m) => (
+              <option key={m} value={m} />
+            ))}
+          </datalist>
+          <div className="setting-row setting-field">
+            <div className="setting-text">
+              <label htmlFor={chatId} className="setting-label">
+                Model for reading files
+              </label>
+              <p className="setting-desc">
+                Pulls facts and relationships out of what you add. On a computer with about 4 GB of
+                memory, {SUGGESTED_CHAT} fits. Leave empty to use Ollama for search only.
+              </p>
+              {missing(draft.chat_model) && (
+                <p className="setting-desc setting-warn">
+                  Not downloaded yet: run <code>ollama pull {draft.chat_model.trim()}</code>
+                </p>
+              )}
+            </div>
+            <div className="setting-control">
+              <input
+                id={chatId}
+                className="input"
+                list={listId}
+                value={draft.chat_model}
+                placeholder={`None (e.g. ${SUGGESTED_CHAT})`}
+                spellCheck={false}
+                onChange={(e) => set({ chat_model: e.target.value })}
+              />
+            </div>
+          </div>
+          <div className="setting-row setting-field">
+            <div className="setting-text">
+              <label htmlFor={embedId} className="setting-label">
+                Model for search
+              </label>
+              <p className="setting-desc">
+                Finds things by meaning, not just matching words. {SUGGESTED_EMBED} is small and is
+                the one Gather is built for.
+              </p>
+              {missing(draft.embed_model) && (
+                <p className="setting-desc setting-warn">
+                  Not downloaded yet: run <code>ollama pull {draft.embed_model.trim()}</code>
+                </p>
+              )}
+            </div>
+            <div className="setting-control">
+              <input
+                id={embedId}
+                className="input"
+                list={listId}
+                value={draft.embed_model}
+                placeholder={SUGGESTED_EMBED}
+                spellCheck={false}
+                onChange={(e) => set({ embed_model: e.target.value })}
+              />
+            </div>
+          </div>
+          {lowMemory && draft.chat_model.trim() !== "" && (
+            <div className="panel-pad">
+              <Callout tone="warning" title="This computer has little memory">
+                A model that reads files uses about 1.5 GB while it works, and reading goes slower.
+                Gather unloads it a minute after it's done. If things get sluggish, clear the model
+                for reading files and keep search.
+              </Callout>
+            </div>
+          )}
+        </>
+      )}
+
+      <div className="setting-row">
+        <div className="setting-text">
+          <span className="setting-label">Now running</span>
+          <p className="setting-desc">
+            {running === null
+              ? "Gather's background service isn't answering."
+              : running.enabled
+                ? running.model
+                  ? `Reading files with ${running.model}, search with ${running.embed_model}.`
+                  : `Search with ${running.embed_model}; files are read with the built-in rules.`
+                : "No AI model: files are read with the built-in rules, and search matches words."}
+            {view.source === "environment" &&
+              " (Set up by GATHER_OLLAMA_* variables; saving here takes over from them.)"}
+          </p>
+        </div>
+        <Button variant="primary" onClick={save} loading={saving} disabled={!dirty}>
+          Save and restart
+        </Button>
+      </div>
+      {error && (
+        <div className="panel-pad">
+          <Callout>{error}</Callout>
+        </div>
+      )}
+      <p className="hint panel-pad">
+        Saving checks the search model with Ollama first, so keep Ollama running. Files already in
+        Gather keep what was found in them; the new model reads files you add from now on.
+      </p>
+    </Panel>
+  );
+}
+
+/** How far reading has got, and where the logs are. */
+function ReadingSection() {
+  const [status, setStatus] = useState<DaemonStatus["reading"] | null>(null);
+  const [dir, setDir] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
+    const poll = () =>
+      getStatus()
+        .then((s) => !cancelled && setStatus(s.reading))
+        .catch(() => !cancelled && setStatus(null))
+        .finally(() => {
+          if (!cancelled) timer = setTimeout(poll, 10_000);
+        });
+    poll();
+    logsDir()
+      .then(setDir)
+      .catch(() => setDir(null));
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
+
+  const open = async () => {
+    setError(null);
+    try {
+      await openLogsFolder();
+    } catch (e) {
+      setError(errorText(e));
+    }
+  };
+
+  return (
+    <Panel title="Reading and logs" icon={FileText}>
+      <div className="setting-row">
+        <div className="setting-text">
+          <span className="setting-label">Reading</span>
+          <p className="setting-desc">
+            {status === null
+              ? "Gather's background service isn't answering."
+              : status.chunks === 0 && status.files === 0
+                ? "Everything you've added has been read."
+                : `Reading ${status.files.toLocaleString()} ${status.files === 1 ? "file" : "files"}: ${status.chunks.toLocaleString()} ${status.chunks === 1 ? "section" : "sections"} to go. Files finish one at a time, oldest first.`}
+            {status !== null &&
+              status.failed > 0 &&
+              ` ${status.failed.toLocaleString()} ${status.failed === 1 ? "section" : "sections"} couldn't be read and ${status.failed === 1 ? "was" : "were"} skipped; daemon.log says why.`}
+          </p>
+        </div>
+      </div>
+      <div className="setting-row">
+        <div className="setting-text">
+          <span className="setting-label">Logs</span>
+          <p className="setting-desc">
+            What Gather's background service did, including any errors: daemon.log (and postgres.log
+            for the database).
+            {dir && (
+              <>
+                {" "}
+                <code className="setting-path">{dir}</code>
+              </>
+            )}
+          </p>
+        </div>
+        <Button icon={FolderOpen} onClick={open}>
+          Open folder
+        </Button>
+      </div>
+      {error && (
+        <div className="panel-pad">
+          <Callout>{error}</Callout>
+        </div>
+      )}
+    </Panel>
   );
 }
 

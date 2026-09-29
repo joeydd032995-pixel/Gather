@@ -5,6 +5,7 @@ import {
   LoaderCircle,
   Monitor,
   Moon,
+  FolderOpen,
   FolderPlus,
   Plus,
   Search,
@@ -21,7 +22,7 @@ import { useRuntime } from "./hooks/useRuntime";
 import { useTheme, type ThemeChoice } from "./hooks/useTheme";
 import Library from "./Library";
 import Logo from "./Logo";
-import { checkForUpdate, getApiToken, getUpdateSettings, isTauri } from "./native";
+import { checkForUpdate, getApiToken, getUpdateSettings, isTauri, openLogsFolder } from "./native";
 import { NAV, NAV_ITEMS, type Tab } from "./nav";
 import Overview from "./Overview";
 import Palette, { type Command } from "./Palette";
@@ -58,6 +59,11 @@ function Splash({ step, error, logDir }: { step?: string; error?: string; logDir
               <p className="hint">
                 Logs are in <code>{logDir}</code>
               </p>
+            )}
+            {isTauri && (
+              <Button icon={FolderOpen} onClick={() => openLogsFolder().catch(() => {})}>
+                Open logs folder
+              </Button>
             )}
           </>
         ) : (
