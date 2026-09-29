@@ -494,3 +494,248 @@ async fn a_failing_chunk_is_set_aside_and_the_rest_are_read() {
         "no model named while AI is off"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Re-reading earlier files with the AI model
+// ---------------------------------------------------------------------------
+
+/// A stand-in for Ollama: finds the `Tool…` word of a chunk and answers with
+/// a unit about it, fails on a `Broken…` word, and reads nothing otherwise.
+async fn spawn_fake_ollama() -> String {
+    use axum::routing::post;
+    use axum::Json;
+
+    fn word(text: &str, prefix: &str) -> Option<String> {
+        text.split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+            .find(|w| w.starts_with(prefix) && w.len() == prefix.len() + 32)
+            .map(String::from)
+    }
+    async fn chat(Json(body): Json<Value>) -> Result<Json<Value>, StatusCode> {
+        let text = body
+            .pointer("/messages/1/content")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if word(text, "Broken").is_some() {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        let units = match word(text, "Tool") {
+            Some(tool) => json!([{
+                "kind": "fact",
+                "statement": format!("The user relies on {tool}"),
+                "evidence_span": tool,
+                "confidence": 0.9,
+            }]),
+            None => json!([]),
+        };
+        Ok(Json(
+            json!({ "message": { "content": json!({ "units": units }).to_string() } }),
+        ))
+    }
+    async fn embed(Json(body): Json<Value>) -> Json<Value> {
+        let n = body["input"].as_array().map_or(0, Vec::len);
+        Json(json!({ "embeddings": vec![vec![0.0f32; 768]; n] }))
+    }
+
+    let app = axum::Router::new()
+        .route("/api/chat", post(chat))
+        .route("/api/embed", post(embed));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    url
+}
+
+async fn finish_reread(state: &AppState, client: &extract::ollama::OllamaClient) {
+    for _ in 0..3000 {
+        extract::reread::run_pass(&state.pool, &state.config, client)
+            .await
+            .expect("re-read pass");
+        if extract::reread::running(&state.pool)
+            .await
+            .unwrap()
+            .is_none()
+        {
+            return;
+        }
+    }
+    panic!("the re-read never finished");
+}
+
+#[tokio::test]
+async fn re_reading_adds_what_the_model_finds_in_earlier_files() {
+    let Some(mut state) = test_state().await else {
+        return;
+    };
+    let marker = Uuid::new_v4().simple().to_string();
+    let tool = format!("Tool{marker}");
+    let broken = format!("Broken{marker}");
+    let model = format!("fake-{marker}");
+    let stored = format!("ollama:{model}");
+
+    // Earlier files, read by the rules alone (no model was set up yet).
+    let app = routes::build_router(state.clone());
+    let export = json!({
+        "platform": "generic",
+        "data": {
+            "schema": "gather-generic-v1",
+            "conversations": [{
+                "id": format!("conv-reread-{marker}"),
+                "messages": [
+                    {"role": "user", "content": format!("I use {tool} for storage."),
+                     "created_at": "2026-03-01T09:00:00Z"},
+                    {"role": "user", "content": format!("I use {broken} for backups."),
+                     "created_at": "2026-03-01T09:01:00Z"}
+                ]
+            }]
+        }
+    });
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/ingest/chat-export")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(export.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::ACCEPTED);
+    drain_extraction(&state).await;
+
+    // Now a model is set up.
+    let mut config = Config::for_tests(std::env::var("DATABASE_URL").unwrap());
+    config.ollama_url = Some(spawn_fake_ollama().await);
+    config.ollama_model = Some(model.clone());
+    let client = extract::ollama::OllamaClient::from_config(&config)
+        .unwrap()
+        .unwrap();
+    state.config = Arc::new(config);
+    state.ollama = Some(Arc::new(client));
+    let client = state.ollama.clone().unwrap();
+    let app = routes::build_router(state.clone());
+
+    let post = |path: &'static str| {
+        let app = app.clone();
+        async move {
+            let res = app
+                .oneshot(Request::post(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = res.status();
+            (status, body_json(res).await)
+        }
+    };
+
+    // Started, then stopped: nothing more is read.
+    let (status, started) = post("/api/v1/reread").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(started["job"]["status"], "running");
+    assert_eq!(started["job"]["model"], model);
+    assert!(started["job"]["total"].as_i64().unwrap() >= 2);
+    let (_, again) = post("/api/v1/reread").await;
+    assert_eq!(
+        again["job"]["id"], started["job"]["id"],
+        "one job at a time"
+    );
+    let (_, stopped) = post("/api/v1/reread/cancel").await;
+    assert_eq!(stopped["job"]["status"], "cancelled");
+    finish_reread(&state, &client).await;
+    let (unread,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM messages WHERE content LIKE '%' || $1 || '%' \
+         AND units_llm_model IS NOT NULL",
+    )
+    .bind(&marker)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(unread, 0, "a stopped re-read reads nothing");
+
+    // Started and left to finish.
+    let (_, started) = post("/api/v1/reread").await;
+    let job_id: Uuid = started["job"]["id"].as_str().unwrap().parse().unwrap();
+    finish_reread(&state, &client).await;
+
+    let units = sqlx::query(
+        "SELECT u.extraction_method::text AS method, u.extraction_model, \
+                (SELECT count(*) FROM atomic_unit_provenance p WHERE p.atomic_unit_id = u.id) AS sources \
+         FROM atomic_units u WHERE u.statement LIKE '%' || $1 || '%'",
+    )
+    .bind(&tool)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap();
+    // The rules' unit about the tool and the model's own.
+    let model_units: Vec<_> = units
+        .iter()
+        .filter(|r| r.get::<String, _>("method") == "llm_local")
+        .collect();
+    assert_eq!(model_units.len(), 1, "the model adds its own unit");
+    assert_eq!(
+        model_units[0].get::<Option<String>, _>("extraction_model"),
+        Some(stored.clone())
+    );
+    assert_eq!(model_units[0].get::<i64, _>("sources"), 1);
+
+    let rows = sqlx::query(
+        "SELECT content, units_llm_model, units_reread_job, units_extracted_at IS NOT NULL AS done \
+         FROM messages WHERE content LIKE '%' || $1 || '%'",
+    )
+    .bind(&marker)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    for r in &rows {
+        assert!(r.get::<bool, _>("done"));
+        if r.get::<String, _>("content").contains(&broken) {
+            // The model failed on it: not marked as read by the model, and
+            // left alone by this job instead of retried forever.
+            assert_eq!(r.get::<Option<String>, _>("units_llm_model"), None);
+            assert_eq!(r.get::<Option<Uuid>, _>("units_reread_job"), Some(job_id));
+        } else {
+            assert_eq!(
+                r.get::<Option<String>, _>("units_llm_model"),
+                Some(stored.clone())
+            );
+        }
+    }
+
+    let (status, body) = {
+        let res = app
+            .clone()
+            .oneshot(Request::get("/api/v1/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        (res.status(), body_json(res).await)
+    };
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["reread"]["status"], "done");
+    assert!(body["reread"]["failed"].as_i64().unwrap() >= 1);
+
+    // A second job reads nothing twice: the same unit, still one source.
+    post("/api/v1/reread").await;
+    finish_reread(&state, &client).await;
+    let (sources,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM atomic_unit_provenance p JOIN atomic_units u ON u.id = p.atomic_unit_id \
+         WHERE u.statement LIKE '%' || $1 || '%' AND u.extraction_method = 'llm_local'",
+    )
+    .bind(&tool)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(sources, 1);
+}
+
+#[tokio::test]
+async fn re_reading_needs_an_ai_model() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let app = routes::build_router(state);
+    let res = app
+        .oneshot(Request::post("/api/v1/reread").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
