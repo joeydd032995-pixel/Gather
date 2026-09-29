@@ -661,6 +661,52 @@ pub(crate) async fn read_part(
 /// instead of one round trip per segment.
 const SEGMENT_BATCH: usize = 256;
 
+fn is_html_name(filename: &str) -> bool {
+    let lower = filename.to_ascii_lowercase();
+    lower.ends_with(".html") || lower.ends_with(".htm")
+}
+
+/// Store `data` as a chat export from a file that turned out to be a
+/// conversation. None when it holds no messages, so the caller falls back to
+/// treating the file as an ordinary document.
+async fn ingest_as_chat(
+    state: &AppState,
+    job_id: Uuid,
+    filename: &str,
+    platform: &str,
+    data: serde_json::Value,
+    label: &str,
+) -> Result<Option<FileResult>, ApiError> {
+    let req = ChatExportRequest {
+        platform: platform.to_string(),
+        data,
+        filename: Some(filename.to_string()),
+    };
+    let normalized = adapters::normalize(&req.platform, &req.data)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    if normalized
+        .conversations
+        .iter()
+        .all(|c| c.messages.is_empty())
+    {
+        return Ok(None);
+    }
+    let stored = store_chat_export(state, &req, &normalized, job_id).await?;
+    Ok(Some(FileResult {
+        filename: filename.to_string(),
+        kind: Some("chat_export".to_string()),
+        artifact_id: Some(stored.artifact_id),
+        deduplicated: stored.deduplicated,
+        status: if stored.deduplicated {
+            "deduplicated".to_string()
+        } else {
+            "accepted".to_string()
+        },
+        detail: Some(format!("{label}: {} messages", stored.messages)),
+        segments: 0,
+    }))
+}
+
 pub(crate) async fn ingest_one_file(
     state: &AppState,
     job_id: Uuid,
@@ -709,28 +755,48 @@ pub(crate) async fn ingest_one_file(
         if let Some((_, text)) = &text {
             if adapters::perplexity_md::looks_like(text) {
                 if let Some(thread) = adapters::perplexity_md::parse(text) {
-                    let req = ChatExportRequest {
-                        platform: "perplexity".to_string(),
-                        data: thread,
-                        filename: Some(filename.to_string()),
-                    };
-                    let normalized = adapters::normalize(&req.platform, &req.data)
-                        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-                    let stored = store_chat_export(state, &req, &normalized, job_id).await?;
-                    return Ok(FileResult {
-                        filename: filename.to_string(),
-                        kind: Some("chat_export".to_string()),
-                        artifact_id: Some(stored.artifact_id),
-                        deduplicated: stored.deduplicated,
-                        status: if stored.deduplicated {
-                            "deduplicated".to_string()
-                        } else {
-                            "accepted".to_string()
-                        },
-                        detail: Some(format!("Perplexity thread: {} messages", stored.messages)),
-                        segments: 0,
-                    });
+                    if let Some(done) = ingest_as_chat(
+                        state,
+                        job_id,
+                        filename,
+                        "perplexity",
+                        thread,
+                        "Perplexity thread",
+                    )
+                    .await?
+                    {
+                        return Ok(done);
+                    }
                 }
+            }
+        }
+    }
+
+    // A saved ChatGPT share page is a conversation too, and is read offline.
+    if kind == "document_text" && is_html_name(filename) {
+        let owned = bytes.to_vec();
+        let found = tokio::task::spawn_blocking(move || {
+            let html = String::from_utf8_lossy(&owned);
+            if adapters::chatgpt_share::looks_like(&html) {
+                adapters::chatgpt_share::extract(&html)
+            } else {
+                None
+            }
+        })
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("share page read failed: {e}")))?;
+        if let Some(conversation) = found {
+            if let Some(done) = ingest_as_chat(
+                state,
+                job_id,
+                filename,
+                "chatgpt",
+                json!([conversation]),
+                "ChatGPT shared conversation",
+            )
+            .await?
+            {
+                return Ok(done);
             }
         }
     }

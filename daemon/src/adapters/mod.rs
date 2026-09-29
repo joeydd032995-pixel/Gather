@@ -7,6 +7,7 @@
 //! testable in isolation and makes adding a platform a one-file change.
 
 pub mod chatgpt;
+pub mod chatgpt_share;
 pub mod claude;
 pub mod claude_code;
 pub mod copilot;

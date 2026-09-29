@@ -15,11 +15,22 @@ use super::{
 const FORMAT: &str = "xai-export-v1";
 
 pub fn parse(data: &Value) -> Result<AdapterOutput, AdapterError> {
-    let conversations = data
+    // A conversations file (account export), a bare array of them, or one
+    // conversation on its own: what a shared-conversation link returns is
+    // `{responses: [...], conversation: {...}}`.
+    let conversations: &[Value] = if let Some(list) = data
         .get("conversations")
         .and_then(Value::as_array)
         .or_else(|| data.as_array())
-        .ok_or_else(|| malformed("expected 'conversations' array (or a top-level array)"))?;
+    {
+        list
+    } else if data.get("responses").is_some_and(Value::is_array) {
+        std::slice::from_ref(data)
+    } else {
+        return Err(malformed(
+            "expected 'conversations' array, a top-level array, or a conversation with 'responses'",
+        ));
+    };
 
     let mut out = Vec::with_capacity(conversations.len());
     for conv in conversations {
@@ -41,6 +52,14 @@ pub fn parse(data: &Value) -> Result<AdapterOutput, AdapterError> {
                 .get("response")
                 .filter(|r| r.is_object())
                 .unwrap_or(item);
+            // Control entries are the app's own bookkeeping, not replies.
+            if response
+                .get("isControl")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                continue;
+            }
             let content = response
                 .get("message")
                 .and_then(Value::as_str)
@@ -52,13 +71,19 @@ pub fn parse(data: &Value) -> Result<AdapterOutput, AdapterError> {
                 .and_then(Value::as_str)
                 .unwrap_or("other");
             messages.push(NormalizedMessage {
-                external_id: first_str(response, &["_id", "response_id", "id"]),
-                parent_external_id: first_str(response, &["parent_response_id"]),
+                external_id: first_str(response, &["_id", "response_id", "responseId", "id"]),
+                parent_external_id: first_str(
+                    response,
+                    &["parent_response_id", "parentResponseId"],
+                ),
                 role: normalize_role(role),
                 author: None,
                 model: first_str(response, &["model"]),
                 content: content.to_string(),
-                created_at: response.get("create_time").and_then(time_field),
+                created_at: response
+                    .get("create_time")
+                    .or_else(|| response.get("createTime"))
+                    .and_then(time_field),
             });
         }
         // Replies are kept in the order they were made, when every one says
@@ -68,14 +93,17 @@ pub fn parse(data: &Value) -> Result<AdapterOutput, AdapterError> {
         }
 
         out.push(NormalizedConversation {
-            external_id: first_str(meta, &["id", "conversation_id"])
-                .or_else(|| first_str(conv, &["conversation_id", "id"])),
+            external_id: first_str(meta, &["id", "conversation_id", "conversationId"])
+                .or_else(|| first_str(conv, &["conversation_id", "conversationId", "id"])),
             title: first_str(meta, &["title"]),
             model: None,
-            started_at: meta.get("create_time").and_then(time_field),
-            ended_at: meta
-                .get("modify_time")
-                .or_else(|| meta.get("update_time"))
+            started_at: meta
+                .get("create_time")
+                .or_else(|| meta.get("createTime"))
+                .and_then(time_field),
+            ended_at: ["modify_time", "modifyTime", "update_time", "updateTime"]
+                .iter()
+                .find_map(|k| meta.get(*k))
                 .and_then(time_field),
             messages,
         });
@@ -204,6 +232,40 @@ mod tests {
         assert_eq!(conv.messages[1].model.as_deref(), Some("grok-3"));
         assert_eq!(conv.messages[1].parent_external_id.as_deref(), Some("r1"));
         assert_eq!(conv.messages[1].external_id.as_deref(), Some("r2"));
+    }
+
+    #[test]
+    fn parses_a_shared_conversation_link_response() {
+        // `{responses, conversation}` with camelCase names, as a shared
+        // conversation's link returns it.
+        let shared = json!({
+            "responses": [
+                {"responseId": "r1", "sender": "human", "message": "Ideas for old schools?",
+                 "createTime": "2026-07-03T06:25:30.584Z", "model": "", "partial": false,
+                 "isControl": false, "parentResponseId": null},
+                {"responseId": "r2", "sender": "ASSISTANT", "message": "Turn them into housing.",
+                 "createTime": "2026-07-03T06:25:40.000Z", "model": "grok-3", "partial": false,
+                 "parentResponseId": "r1"},
+                {"responseId": "r3", "sender": "assistant", "message": "control",
+                 "createTime": "2026-07-03T06:25:41.000Z", "isControl": true}
+            ],
+            "conversation": {"conversationId": "c-9", "title": "Schools",
+                "createTime": "2026-07-03T06:25:30.442Z",
+                "modifyTime": "2026-07-04T07:00:00Z"},
+            "isPublic": true
+        });
+        let out = parse(&shared).unwrap();
+        assert_eq!(out.conversations.len(), 1);
+        let conv = &out.conversations[0];
+        assert_eq!(conv.external_id.as_deref(), Some("c-9"));
+        assert_eq!(conv.title.as_deref(), Some("Schools"));
+        assert!(conv.started_at.is_some() && conv.ended_at.is_some());
+        assert_eq!(conv.messages.len(), 2, "the control entry is left out");
+        assert_eq!(conv.messages[0].role, "user");
+        assert_eq!(conv.messages[1].role, "assistant");
+        assert_eq!(conv.messages[1].model.as_deref(), Some("grok-3"));
+        assert_eq!(conv.messages[1].parent_external_id.as_deref(), Some("r1"));
+        assert_eq!(conv.messages[1].created_at.unwrap().timestamp(), 1783059940);
     }
 
     #[test]

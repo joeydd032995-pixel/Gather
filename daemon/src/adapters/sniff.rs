@@ -32,6 +32,10 @@ pub fn platform_of(data: &Value) -> Option<&'static str> {
         return None;
     }
 
+    // One conversation on its own: what a shared Grok conversation returns.
+    if data.get("responses").is_some_and(Value::is_array) {
+        return Some("grok");
+    }
     if data.get("schema").and_then(Value::as_str) == Some("gather-generic-v1") {
         return Some("generic");
     }
@@ -75,6 +79,10 @@ mod tests {
             Some("grok")
         );
         assert_eq!(platform_of(&json!([{"responses": []}])), Some("grok"));
+        assert_eq!(
+            platform_of(&json!({"responses": [], "conversation": {"title": "t"}})),
+            Some("grok")
+        );
         assert_eq!(
             platform_of(&json!([
                 {"title": "Used Gemini Apps"},
