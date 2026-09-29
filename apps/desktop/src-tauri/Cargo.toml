@@ -1,6 +1,6 @@
 [package]
 name = "gather-desktop"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 description = "Gather desktop UI (Tauri v2)"
 license = "MIT"
