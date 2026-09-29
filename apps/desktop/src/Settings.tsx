@@ -6,6 +6,7 @@ import {
   ExternalLink,
   FileText,
   FolderOpen,
+  Inbox,
   Keyboard,
   Monitor,
   Moon,
@@ -21,7 +22,9 @@ import { cancelReread, getStatus, startReread, type DaemonStatus } from "./api";
 import type { ThemeChoice } from "./hooks/useTheme";
 import {
   checkForUpdate,
+  chooseFolder,
   getAiSettings,
+  getImportSettings,
   getUpdateSettings,
   installUpdate,
   isTauri,
@@ -29,10 +32,13 @@ import {
   memoryProfile,
   openLogsFolder,
   saveAiSettings,
+  saveImportSettings,
   setUpdateSettings,
   testOllama,
   type AiSettings,
   type AiSettingsView,
+  type ImportSettings,
+  type ImportView,
   type MemoryInfo,
   type ReadingSpeed,
   type UpdateCheck,
@@ -179,6 +185,7 @@ export default function Settings({
             <>
               <AiSection />
               <ReadingSection />
+              <ImportSection />
               <Panel title="Updates" icon={RefreshCw}>
                 <Switch
                   checked={checkOnStart}
@@ -492,6 +499,146 @@ function AiSection() {
         Saving checks the search model with Ollama first, so keep Ollama running. Files already in
         Gather keep what was found in them; a new model reads files you add from now on. To have it
         go back over earlier files, use "Read earlier files with the model" under Reading and logs.
+      </p>
+    </Panel>
+  );
+}
+
+/** Bringing conversations in without picking files: an inbox folder, and Claude Code. */
+function ImportSection() {
+  const [view, setView] = useState<ImportView | null>(null);
+  const [draft, setDraft] = useState<ImportSettings | null>(null);
+  const [status, setStatus] = useState<DaemonStatus["import"] | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inboxId = useId();
+
+  useEffect(() => {
+    getImportSettings()
+      .then((v) => {
+        setView(v);
+        setDraft({ inbox: v.inbox, claude_code: v.claude_code });
+      })
+      .catch((e) => setError(errorText(e)));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
+    const poll = () =>
+      getStatus()
+        .then((s) => !cancelled && setStatus(s.import))
+        .catch(() => !cancelled && setStatus(null))
+        .finally(() => {
+          if (!cancelled) timer = setTimeout(poll, 10_000);
+        });
+    poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
+
+  if (!draft || !view) {
+    return error ? <Callout>{error}</Callout> : null;
+  }
+
+  const dirty = draft.inbox !== view.inbox || draft.claude_code !== view.claude_code;
+  const inboxOn = draft.inbox !== null;
+
+  const choose = async () => {
+    try {
+      const folder = await chooseFolder("Choose a folder just for imports");
+      if (folder) setDraft({ ...draft, inbox: folder });
+    } catch (e) {
+      setError(errorText(e));
+    }
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      // Gather restarts to apply this: the start-up screen shows until it's back.
+      await saveImportSettings({ ...draft, inbox: draft.inbox?.trim() || null });
+    } catch (e) {
+      setError(errorText(e));
+      setSaving(false);
+    }
+  };
+
+  const attention = status?.needs_attention ?? 0;
+  return (
+    <Panel title="Automatic import" icon={Inbox}>
+      <Switch
+        checked={draft.claude_code}
+        onChange={(claude_code) => setDraft({ ...draft, claude_code })}
+        label="Import my Claude Code conversations"
+        description={`Reads the session files Claude Code keeps on this computer${view.claude_code_dir ? ` (${view.claude_code_dir})` : ""} once they have been quiet for a moment, and again as they grow. Only what was said is kept, not the files and command output Claude Code worked with.`}
+      />
+      <Switch
+        checked={inboxOn}
+        onChange={(on) => setDraft({ ...draft, inbox: on ? (view.suggested_inbox ?? "") : null })}
+        label="Watch an import folder"
+        description="Drop an export in it (ChatGPT, Claude, Gemini, Grok, Copilot or Perplexity: the .zip, .json or Markdown file) or a document, and Gather reads it. What was read moves to a done folder; anything that couldn't be, to a failed folder with a note saying why. Nothing is deleted."
+      />
+      {inboxOn && (
+        <div className="setting-row setting-field">
+          <div className="setting-text">
+            <label htmlFor={inboxId} className="setting-label">
+              Import folder
+            </label>
+            <p className="setting-desc">
+              Use a folder just for this: Gather moves what it reads out of it.
+            </p>
+          </div>
+          <div className="setting-control">
+            <input
+              id={inboxId}
+              className="input"
+              value={draft.inbox ?? ""}
+              placeholder={view.suggested_inbox ?? ""}
+              spellCheck={false}
+              onChange={(e) => setDraft({ ...draft, inbox: e.target.value })}
+            />
+            <Button icon={FolderOpen} onClick={choose}>
+              Choose
+            </Button>
+          </div>
+        </div>
+      )}
+      <div className="setting-row">
+        <div className="setting-text">
+          <span className="setting-label">Imported so far</span>
+          <p className="setting-desc">
+            {status === null
+              ? "Gather's background service isn't answering."
+              : !status.inbox_dir && !status.claude_code_dir
+                ? "Automatic import is off."
+                : `${status.sessions.toLocaleString()} Claude Code ${status.sessions === 1 ? "session" : "sessions"}, ${status.inbox_done.toLocaleString()} import-folder ${status.inbox_done === 1 ? "file" : "files"}.`}
+            {attention > 0 &&
+              ` ${attention.toLocaleString()} ${attention === 1 ? "file needs" : "files need"} a look: see the failed folder inside your import folder.`}
+          </p>
+          {status && status.recent.length > 0 && (
+            <ul className="setting-desc">
+              {status.recent.map((r, i) => (
+                <li key={`${r.name}-${r.at}-${i}`}>
+                  {r.name}:{" "}
+                  {r.status === "imported" ? (r.detail ?? "imported") : (r.detail ?? r.status)}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <Button variant="primary" onClick={save} loading={saving} disabled={!dirty}>
+          Save and restart
+        </Button>
+      </div>
+      {error && (
+        <div className="panel-pad">
+          <Callout>{error}</Callout>
+        </div>
+      )}
+      <p className="hint panel-pad">
+        Everything stays on this computer: Gather only reads the folders you choose here. Exports
+        come from each service's own “export my data” option; Gather doesn't sign in to any of them.
       </p>
     </Panel>
   );

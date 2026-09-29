@@ -78,7 +78,11 @@ What the daemon runs with and how far reading has got. Used by the desktop app's
 units; `reading.files` the files they belong to (plus files not yet opened); `reading.failed`
 the sections set aside after an error (the error is in the daemon log). `ai.model` is `null`
 when Ollama is used for embeddings only; `ai.enabled` is `false` without Ollama. `reread` is the
-running re-read job, else the latest finished one, else `null`.
+running re-read job, else the latest finished one, else `null`. `import` describes automatic
+import (see [CONFIGURATION.md](CONFIGURATION.md#automatic-import)): the watched folders
+(`inbox_dir`, `claude_code_dir`, `null` when off), `sessions` (Claude Code sessions imported),
+`inbox_done`, `needs_attention` (files moved to the inbox's `failed/` folder) and the five most
+`recent` items.
 
 ### `POST /reread`
 
@@ -141,6 +145,12 @@ type:
 | `document_text` | `.txt`, `.csv`, `.tsv`, `.json`, `.yaml`, `.xml`, `.html`, `.log`, source code (`.rs`, `.py`, `.ts`, `.go`, `.java`, `.sql`, `.sh`, …) | as text; HTML without its tags, scripts and styles |
 | `image` | `.jpg`, `.png`, `.webp`, `.heic`, … | EXIF, then OCR, in the extraction worker |
 | `file_other` | anything, when the part is named `file_other` | nothing: the file is kept as it is |
+
+A Markdown file that is a Perplexity export (its logo at the top, or its `⁂` divider with numbered
+footnote sources) is stored as a conversation with `platform: perplexity` instead: each `# question`
+after the first turn's start or a `---` divider is your turn, the text after it the answer, with
+the answer's cited sources listed underneath as `[n] url`. The result for that file has
+`kind: "chat_export"`.
 
 Word documents and spreadsheets are turned into text when they arrive; a damaged one, or one
 that unpacks to far more than its size (over 256 MB, or 200× its compressed size), is refused

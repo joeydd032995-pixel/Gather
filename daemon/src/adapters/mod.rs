@@ -8,11 +8,14 @@
 
 pub mod chatgpt;
 pub mod claude;
+pub mod claude_code;
 pub mod copilot;
 pub mod gemini;
 pub mod generic;
 pub mod grok;
 pub mod perplexity;
+pub mod perplexity_md;
+pub mod sniff;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;

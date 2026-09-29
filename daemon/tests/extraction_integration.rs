@@ -739,3 +739,73 @@ async fn re_reading_needs_an_ai_model() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn a_perplexity_markdown_export_arrives_as_a_conversation() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let app = routes::build_router(state.clone());
+    let marker = Uuid::new_v4().simple().to_string();
+    let filename = format!("perplexity-{marker}.md");
+    let markdown = format!(
+        "<img src=\"https://r2cdn.perplexity.ai/pplx-full-logo-primary-dark%402x.png\"/>\n\n\
+         # Which database suits notes {marker}?\n\n\
+         Postgres suits notes {marker} well.[^1_1]\n\n\
+         <div align=\"center\">⁂</div>\n\n\
+         [^1_1]: https://example.com/postgres\n\
+         [^1_2]: projects.some.memory_tag\n\n\
+         ---\n\n\
+         # And for search?\n\n\
+         Use a tsvector column.[^2_1]\n\n\
+         <div align=\"center\">⁂</div>\n\n\
+         [^2_1]: https://example.com/fts\n"
+    );
+    delete_fixture_artifact(&state, &filename).await;
+
+    let res = app
+        .clone()
+        .oneshot(multipart_request(
+            &filename,
+            "text/markdown",
+            markdown.as_bytes(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::ACCEPTED);
+    let body = body_json(res).await;
+    let file = &body["files"][0];
+    assert_eq!(file["kind"], "chat_export", "{body}");
+    assert_eq!(file["status"], "accepted");
+
+    let rows = sqlx::query(
+        "SELECT m.role, m.content, c.source_platform, a.original_filename \
+         FROM messages m \
+         JOIN conversations c ON c.id = m.conversation_id \
+         JOIN artifacts a ON a.id = c.artifact_id \
+         WHERE a.original_filename = $1 ORDER BY m.seq",
+    )
+    .bind(&filename)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 4, "two questions, two answers");
+    let roles: Vec<String> = rows.iter().map(|r| r.get("role")).collect();
+    assert_eq!(roles, ["user", "assistant", "user", "assistant"]);
+    assert_eq!(rows[0].get::<String, _>("source_platform"), "perplexity");
+    let first_answer: String = rows[1].get("content");
+    assert!(first_answer.contains("[1] https://example.com/postgres"));
+    assert!(!first_answer.contains("memory_tag"));
+
+    // The same file again is recognised, not stored twice.
+    let res = app
+        .oneshot(multipart_request(
+            &filename,
+            "text/markdown",
+            markdown.as_bytes(),
+        ))
+        .await
+        .unwrap();
+    let again = body_json(res).await;
+    assert_eq!(again["files"][0]["status"], "deduplicated");
+}

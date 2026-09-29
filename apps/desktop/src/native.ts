@@ -109,6 +109,36 @@ export interface AiSettingsView extends AiSettings {
   source: "saved" | "environment" | "default";
 }
 
+/** Automatic import: an inbox folder Gather watches, and Claude Code's sessions. */
+export interface ImportSettings {
+  /** The inbox folder; null = off. */
+  inbox: string | null;
+  claude_code: boolean;
+}
+
+export interface ImportView extends ImportSettings {
+  /** Where Claude Code's sessions would be read from. */
+  claude_code_dir: string | null;
+  /** A folder to suggest for the inbox. */
+  suggested_inbox: string | null;
+}
+
+export function getImportSettings(): Promise<ImportView> {
+  return call<ImportView>("get_import_settings");
+}
+
+/** Saves and restarts Gather's background service to apply it. */
+export function saveImportSettings(settings: ImportSettings): Promise<ImportSettings> {
+  return call<ImportSettings>("save_import_settings", { settings });
+}
+
+/** Ask for a folder with the system's folder dialog; null when cancelled. */
+export async function chooseFolder(title: string): Promise<string | null> {
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selection = await open({ directory: true, title });
+  return typeof selection === "string" ? selection : null;
+}
+
 export function getAiSettings(): Promise<AiSettingsView> {
   return call<AiSettingsView>("get_ai_settings");
 }

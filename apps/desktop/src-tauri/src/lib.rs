@@ -5,6 +5,7 @@
 
 mod ai;
 mod folders;
+mod imports;
 mod memory;
 mod runtime;
 mod updates;
@@ -165,6 +166,24 @@ async fn save_ai_settings(
     Ok(saved)
 }
 
+#[tauri::command]
+fn get_import_settings(app: AppHandle) -> Result<imports::ImportView, String> {
+    Ok(imports::view(&data_dir(&app)?))
+}
+
+/// Save the automatic-import choices and restart Gather's background service
+/// with them.
+#[tauri::command]
+fn save_import_settings(
+    app: AppHandle,
+    runtime: State<'_, Arc<Runtime>>,
+    settings: imports::ImportSettings,
+) -> Result<imports::ImportSettings, String> {
+    let saved = imports::save(&data_dir(&app)?, &settings)?;
+    runtime.restart("Applying your import settings")?;
+    Ok(saved)
+}
+
 /// Which models Ollama at `url` has, or why it couldn't be reached.
 #[tauri::command]
 async fn test_ollama(url: String) -> Result<ai::OllamaCheck, String> {
@@ -266,6 +285,8 @@ pub fn run() {
             get_ai_settings,
             save_ai_settings,
             test_ollama,
+            get_import_settings,
+            save_import_settings,
             logs_dir,
             open_logs_folder,
         ])

@@ -91,6 +91,22 @@ worker logs how much is left once a minute (`extraction: still reading`), and
 `GET /api/v1/status` reports the same counts.
 | `GATHER_TESSERACT_PATH` | `tesseract` | | Tesseract binary (bundled in the Docker image; install locally for OCR outside Docker) |
 
+## Automatic import
+
+Reads local folders, never the network. Off unless a folder is set. In the desktop app,
+**Settings → Automatic import** sets these (and restarts the background service).
+
+| Variable | Default | Range | Description |
+|---|---|---|---|
+| `GATHER_INBOX_DIR` | unset | a folder | A folder Gather watches for exports and documents dropped in it. Chat exports are recognised by their shape (ChatGPT, Claude, Gemini, Grok, Copilot, Perplexity, or `gather-generic-v1`), as `.json` files or inside a `.zip`; Perplexity Markdown becomes a conversation; documents (`.md`, `.pdf`, `.docx`, `.txt`, …) are added as files. A file is read once it has stopped changing for 5 seconds. What was read moves to `done/` inside the folder; what couldn't be moves to `failed/` with a `.why.txt` beside it. Nothing is deleted. A file over `GATHER_MAX_UPLOAD_MB` is refused. In a `.zip` only chat exports are read (use Projects → Import .zip for a folder of documents) |
+| `GATHER_CLAUDE_CODE_DIR` | unset | a folder | Where Claude Code keeps its session transcripts, usually `~/.claude/projects`. Each `*.jsonl` (up to four folders deep) is read once it has been quiet for 20 seconds, and again when it changes, adding only the messages Gather doesn't have. Only what was said is kept: thinking, tool calls and tool results, sub-agent logs and command wrappers are left out |
+| `GATHER_AUTOIMPORT_INTERVAL_SECS` | `60` | 5–3600 | Seconds between looks at those folders (2 seconds while more than 25 files are waiting) |
+
+What has been read is recorded in `import_sources` (path, size, modification time), so an
+unchanged file isn't read twice; the table is left out of bundle export because its paths
+belong to this computer. `GET /api/v1/status` reports it under `import`. In Docker, mount the
+folders into the container and set these to the paths inside it.
+
 ## Local LLM (opt-in)
 
 | Variable | Default | Description |

@@ -168,7 +168,8 @@ impl Runtime {
 
         self.step("Starting Gather")?;
         let url = format!("postgres://{DB_USER}:{password}@127.0.0.1:{port}/{DB_NAME}");
-        let ai = crate::ai::daemon_env(&paths.data);
+        let mut ai = crate::ai::daemon_env(&paths.data);
+        ai.extend(crate::imports::daemon_env(&paths.data));
         let mut child = spawn_daemon(&paths.daemon, &url, logs, profile, &ai)?;
         {
             let mut slot = self.daemon.lock().expect("lock");
