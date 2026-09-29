@@ -2092,3 +2092,22 @@ button.tree-row:focus-visible .tree-go {
   font-size: var(--t-xs);
   color: var(--text-2);
 }
+/* A setting with a text field: the field sits under the text on narrow windows. */
+.setting-field {
+  flex-wrap: wrap;
+}
+.setting-field .setting-text {
+  flex: 1 1 280px;
+}
+.setting-control {
+  display: flex;
+  gap: var(--s-2);
+  flex: 1 1 240px;
+  max-width: 360px;
+}
+.setting-warn {
+  color: var(--warning);
+}
+.setting-path {
+  word-break: break-all;
+}

@@ -168,7 +168,8 @@ impl Runtime {
 
         self.step("Starting Gather")?;
         let url = format!("postgres://{DB_USER}:{password}@127.0.0.1:{port}/{DB_NAME}");
-        let mut child = spawn_daemon(&paths.daemon, &url, logs, profile)?;
+        let ai = crate::ai::daemon_env(&paths.data);
+        let mut child = spawn_daemon(&paths.daemon, &url, logs, profile, &ai)?;
         {
             let mut slot = self.daemon.lock().expect("lock");
             // `stop` may have run between the last step and the spawn.
@@ -241,6 +242,39 @@ impl Runtime {
         });
         let runtime = Arc::clone(self);
         std::thread::spawn(move || runtime.start(&paths));
+    }
+
+    /// Restart the stack so the daemon starts with new settings. Returns at
+    /// once; the UI follows the status as it comes back up.
+    pub fn restart(self: &Arc<Self>, step: &str) -> Result<(), String> {
+        if matches!(self.status(), Status::Unmanaged) {
+            return Err(
+                "Gather's background service wasn't started by this app, so it can't \
+                 restart it: restart it yourself to apply this."
+                    .to_string(),
+            );
+        }
+        if self.paths.lock().expect("lock").is_none() {
+            return Err("Gather's background service isn't running".to_string());
+        }
+        self.set(Status::Starting {
+            step: step.to_string(),
+        });
+        let runtime = Arc::clone(self);
+        std::thread::spawn(move || {
+            runtime.stop();
+            runtime.resume();
+        });
+        Ok(())
+    }
+
+    /// Where daemon.log and postgres.log are written.
+    pub fn logs_dir(&self) -> Option<PathBuf> {
+        self.paths
+            .lock()
+            .expect("lock")
+            .as_ref()
+            .map(|p| p.data.join("logs"))
     }
 
     /// Take over a daemon (and its database) that an earlier session of this
@@ -511,6 +545,7 @@ fn spawn_daemon(
     database_url: &str,
     logs: &Path,
     profile: Profile,
+    extra_env: &[(&str, String)],
 ) -> Result<Child, String> {
     let log_path = logs.join("daemon.log");
     trim_log(&log_path);
@@ -529,6 +564,10 @@ fn spawn_daemon(
         .stdin(Stdio::null())
         .stdout(log)
         .stderr(err_log);
+    // The AI model chosen in Settings, when one was saved.
+    for (name, value) in extra_env {
+        cmd.env(name, value);
+    }
     // The API token lives in the OS keychain unless the user has chosen
     // otherwise (e.g. a minimal Linux desktop without a Secret Service).
     if std::env::var_os("GATHER_AUTH_MODE").is_none() {

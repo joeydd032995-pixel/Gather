@@ -368,3 +368,129 @@ async fn chat_messages_produce_units_with_dedup_across_sources() {
         .iter()
         .any(|u| u["statement"].as_str().unwrap().contains(&marker)));
 }
+
+/// A section that always fails to save is set aside with its error, and the
+/// rest of the queue is read anyway: it used to fail every pass first and
+/// keep everything behind it waiting.
+#[tokio::test]
+async fn a_failing_chunk_is_set_aside_and_the_rest_are_read() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let app = routes::build_router(state.clone());
+    let marker = Uuid::new_v4().simple().to_string();
+    let poison = format!("PoisonDB{marker}");
+    let good = format!("GoodDB{marker}");
+
+    // Fail any unit mentioning `poison`, and only those: other tests run
+    // against the same database meanwhile.
+    let func = format!("fail_poison_{marker}");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE FUNCTION {func}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+           IF NEW.statement LIKE '%{poison}%' THEN RAISE EXCEPTION 'poisoned unit'; END IF; \
+           RETURN NEW; END $$"
+    )))
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE TRIGGER {func} BEFORE INSERT ON atomic_units \
+         FOR EACH ROW EXECUTE FUNCTION {func}()"
+    )))
+    .execute(&state.pool)
+    .await
+    .unwrap();
+
+    let export = json!({
+        "platform": "generic",
+        "data": {
+            "schema": "gather-generic-v1",
+            "conversations": [{
+                "id": format!("conv-{marker}"),
+                "messages": [
+                    {"role": "user", "content": format!("I use {poison} for storage."),
+                     "created_at": "2026-02-01T09:00:00Z"},
+                    {"role": "user", "content": format!("I use {good} for storage."),
+                     "created_at": "2026-02-01T09:01:00Z"}
+                ]
+            }]
+        }
+    });
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/ingest/chat-export")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(export.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::ACCEPTED);
+
+    drain_extraction(&state).await;
+
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP TRIGGER {func} ON atomic_units"
+    )))
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP FUNCTION {func}()")))
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+    let rows = sqlx::query(
+        "SELECT content, units_extracted_at IS NOT NULL AS done, units_extract_error \
+         FROM messages WHERE content LIKE '%' || $1 || '%'",
+    )
+    .bind(&marker)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    for r in &rows {
+        assert!(r.get::<bool, _>("done"), "both messages leave the queue");
+        let error: Option<String> = r.get("units_extract_error");
+        if r.get::<String, _>("content").contains(&poison) {
+            assert!(
+                error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("poisoned unit")),
+                "the failing message keeps its error: {error:?}"
+            );
+        } else {
+            assert_eq!(error, None);
+        }
+    }
+    let (good_units,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM atomic_units WHERE statement LIKE '%' || $1 || '%'")
+            .bind(&good)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        good_units, 1,
+        "the message after the failing one is still read"
+    );
+
+    // The status endpoint counts what was set aside.
+    let res = app
+        .clone()
+        .oneshot(Request::get("/api/v1/status").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let status = body_json(res).await;
+    assert!(
+        status["reading"]["failed"].as_i64().unwrap() >= 1,
+        "{status}"
+    );
+    assert_eq!(status["ai"]["enabled"], false);
+    assert_eq!(
+        status["ai"]["model"],
+        Value::Null,
+        "no model named while AI is off"
+    );
+}

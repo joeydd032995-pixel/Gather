@@ -57,6 +57,28 @@ and gRPC. Exceeding it returns `429 Too Many Requests`.
 
 ---
 
+## Status
+
+### `GET /status`
+
+What the daemon runs with and how far reading has got. Used by the desktop app's Settings page.
+
+```json
+{
+  "version": "0.1.0",
+  "ai": { "enabled": true, "url": "http://127.0.0.1:11434", "model": "llama3.2:1b",
+          "embed_model": "nomic-embed-text" },
+  "reading": { "chunks": 1840, "files": 212, "failed": 3 }
+}
+```
+
+`reading.chunks` counts document sections, chat messages and image text not yet read into
+units; `reading.files` the files they belong to (plus files not yet opened); `reading.failed`
+the sections set aside after an error (the error is in the daemon log). `ai.model` is `null`
+when Ollama is used for embeddings only; `ai.enabled` is `false` without Ollama.
+
+---
+
 ## Ingestion
 
 ### `POST /ingest/chat-export`

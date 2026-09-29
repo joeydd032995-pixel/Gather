@@ -79,8 +79,15 @@ Extracts PDF text, runs image OCR and produces atomic units.
 | Variable | Default | Range | Description |
 |---|---|---|---|
 | `GATHER_EXTRACTION_ENABLED` | `true` | | Run the worker |
-| `GATHER_EXTRACTION_INTERVAL_SECS` | `30` | ≥ 1 | Seconds between passes |
+| `GATHER_EXTRACTION_INTERVAL_SECS` | `30` | ≥ 1 | Seconds to wait when there is nothing to read. While work is queued, passes run back to back (a 200 ms pause between them) until the queue is empty |
 | `GATHER_EXTRACTION_BATCH` | `8` | 1–256 | Rows claimed per queue per pass |
+
+Document sections are read a file at a time, oldest file first, so each file finishes before
+the next starts. A section that fails to save (for example a database error on one unit) is set
+aside with its error in `units_extract_error` and logged, and the rest of the queue carries on;
+before, one such section failed every pass and held up everything behind it. While busy, the
+worker logs how much is left once a minute (`extraction: still reading`), and
+`GET /api/v1/status` reports the same counts.
 | `GATHER_TESSERACT_PATH` | `tesseract` | | Tesseract binary (bundled in the Docker image; install locally for OCR outside Docker) |
 
 ## Local LLM (opt-in)
@@ -94,6 +101,12 @@ Extracts PDF text, runs image OCR and produces atomic units.
 | `GATHER_OLLAMA_KEEP_ALIVE` | Ollama's default (low: `1m`) | How long Ollama keeps a model in memory after Gather's last request, as an Ollama duration (`30s`, `5m`, `0`) |
 | `GATHER_OLLAMA_NUM_CTX` | Ollama's default (low: `2048`) | Context window for chat and caption requests. It sizes the model's cache, so smaller uses less memory. **Validated**, ≥ 512 |
 | `GATHER_OLLAMA_ONE_AT_A_TIME` | `false` (low: `true`) | Send Ollama one request at a time across all of Gather's workers, so two models are never busy at once. Search may then wait for a running extraction request |
+
+In the desktop app, **Settings → AI model** sets these instead: the Ollama address, the model
+for reading files and the model for search, with a connection test that lists the models Ollama
+has. Saving writes `ai-settings.json` in the app-data folder and restarts the background service
+with `GATHER_OLLAMA_URL`, `GATHER_OLLAMA_MODEL` and `GATHER_OLLAMA_EMBED_MODEL` set from it (an
+empty URL when turned off). Until something is saved there, the app's own environment applies.
 
 With Ollama enabled you get LLM-extracted units, embeddings for units, segments and entities,
 semantic search, and embedding-based entity-merge and contradiction candidates. Without it,
