@@ -61,13 +61,24 @@ fn parse_conversation(conv: &Value) -> Result<NormalizedConversation, AdapterErr
         let Some(msg) = node.get("message").filter(|m| !m.is_null()) else {
             continue; // synthetic root nodes carry no message
         };
-        let Some(content) = extract_text(msg) else {
-            continue; // hidden/system stubs with empty parts
-        };
+        // Entries ChatGPT hides from the conversation (its standing
+        // instructions and memory context) and the output of its tools
+        // (searches, code runs) are not what was said: left out, so what is
+        // kept is the conversation itself.
+        let hidden = msg
+            .pointer("/metadata/is_visually_hidden_from_conversation")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let role = msg
             .pointer("/author/role")
             .and_then(Value::as_str)
             .unwrap_or("other");
+        if hidden || role == "tool" {
+            continue;
+        }
+        let Some(content) = extract_text(msg) else {
+            continue; // stubs with empty parts, reasoning and code entries
+        };
         messages.push(NormalizedMessage {
             external_id: msg.get("id").and_then(Value::as_str).map(String::from),
             parent_external_id: node.get("parent").and_then(Value::as_str).map(String::from),
@@ -194,6 +205,52 @@ mod tests {
             .messages
             .iter()
             .any(|m| m.content.contains("Regenerated")));
+    }
+
+    #[test]
+    fn keeps_the_conversation_and_leaves_out_hidden_entries_and_tool_output() {
+        let msg = |id: &str, role: &str, content: Value, hidden: bool| {
+            json!({
+                "id": id, "author": {"role": role},
+                "metadata": {"is_visually_hidden_from_conversation": hidden},
+                "content": content
+            })
+        };
+        let text = |t: &str| json!({"content_type": "text", "parts": [t]});
+        let export = json!([{
+            "conversation_id": "c",
+            "current_node": "n5",
+            "mapping": {
+                "root": {"id": "root", "message": null, "parent": null},
+                "n1": {"id": "n1", "parent": "root",
+                       "message": msg("m1", "system", text("The user's custom instructions: ..."), true)},
+                "n2": {"id": "n2", "parent": "n1",
+                       "message": msg("m2", "user",
+                           json!({"content_type": "multimodal_text",
+                                  "parts": [{"content_type": "image_asset_pointer"}, "What is this chart?"]}),
+                           false)},
+                "n3": {"id": "n3", "parent": "n2",
+                       "message": msg("m3", "tool", text("SEARCH RESULTS: pages of web text"), false)},
+                "n4": {"id": "n4", "parent": "n3",
+                       "message": msg("m4", "assistant",
+                           json!({"content_type": "thoughts", "thoughts": [{"content": "hmm"}]}), false)},
+                "n5": {"id": "n5", "parent": "n4",
+                       "message": msg("m5", "assistant", text("It shows monthly spend."), false)}
+            }
+        }]);
+        let out = parse(&export).unwrap();
+        let said: Vec<(&str, &str)> = out.conversations[0]
+            .messages
+            .iter()
+            .map(|m| (m.role.as_str(), m.content.as_str()))
+            .collect();
+        assert_eq!(
+            said,
+            [
+                ("user", "What is this chart?"),
+                ("assistant", "It shows monthly spend.")
+            ]
+        );
     }
 
     #[test]

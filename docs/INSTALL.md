@@ -134,6 +134,10 @@ it never signs in to any service, and only reads files and folders you choose.
 - **Perplexity** can export a thread as Markdown (or PDF); Markdown is best. Gather reads it as
   a conversation: your questions and its answers, with each answer's numbered sources. (A PDF
   is added as an ordinary document.)
+- From **ChatGPT** exports Gather keeps the conversation, not ChatGPT's hidden standing
+  instructions or the output of its tools (web searches, code runs). If a file has the right
+  shape for an export but no messages can be read from it, it goes to the `failed` folder with
+  a note saying so, rather than being filed as imported.
 - Gemini exports come from Google Takeout (*My Activity → Gemini Apps*); Takeout often leaves
   out the answers, so those conversations hold only your prompts.
 

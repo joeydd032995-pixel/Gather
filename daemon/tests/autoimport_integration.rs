@@ -111,6 +111,7 @@ async fn the_inbox_reads_exports_and_documents_and_sorts_the_rest() {
     let zip_name = format!("export-{marker}.zip");
     let unknown_name = format!("mystery-{marker}.json");
     let broken_name = format!("broken-{marker}.json");
+    let empty_name = format!("empty-{marker}.json");
     let unsettled_name = format!("still-copying-{marker}.json");
 
     put(
@@ -146,6 +147,12 @@ async fn the_inbox_reads_exports_and_documents_and_sorts_the_rest() {
     );
     put(&inbox.join(&unknown_name), br#"{"hello": "world"}"#, 60);
     put(&inbox.join(&broken_name), b"this is not json", 60);
+    // The right shape for a Grok export, with nothing readable in it.
+    put(
+        &inbox.join(&empty_name),
+        br#"{"conversations": [{"conversation": {"id": "c"}, "responses": []}]}"#,
+        60,
+    );
     // Written a moment ago: left alone until it has stopped changing.
     put(&inbox.join(&unsettled_name), b"[]", 0);
 
@@ -167,7 +174,18 @@ async fn the_inbox_reads_exports_and_documents_and_sorts_the_rest() {
         "everything read is moved to done/"
     );
     let failed = names_in(&inbox.join("failed"));
-    assert!(failed.contains(&unknown_name) && failed.contains(&broken_name));
+    assert!(
+        failed.contains(&unknown_name)
+            && failed.contains(&broken_name)
+            && failed.contains(&empty_name)
+    );
+    let why_empty =
+        std::fs::read_to_string(inbox.join("failed").join(format!("{empty_name}.why.txt")))
+            .unwrap();
+    assert!(
+        why_empty.contains("no messages could be read"),
+        "{why_empty}"
+    );
     assert!(
         failed.contains(&format!("{unknown_name}.why.txt"))
             && failed.contains(&format!("{broken_name}.why.txt")),
@@ -227,7 +245,7 @@ async fn the_inbox_reads_exports_and_documents_and_sorts_the_rest() {
     .fetch_one(&state.pool)
     .await
     .unwrap();
-    assert_eq!(recorded, 6);
+    assert_eq!(recorded, 7);
 
     // A second look finds nothing new to do.
     assert!(!autoimport::scan_inbox(&state, &inbox).await.unwrap());

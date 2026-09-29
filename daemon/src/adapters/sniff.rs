@@ -25,7 +25,7 @@ pub fn platform_of(data: &Value) -> Option<&'static str> {
         if items.iter().any(|v| {
             v.get("title")
                 .and_then(Value::as_str)
-                .is_some_and(|t| t.starts_with("Prompted "))
+                .is_some_and(|t| t.replace('\u{a0}', " ").starts_with("Prompted "))
         }) {
             return Some("gemini");
         }
@@ -80,6 +80,11 @@ mod tests {
                 {"title": "Used Gemini Apps"},
                 {"title": "Prompted what is a tsvector"}
             ])),
+            Some("gemini")
+        );
+        // Takeout's title has a non-breaking space after "Prompted".
+        assert_eq!(
+            platform_of(&json!([{"title": "Prompted\u{a0}what is a tsvector"}])),
             Some("gemini")
         );
         assert_eq!(platform_of(&json!({"requests": []})), Some("copilot"));

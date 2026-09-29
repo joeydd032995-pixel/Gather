@@ -426,6 +426,21 @@ async fn import_json(state: &AppState, bytes: Vec<u8>, name: &str) -> Result<Out
              Copilot, Perplexity, or the generic format)"
         )));
     };
+    // A file can have the right shape and no messages in it (an empty
+    // export, or a layout this version can't read yet). Filing that away as
+    // imported would hide the problem: say so instead.
+    let parsed = adapters::normalize(platform, &data)
+        .map_err(|e| ApiError::BadRequest(format!("{name}: {e}")))?;
+    let messages: usize = parsed.conversations.iter().map(|c| c.messages.len()).sum();
+    if messages == 0 {
+        return Ok(Outcome::Unrecognized(format!(
+            "{name} looks like a {platform} export, but no messages could be read from it \
+             ({} conversations found). If it has conversations in it, its layout may be one \
+             this version of Gather doesn't read yet.",
+            parsed.conversations.len()
+        )));
+    }
+    drop(parsed);
     let response = chat_export_core(
         state,
         ChatExportRequest {
