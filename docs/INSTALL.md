@@ -184,7 +184,10 @@ it can use a model running on this computer through [Ollama](https://ollama.com)
    running.
 
 Leave the model for reading files empty to use Ollama for search only, which needs far less
-memory. Files already in Gather keep what was found in them; the model reads files added after.
+memory.
+A model that reads files uses every processor core it can get. **Reading speed** in the same
+section limits how much of the time it works (Gentle is the default on a computer with little
+memory); if the computer still feels slow, clear the model for reading files and keep search. Files already in Gather keep what was found in them; the model reads files added after.
 
 ## Updates
 
@@ -206,6 +209,10 @@ explain the upgrade step.
 
 - **"did not become ready in time" or "stopped during start-up":** look at `logs/daemon.log`
   in the app-data folder above.
+- **`llama-server` (Ollama) keeps the processor busy:** it is reading files. **Settings → Reading
+  and logs** shows what is left. Choose **Gentle** under **Settings → AI model → Reading speed**,
+  or clear the model for reading files (search keeps working); the built-in rules read files
+  without it.
 - **Files stay on "Reading" for a long time:** **Settings → Reading and logs** shows how many
   files and sections are left. Files are read one at a time, oldest first; a big folder of
   code can take a while, and longer with an AI model reading files. A section that can't be

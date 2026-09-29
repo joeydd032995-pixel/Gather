@@ -15,6 +15,12 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 use super::rules::ExtractedUnit;
 use crate::config::Config;
 
+/// Most tokens the model may write for one section's items: room for a dozen
+/// units with their evidence, and no more.
+const MAX_EXTRACT_TOKENS: u32 = 768;
+/// Most tokens for a contradiction judgement (a verdict and a sentence).
+const MAX_JUDGE_TOKENS: u32 = 200;
+
 /// Shared by every client in the process: with `one_at_a_time`, the
 /// extraction, scan, photo and query paths take turns, so Ollama never has
 /// two models busy (and loaded) for Gather at once.
@@ -126,6 +132,15 @@ impl OllamaClient {
         body
     }
 
+    /// `body` with the reply capped at `tokens`. A small model asked for JSON
+    /// can loop until its context is full; each call then takes minutes of
+    /// processor time for nothing. A reply cut short doesn't parse and is
+    /// dropped, which the callers already treat as "no items from the model".
+    fn capped(mut body: Value, tokens: u32) -> Value {
+        body["options"]["num_predict"] = json!(tokens);
+        body
+    }
+
     fn chat_model(&self) -> Result<&str, String> {
         self.model
             .as_deref()
@@ -223,17 +238,20 @@ impl OllamaClient {
     /// unit is kept only if its evidence_span appears verbatim in the chunk;
     /// its char offsets come from that containment check.
     pub async fn extract(&self, chunk: &str) -> Result<Vec<ExtractedUnit>, String> {
-        let body = self.body(
-            json!({
-                "model": self.chat_model()?,
-                "stream": false,
-                "format": "json",
-                "messages": [
-                    { "role": "system", "content": EXTRACTION_SYSTEM_PROMPT },
-                    { "role": "user", "content": chunk },
-                ],
-            }),
-            true,
+        let body = Self::capped(
+            self.body(
+                json!({
+                    "model": self.chat_model()?,
+                    "stream": false,
+                    "format": "json",
+                    "messages": [
+                        { "role": "system", "content": EXTRACTION_SYSTEM_PROMPT },
+                        { "role": "user", "content": chunk },
+                    ],
+                }),
+                true,
+            ),
+            MAX_EXTRACT_TOKENS,
         );
         let _turn = self.turn().await;
         let response = self
@@ -264,18 +282,21 @@ impl OllamaClient {
     /// statements conflict. Used by the scanner only on pairs a structural
     /// rule already flagged, so call volume stays small.
     pub async fn judge(&self, statement_a: &str, statement_b: &str) -> Result<Judgement, String> {
-        let body = self.body(
-            json!({
-                "model": self.chat_model()?,
-                "stream": false,
-                "format": "json",
-                "messages": [
-                    { "role": "system", "content": JUDGE_SYSTEM_PROMPT },
-                    { "role": "user",
-                      "content": format!("A: {statement_a}\nB: {statement_b}") },
-                ],
-            }),
-            true,
+        let body = Self::capped(
+            self.body(
+                json!({
+                    "model": self.chat_model()?,
+                    "stream": false,
+                    "format": "json",
+                    "messages": [
+                        { "role": "system", "content": JUDGE_SYSTEM_PROMPT },
+                        { "role": "user",
+                          "content": format!("A: {statement_a}\nB: {statement_b}") },
+                    ],
+                }),
+                true,
+            ),
+            MAX_JUDGE_TOKENS,
         );
         let _turn = self.turn().await;
         let response = self
@@ -459,6 +480,19 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn replies_are_capped_without_losing_the_memory_settings() {
+        let mut c = config_with_ollama("http://127.0.0.1:11434", false);
+        c.ollama_num_ctx = Some(2048);
+        let client = OllamaClient::from_config(&c).unwrap().unwrap();
+        let capped = OllamaClient::capped(client.body(json!({ "model": "m" }), true), 768);
+        assert_eq!(capped["options"]["num_predict"], 768);
+        assert_eq!(capped["options"]["num_ctx"], 2048, "kept alongside the cap");
+        // Without a context setting the cap still stands on its own.
+        let plain = OllamaClient::capped(json!({ "model": "m" }), 200);
+        assert_eq!(plain["options"]["num_predict"], 200);
     }
 
     #[test]

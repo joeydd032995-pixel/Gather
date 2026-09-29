@@ -34,9 +34,22 @@ import {
   type AiSettings,
   type AiSettingsView,
   type MemoryInfo,
+  type ReadingSpeed,
   type UpdateCheck,
 } from "./native";
-import { Badge, Button, Callout, Kbd, Panel, Switch, Toolbar, errorText } from "./ui";
+import { Badge, Button, Callout, Kbd, Panel, Segmented, Switch, Toolbar, errorText } from "./ui";
+
+const SPEEDS: { value: ReadingSpeed; label: string }[] = [
+  { value: "gentle", label: "Gentle" },
+  { value: "balanced", label: "Balanced" },
+  { value: "full", label: "Full speed" },
+];
+const SPEED_HELP: Record<ReadingSpeed, string> = {
+  gentle:
+    "Works about a third of the time and rests the rest, so the computer stays usable. A big import takes longer.",
+  balanced: "Works about 60% of the time.",
+  full: "Never rests: the fastest, but the model can use nearly all of the processor for as long as there is something to read.",
+};
 
 const RELEASES_URL = "https://github.com/joeydd032995-pixel/Gather/releases";
 const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";
@@ -274,7 +287,8 @@ function AiSection() {
     draft.enabled !== view.enabled ||
     draft.url.trim() !== view.url ||
     draft.chat_model.trim() !== view.chat_model ||
-    draft.embed_model.trim() !== view.embed_model;
+    draft.embed_model.trim() !== view.embed_model ||
+    draft.speed !== view.speed;
 
   const runTest = async () => {
     setTest({ state: "testing" });
@@ -391,6 +405,26 @@ function AiSection() {
               />
             </div>
           </div>
+          {draft.chat_model.trim() !== "" && (
+            <div className="setting-row setting-field">
+              <div className="setting-text">
+                <span className="setting-label">Reading speed</span>
+                <p className="setting-desc">
+                  How hard the model works while it reads files. It uses every processor core it can
+                  get, so a big import can keep the computer busy for hours.{" "}
+                  {SPEED_HELP[draft.speed]}
+                </p>
+              </div>
+              <div className="setting-control">
+                <Segmented
+                  label="Reading speed"
+                  options={SPEEDS}
+                  value={draft.speed}
+                  onChange={(speed) => set({ speed })}
+                />
+              </div>
+            </div>
+          )}
           <div className="setting-row setting-field">
             <div className="setting-text">
               <label htmlFor={embedId} className="setting-label">

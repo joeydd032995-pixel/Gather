@@ -48,6 +48,17 @@ impl PassStats {
 /// requests from the app in, short enough that a big import is read in
 /// minutes or hours rather than days.
 const BUSY_PAUSE: Duration = Duration::from_millis(200);
+/// Longest rest after one pass, however long the pass took.
+const MAX_REST: Duration = Duration::from_secs(120);
+
+/// How long to rest after a busy pass that took `worked`, so the worker is
+/// busy `duty_percent` of the time: at 30 %, 3 s of work is followed by 7 s
+/// of rest. Never shorter than [`BUSY_PAUSE`].
+fn rest_after(worked: Duration, duty_percent: u8) -> Duration {
+    let duty = f64::from(duty_percent.clamp(10, 100));
+    let rest = worked.mul_f64((100.0 - duty) / duty);
+    rest.clamp(BUSY_PAUSE, MAX_REST)
+}
 /// How often, while busy, the log says how much is left.
 const PROGRESS_EVERY: Duration = Duration::from_secs(60);
 
@@ -95,6 +106,7 @@ pub async fn worker_loop(pool: PgPool, config: Config) {
     let mut busy_since: Option<std::time::Instant> = None;
     let mut last_progress = std::time::Instant::now();
     loop {
+        let pass_started = std::time::Instant::now();
         let stats = match run_one_pass(&pool, &config, ollama.as_ref()).await {
             Ok(stats) => stats,
             Err(e) => {
@@ -124,8 +136,15 @@ pub async fn worker_loop(pool: PgPool, config: Config) {
                     );
                 }
             }
-            // More may be queued: go again almost at once.
-            tokio::time::sleep(BUSY_PAUSE).await;
+            // More may be queued: go again. With a local AI model in use the
+            // pass was mostly the model working, so rest in proportion and
+            // leave the processor to everything else on the computer.
+            let rest = if ollama.is_some() {
+                rest_after(pass_started.elapsed(), config.extraction_ai_duty_percent)
+            } else {
+                BUSY_PAUSE
+            };
+            tokio::time::sleep(rest).await;
         } else {
             if let Some(started) = busy_since.take() {
                 let failed = backlog(&pool).await.map(|b| b.failed).unwrap_or(0);
@@ -661,4 +680,25 @@ async fn process_unit_chunks(
         }
     }
     Ok(stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rest_keeps_the_worker_to_its_share_of_the_time() {
+        let s = Duration::from_secs;
+        assert_eq!(rest_after(s(3), 30), Duration::from_secs_f64(7.0));
+        assert_eq!(rest_after(s(10), 50), s(10));
+        assert_eq!(
+            rest_after(s(10), 100),
+            BUSY_PAUSE,
+            "full speed: a breath only"
+        );
+        assert_eq!(rest_after(Duration::ZERO, 30), BUSY_PAUSE, "never shorter");
+        assert_eq!(rest_after(s(60), 10), MAX_REST, "capped");
+        // Out-of-range shares are pulled into 10-100.
+        assert_eq!(rest_after(s(1), 0), rest_after(s(1), 10));
+    }
 }
