@@ -47,6 +47,9 @@ pub struct Config {
     pub project_max_files: usize,
     /// Most a project .zip may expand to, in megabytes (GATHER_PROJECT_MAX_MB).
     pub project_max_mb: usize,
+    /// Most projects compared when finding similar ones (the most recently
+    /// changed). Each costs a few kilobytes of memory while cached.
+    pub project_compare_max: usize,
     /// Requests/sec allowed across /api/v1 and the gRPC services combined
     /// (a shared global bucket). 0 disables rate limiting. Bounds a runaway
     /// local client; the listener is loopback-only regardless.
@@ -285,6 +288,11 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .filter(|&n: &usize| n > 0)
             .unwrap_or(if low { 1024 } else { 4096 });
+        let project_compare_max = set("GATHER_PROJECT_COMPARE_MAX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n: &usize| n > 0)
+            .unwrap_or(if low { 1000 } else { 5000 });
 
         // 0 is a valid value (rate limiting disabled); only a malformed value
         // is an error rather than a silent fall-back to the default.
@@ -383,6 +391,7 @@ impl Config {
             max_upload_mb,
             project_max_files,
             project_max_mb,
+            project_compare_max,
             rate_limit_rps,
             log_json,
             allow_non_loopback,
@@ -540,6 +549,7 @@ impl Config {
             max_upload_mb: 16,
             project_max_files: 20_000,
             project_max_mb: 256,
+            project_compare_max: 5000,
             rate_limit_rps: 0,
             log_json: false,
             allow_non_loopback: false,
@@ -620,6 +630,7 @@ mod tests {
         assert_eq!(c.memory_profile, MemoryProfile::Low);
         assert_eq!(c.db_max_connections, 4);
         assert_eq!(c.max_upload_mb, 32);
+        assert_eq!(c.project_compare_max, 1000);
         assert_eq!(c.ollama_model, None, "embeddings only by default");
         assert_eq!(c.ollama_keep_alive.as_deref(), Some("1m"));
         assert_eq!(c.ollama_num_ctx, Some(2048));

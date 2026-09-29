@@ -253,18 +253,29 @@ function SimilarPanel({
 }) {
   const [items, setItems] = useState<SimilarProject[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // A new project shows at once; while files are still arriving, it waits
+  // for a pause rather than comparing again after every file.
+  const shownFor = useRef<string | null>(null);
   useEffect(() => {
     let cancelled = false;
-    setItems(null);
-    getSimilarProjects(id, 8)
-      .then((list) => {
-        if (cancelled) return;
-        setItems(list);
-        setError(null);
-      })
-      .catch((e) => !cancelled && setError(errorText(e)));
+    const fresh = shownFor.current !== id;
+    if (fresh) setItems(null);
+    const timer = setTimeout(
+      () => {
+        getSimilarProjects(id, 8)
+          .then((list) => {
+            if (cancelled) return;
+            shownFor.current = id;
+            setItems(list);
+            setError(null);
+          })
+          .catch((e) => !cancelled && setError(errorText(e)));
+      },
+      fresh ? 0 : 1500,
+    );
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
   }, [id, refreshKey]);
 

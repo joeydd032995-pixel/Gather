@@ -252,6 +252,7 @@ pub async fn project_graph(
             id,
             params.max_files.unwrap_or(250).clamp(1, 2000),
             params.max_entities.unwrap_or(80).clamp(0, 1000),
+            state.config.project_compare_max,
         )
         .await?,
     ))
@@ -276,11 +277,12 @@ pub async fn similar_projects(
     Query(params): Query<SimilarParams>,
 ) -> Result<Json<SimilarResponse>, ApiError> {
     store::exists(&state.pool, id).await?;
-    let signatures = similarity::load(&state.pool).await?;
+    let loaded = similarity::load(&state.pool, state.config.project_compare_max).await?;
     let limit = params.limit.unwrap_or(10).clamp(1, 50);
     // A project past the most recent ones compared has no signature: nothing
     // to rank it against, rather than an error.
-    let items = similarity::rank(id, &signatures, limit).unwrap_or_default();
+    let items = similarity::rank(id, &loaded, limit).unwrap_or_default();
+    let items = similarity::with_examples(&state.pool, id, items).await?;
     Ok(Json(SimilarResponse {
         project_id: id,
         items,

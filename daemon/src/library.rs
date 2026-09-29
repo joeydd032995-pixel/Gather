@@ -2,7 +2,7 @@
 //! an artifact's readable content, and the whole-collection graph overview.
 //! Shared by the REST routes (`routes::library`) and gRPC (`grpc::query`).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use serde::Serialize;
 use sqlx::{PgPool, Row};
@@ -321,7 +321,8 @@ pub async fn graph_overview(
     pool: &PgPool,
     max_entities: i64,
     max_files: i64,
-    include_projects: bool,
+    max_projects: i64,
+    compare_max: usize,
 ) -> Result<GraphOverview, ApiError> {
     let ranked = sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"
@@ -369,8 +370,8 @@ pub async fn graph_overview(
     } else {
         (Vec::new(), Vec::new())
     };
-    let (projects, contains, similar) = if include_projects {
-        projects_overview(pool, &files).await?
+    let (projects, contains, similar) = if max_projects > 0 {
+        projects_overview(pool, &files, max_projects, compare_max).await?
     } else {
         (Vec::new(), Vec::new(), Vec::new())
     };
@@ -416,16 +417,18 @@ pub async fn relations_among(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<GraphRel
     .collect())
 }
 
-/// Most projects the overview shows.
-const OVERVIEW_PROJECTS: i64 = 60;
 /// Similar projects linked per project in the overview.
 const OVERVIEW_SIMILAR: usize = 3;
 
-/// The projects for the overview (the most recently changed), which of the
-/// overview's `files` each holds, and which projects are alike.
+/// The projects for the overview (the `max_projects` most recently
+/// changed), which of the overview's `files` each holds, and which projects
+/// are alike (compared among those shown, weighted by rarity across the
+/// `compare_max` most recent).
 async fn projects_overview(
     pool: &PgPool,
     files: &[GraphFile],
+    max_projects: i64,
+    compare_max: usize,
 ) -> Result<(Vec<GraphProject>, Vec<GraphContains>, Vec<GraphSimilar>), ApiError> {
     let projects: Vec<GraphProject> = sqlx::query(
         "SELECT p.id, p.name, p.source, \
@@ -433,7 +436,7 @@ async fn projects_overview(
          FROM projects p LEFT JOIN project_items i ON i.project_id = p.id \
          GROUP BY p.id ORDER BY p.updated_at DESC, p.id LIMIT $1",
     )
-    .bind(OVERVIEW_PROJECTS)
+    .bind(max_projects)
     .fetch_all(pool)
     .await?
     .iter()
@@ -465,18 +468,21 @@ async fn projects_overview(
         child: r.get("artifact_id"),
     })
     .collect();
-    let shown: HashSet<Uuid> = project_ids.iter().copied().collect();
-    let signatures = crate::projects::similarity::load(pool).await?;
-    let similar = crate::projects::similarity::pairs(&signatures, OVERVIEW_SIMILAR)
-        .into_iter()
-        .filter(|p| shown.contains(&p.a) && shown.contains(&p.b))
-        .map(|p| GraphSimilar {
-            a: p.a,
-            b: p.b,
-            score: p.score,
-            reasons: p.reasons,
-        })
-        .collect();
+    let similar = crate::projects::similarity::cached_pairs(
+        pool,
+        compare_max,
+        &project_ids,
+        OVERVIEW_SIMILAR,
+    )
+    .await?
+    .iter()
+    .map(|p| GraphSimilar {
+        a: p.a,
+        b: p.b,
+        score: p.score,
+        reasons: p.reasons.clone(),
+    })
+    .collect();
     Ok((projects, contains, similar))
 }
 
