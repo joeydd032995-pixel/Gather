@@ -65,6 +65,10 @@ pub struct Config {
     pub extraction_interval_secs: u64,
     /// Max rows claimed per queue per pass.
     pub extraction_batch: i64,
+    /// While a local AI model is in use, the share of time (10-100) the
+    /// extraction worker may spend working; it pauses for the rest, which
+    /// keeps the model from using every core for hours after a big import.
+    pub extraction_ai_duty_percent: u8,
     /// Tesseract CLI binary (name on PATH or absolute path).
     pub tesseract_path: String,
     /// Ollama base URL; None/empty disables all LLM/embedding features.
@@ -406,6 +410,11 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .map(|v: i64| v.clamp(1, 256))
                 .unwrap_or(8),
+            extraction_ai_duty_percent: var("GATHER_EXTRACTION_AI_DUTY_PERCENT")
+                .ok()
+                .and_then(|v| v.trim().parse::<u32>().ok())
+                .map(|v| v.clamp(10, 100) as u8)
+                .unwrap_or(if low { 30 } else { 60 }),
             tesseract_path: var("GATHER_TESSERACT_PATH")
                 .unwrap_or_else(|_| "tesseract".to_string()),
             ollama_url: var("GATHER_OLLAMA_URL").ok().filter(|u| !u.is_empty()),
@@ -556,6 +565,7 @@ impl Config {
             extraction_enabled: true,
             extraction_interval_secs: 30,
             extraction_batch: 8,
+            extraction_ai_duty_percent: 100,
             tesseract_path: "tesseract".to_string(),
             ollama_url: None,
             ollama_model: Some("llama3.2:3b".to_string()),
@@ -622,6 +632,20 @@ mod tests {
         assert_eq!(c.ollama_keep_alive, None);
         assert_eq!(c.ollama_num_ctx, None);
         assert!(!c.ollama_one_at_a_time);
+        assert_eq!(c.extraction_ai_duty_percent, 60);
+    }
+
+    #[test]
+    fn ai_duty_is_kept_between_10_and_100() {
+        let duty = |v: &str| {
+            config(&[("GATHER_EXTRACTION_AI_DUTY_PERCENT", v)])
+                .unwrap()
+                .extraction_ai_duty_percent
+        };
+        assert_eq!(duty("45"), 45);
+        assert_eq!(duty("0"), 10, "never stops altogether");
+        assert_eq!(duty("500"), 100);
+        assert_eq!(duty("lots"), 60, "unreadable: the default");
     }
 
     #[test]
@@ -631,6 +655,7 @@ mod tests {
         assert_eq!(c.db_max_connections, 4);
         assert_eq!(c.max_upload_mb, 32);
         assert_eq!(c.project_compare_max, 1000);
+        assert_eq!(c.extraction_ai_duty_percent, 30, "gentle by default");
         assert_eq!(c.ollama_model, None, "embeddings only by default");
         assert_eq!(c.ollama_keep_alive.as_deref(), Some("1m"));
         assert_eq!(c.ollama_num_ctx, Some(2048));

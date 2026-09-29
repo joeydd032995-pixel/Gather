@@ -35,6 +35,18 @@ pub struct Chunk {
     pub ocr_confidence: Option<f32>,
 }
 
+/// How a chunk is taken for persisting.
+#[derive(Debug, Clone)]
+pub enum Claim {
+    /// First read: the chunk must not have been read yet. `llm_model` is the
+    /// model whose answer is among the units, if it answered.
+    Fresh { llm_model: Option<String> },
+    /// A re-read by `model` within re-read job `job`: the chunk must already
+    /// have been read, but not by this model and not yet by this job. Only the
+    /// model's units are given; a unit the chunk already backs is left alone.
+    Reread { job: Uuid, model: String },
+}
+
 pub struct PersistOutcome {
     pub units_created: usize,
     pub units_reasserted: usize,
@@ -59,34 +71,59 @@ pub fn normalize_statement(statement: &str) -> String {
 pub async fn persist_chunk_units(
     pool: &PgPool,
     chunk: &Chunk,
+    claim: &Claim,
     units: &[(ExtractedUnit, &'static str, Option<String>)], // (unit, method, model)
     hold_below: f32,
     drop_below: f32,
 ) -> Result<Option<PersistOutcome>, ApiError> {
     let mut tx = pool.begin().await?;
 
-    // Claim: stamp the marker iff still unstamped; concurrent workers skip.
-    let claim_sql = match chunk.anchor {
-        ChunkAnchor::Message(_) => {
-            "UPDATE messages SET units_extracted_at = now()
+    // Claim: stamp the marker iff still unstamped (or, for a re-read, still
+    // not read by this model or job); concurrent workers skip.
+    let claim_sql = match (claim, chunk.anchor) {
+        (Claim::Fresh { .. }, ChunkAnchor::Message(_)) => {
+            "UPDATE messages SET units_extracted_at = now(), units_llm_model = $2
              WHERE id = $1 AND units_extracted_at IS NULL RETURNING id"
         }
-        ChunkAnchor::Segment(_) => {
-            "UPDATE document_segments SET units_extracted_at = now()
+        (Claim::Fresh { .. }, ChunkAnchor::Segment(_)) => {
+            "UPDATE document_segments SET units_extracted_at = now(), units_llm_model = $2
              WHERE id = $1 AND units_extracted_at IS NULL RETURNING id"
         }
-        ChunkAnchor::Image(_) => {
-            "UPDATE images SET units_extracted_at = now()
+        (Claim::Fresh { .. }, ChunkAnchor::Image(_)) => {
+            "UPDATE images SET units_extracted_at = now(), units_llm_model = $2
              WHERE id = $1 AND units_extracted_at IS NULL RETURNING id"
+        }
+        (Claim::Reread { .. }, ChunkAnchor::Message(_)) => {
+            "UPDATE messages SET units_llm_model = $2, units_reread_job = $3,
+                    units_extract_error = NULL
+             WHERE id = $1 AND units_extracted_at IS NOT NULL
+               AND units_llm_model IS DISTINCT FROM $2
+               AND units_reread_job IS DISTINCT FROM $3 RETURNING id"
+        }
+        (Claim::Reread { .. }, ChunkAnchor::Segment(_)) => {
+            "UPDATE document_segments SET units_llm_model = $2, units_reread_job = $3,
+                    units_extract_error = NULL
+             WHERE id = $1 AND units_extracted_at IS NOT NULL
+               AND units_llm_model IS DISTINCT FROM $2
+               AND units_reread_job IS DISTINCT FROM $3 RETURNING id"
+        }
+        (Claim::Reread { .. }, ChunkAnchor::Image(_)) => {
+            "UPDATE images SET units_llm_model = $2, units_reread_job = $3,
+                    units_extract_error = NULL
+             WHERE id = $1 AND units_extracted_at IS NOT NULL
+               AND units_llm_model IS DISTINCT FROM $2
+               AND units_reread_job IS DISTINCT FROM $3 RETURNING id"
         }
     };
     let anchor_id = match chunk.anchor {
         ChunkAnchor::Message(id) | ChunkAnchor::Segment(id) | ChunkAnchor::Image(id) => id,
     };
-    let claimed: Option<(Uuid,)> = sqlx::query_as(claim_sql)
-        .bind(anchor_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+    let query = sqlx::query_as(claim_sql).bind(anchor_id);
+    let query = match claim {
+        Claim::Fresh { llm_model } => query.bind(llm_model.as_deref()),
+        Claim::Reread { job, model } => query.bind(model.as_str()).bind(job),
+    };
+    let claimed: Option<(Uuid,)> = query.fetch_optional(&mut *tx).await?;
     if claimed.is_none() {
         tx.rollback().await?;
         return Ok(None);
@@ -178,6 +215,30 @@ pub async fn persist_chunk_units(
                         .bind(&statement_hash)
                         .fetch_one(&mut *tx)
                         .await?;
+                if matches!(claim, Claim::Reread { .. }) {
+                    // Already backed by this very chunk: a second provenance
+                    // row would count one source twice.
+                    let (message_id, segment_id, image_id) = anchor_columns(chunk.anchor);
+                    let backed: bool = sqlx::query_scalar(
+                        r#"
+                        SELECT EXISTS (
+                            SELECT 1 FROM atomic_unit_provenance
+                            WHERE atomic_unit_id = $1
+                              AND message_id IS NOT DISTINCT FROM $2
+                              AND document_segment_id IS NOT DISTINCT FROM $3
+                              AND image_id IS NOT DISTINCT FROM $4)
+                        "#,
+                    )
+                    .bind(id)
+                    .bind(message_id)
+                    .bind(segment_id)
+                    .bind(image_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    if backed {
+                        continue;
+                    }
+                }
                 outcome.units_reasserted += 1;
                 metrics::counter!(
                     "gather_extraction_units_total",
@@ -240,11 +301,7 @@ pub async fn persist_chunk_units(
             }
         }
 
-        let (message_id, segment_id, image_id) = match chunk.anchor {
-            ChunkAnchor::Message(id) => (Some(id), None, None),
-            ChunkAnchor::Segment(id) => (None, Some(id), None),
-            ChunkAnchor::Image(id) => (None, None, Some(id)),
-        };
+        let (message_id, segment_id, image_id) = anchor_columns(chunk.anchor);
         // A re-assertion folds a new source into an existing proposition.
         // Record that, and whether the new source is independent of the ones
         // already behind it (copies and derivations are not corroboration).
@@ -328,6 +385,15 @@ pub async fn persist_chunk_units(
 
     tx.commit().await?;
     Ok(Some(outcome))
+}
+
+/// The (message, segment, image) provenance columns an anchor fills.
+fn anchor_columns(anchor: ChunkAnchor) -> (Option<Uuid>, Option<Uuid>, Option<Uuid>) {
+    match anchor {
+        ChunkAnchor::Message(id) => (Some(id), None, None),
+        ChunkAnchor::Segment(id) => (None, Some(id), None),
+        ChunkAnchor::Image(id) => (None, None, Some(id)),
+    }
 }
 
 /// Resolve an entity name against entities + aliases (case-insensitive),

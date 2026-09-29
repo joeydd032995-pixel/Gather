@@ -46,7 +46,35 @@ pub async fn status(State(state): State<AppState>) -> Result<Json<Value>, crate:
             "embed_model": on.then(|| c.ollama_embed_model.clone()),
         },
         "reading": reading,
+        "reread": crate::extract::reread::latest(&state.pool).await?,
     })))
+}
+
+/// Go back over earlier files with the AI reading model: every chunk it has
+/// not read yet. Returns the job (the running one, if there already is one),
+/// or `job: null` when there is nothing left for the model to read.
+pub async fn start_reread(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, crate::error::ApiError> {
+    let model = state
+        .ollama
+        .as_ref()
+        .and_then(|c| c.model.as_deref())
+        .ok_or_else(|| {
+            crate::error::ApiError::BadRequest(
+                "No AI reading model is set up. Choose one in Settings first.".into(),
+            )
+        })?;
+    let job = crate::extract::reread::start(&state.pool, model).await?;
+    Ok(Json(json!({ "job": job })))
+}
+
+/// Stop the running re-read. What it has read stays read.
+pub async fn cancel_reread(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, crate::error::ApiError> {
+    let job = crate::extract::reread::cancel(&state.pool).await?;
+    Ok(Json(json!({ "job": job })))
 }
 
 /// Prometheus exposition endpoint.

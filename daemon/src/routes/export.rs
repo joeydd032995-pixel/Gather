@@ -46,7 +46,7 @@ const TABLES: &[(&str, &str)] = &[
     (
         "messages",
         "id, conversation_id, external_id, parent_message_id, seq, role, author, \
-         model, content, created_at, metadata, units_extracted_at, units_extract_error",
+         model, content, created_at, metadata, units_extracted_at, units_extract_error, units_llm_model",
     ),
     (
         "documents",
@@ -56,7 +56,7 @@ const TABLES: &[(&str, &str)] = &[
     (
         "document_segments",
         "id, document_id, seq, page, heading, content, content_hash, embedding, metadata, \
-         units_extracted_at, units_extract_error",
+         units_extracted_at, units_extract_error, units_llm_model",
     ),
     // Clusters before images and atomic_units, whose *_cluster_id columns
     // reference it. Clusters have no outbound FKs, so this position is safe.
@@ -69,7 +69,7 @@ const TABLES: &[(&str, &str)] = &[
         "id, artifact_id, width, height, exif, taken_at, ocr_text, ocr_confidence, \
          ocr_status, caption, caption_model, metadata, units_extracted_at, phash, latitude, \
          longitude, embedding, photo_prepared_at, photo_grouped_at, captioned_at, \
-         dup_cluster_id, album_cluster_id, topic_cluster_id, units_extract_error",
+         dup_cluster_id, album_cluster_id, topic_cluster_id, units_extract_error, units_llm_model",
     ),
     (
         "entities",

@@ -68,14 +68,32 @@ What the daemon runs with and how far reading has got. Used by the desktop app's
   "version": "0.1.0",
   "ai": { "enabled": true, "url": "http://127.0.0.1:11434", "model": "llama3.2:1b",
           "embed_model": "nomic-embed-text" },
-  "reading": { "chunks": 1840, "files": 212, "failed": 3 }
+  "reading": { "chunks": 1840, "files": 212, "failed": 3 },
+  "reread": { "id": "…", "model": "llama3.2:1b", "status": "running",
+              "total": 5200, "done": 1300, "failed": 2 }
 }
 ```
 
 `reading.chunks` counts document sections, chat messages and image text not yet read into
 units; `reading.files` the files they belong to (plus files not yet opened); `reading.failed`
 the sections set aside after an error (the error is in the daemon log). `ai.model` is `null`
-when Ollama is used for embeddings only; `ai.enabled` is `false` without Ollama.
+when Ollama is used for embeddings only; `ai.enabled` is `false` without Ollama. `reread` is the
+running re-read job, else the latest finished one, else `null`.
+
+### `POST /reread`
+
+Read earlier files again with the AI model. A model only reads what is imported after it is
+switched on; this goes back over every section the model has not read yet (each section
+remembers which model read it). It works after new files, in the extraction worker's spare
+time and at the reading speed, and adds only the units the model finds: the rules are not run
+again, and a unit a section already backs is left alone. Returns `{ "job": { … } }` (the job
+already running, if there is one), or `{ "job": null }` when there is nothing to read.
+`400` when no reading model is set up. A section the model fails on is skipped for that job.
+
+### `POST /reread/cancel`
+
+Stops the running re-read; what it has read stays read. Returns `{ "job": … }` (`null` when
+none was running). Starting again continues with the sections not yet read.
 
 ---
 

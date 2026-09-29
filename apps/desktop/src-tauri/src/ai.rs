@@ -29,6 +29,47 @@ pub const EMBED_DIMENSIONS: usize = 768;
 /// Enough for Ollama's model list; anything bigger isn't Ollama.
 const MAX_RESPONSE: u64 = 1024 * 1024;
 
+/// How hard Gather lets the AI model work while it reads files. The model
+/// uses every core it can get, so on a small computer a big import would
+/// otherwise keep the processor near 100 % for hours; the daemon rests in
+/// between to hold it to this share of the time.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Speed {
+    /// About 30 % of the time: leaves the computer usable.
+    Gentle,
+    /// About 60 %.
+    Balanced,
+    /// No rests between files; the fastest, and the hottest.
+    Full,
+}
+
+impl Speed {
+    /// The value the daemon reads from GATHER_EXTRACTION_AI_DUTY_PERCENT.
+    pub fn duty_percent(self) -> u8 {
+        match self {
+            Speed::Gentle => 30,
+            Speed::Balanced => 60,
+            Speed::Full => 100,
+        }
+    }
+
+    /// The speed a duty percentage stands for, when it is one of the three.
+    pub fn from_duty_percent(percent: u32) -> Option<Speed> {
+        [Speed::Gentle, Speed::Balanced, Speed::Full]
+            .into_iter()
+            .find(|s| u32::from(s.duty_percent()) == percent)
+    }
+
+    /// What the daemon uses when nothing is chosen.
+    pub fn for_profile(profile: Profile) -> Speed {
+        match profile {
+            Profile::Low => Speed::Gentle,
+            Profile::Standard => Speed::Balanced,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AiSettings {
     /// Use Ollama at all.
@@ -40,6 +81,10 @@ pub struct AiSettings {
     pub chat_model: String,
     /// Model for search by meaning (768-dimension vectors).
     pub embed_model: String,
+    /// How hard the reading model may work; None until chosen, when the
+    /// daemon's default for this computer applies (and Settings shows it).
+    #[serde(default)]
+    pub speed: Option<Speed>,
 }
 
 impl Default for AiSettings {
@@ -49,6 +94,7 @@ impl Default for AiSettings {
             url: DEFAULT_URL.to_string(),
             chat_model: String::new(),
             embed_model: DEFAULT_EMBED_MODEL.to_string(),
+            speed: None,
         }
     }
 }
@@ -78,6 +124,13 @@ fn saved(data: &Path) -> Option<AiSettings> {
 /// What Settings shows: the saved choice, else what the environment set up
 /// (with the daemon's own default model for `profile` where it sets none).
 pub fn load(data: &Path, profile: Profile) -> AiSettingsView {
+    let mut view = load_raw(data, profile);
+    // Always show a speed: the default for this computer when none is chosen.
+    view.settings.speed = view.settings.speed.or(Some(Speed::for_profile(profile)));
+    view
+}
+
+fn load_raw(data: &Path, profile: Profile) -> AiSettingsView {
     if let Some(settings) = saved(data) {
         return AiSettingsView {
             settings,
@@ -97,6 +150,11 @@ pub fn load(data: &Path, profile: Profile) -> AiSettingsView {
                 },
                 embed_model: env("GATHER_OLLAMA_EMBED_MODEL")
                     .unwrap_or_else(|| DEFAULT_EMBED_MODEL.to_string()),
+                // A share set in the environment stays, when it is one of the
+                // three speeds: saving must not swap it for the default.
+                speed: env("GATHER_EXTRACTION_AI_DUTY_PERCENT")
+                    .and_then(|v| v.parse().ok())
+                    .and_then(Speed::from_duty_percent),
             },
             source: "environment",
         },
@@ -126,7 +184,7 @@ pub fn daemon_env(data: &Path) -> Vec<(&'static str, String)> {
         // Empty turns Ollama off, whatever the app's environment says.
         return vec![("GATHER_OLLAMA_URL", String::new())];
     }
-    vec![
+    let mut env = vec![
         ("GATHER_OLLAMA_URL", s.url),
         ("GATHER_OLLAMA_EMBED_MODEL", s.embed_model),
         (
@@ -137,7 +195,14 @@ pub fn daemon_env(data: &Path) -> Vec<(&'static str, String)> {
                 s.chat_model
             },
         ),
-    ]
+    ];
+    if let Some(speed) = s.speed {
+        env.push((
+            "GATHER_EXTRACTION_AI_DUTY_PERCENT",
+            speed.duty_percent().to_string(),
+        ));
+    }
+    env
 }
 
 /// Tidy and check settings; the address comes back as `http://host:port`,
@@ -179,6 +244,7 @@ pub fn validate(s: &AiSettings) -> Result<AiSettings, String> {
         } else {
             embed_model
         },
+        speed: s.speed,
     })
 }
 
@@ -434,6 +500,26 @@ mod tests {
     }
 
     #[test]
+    fn settings_always_show_a_speed_and_old_files_still_load() {
+        let dir = std::env::temp_dir().join(format!("gather-ai-speed-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // A file saved before speeds existed.
+        fs::write(
+            dir.join(FILE),
+            r#"{"enabled":true,"url":"http://127.0.0.1:11434","chat_model":"smollm2:360m","embed_model":"nomic-embed-text"}"#,
+        )
+        .unwrap();
+        assert_eq!(load(&dir, Profile::Low).settings.speed, Some(Speed::Gentle));
+        assert_eq!(
+            load(&dir, Profile::Standard).settings.speed,
+            Some(Speed::Balanced)
+        );
+        assert!(daemon_env(&dir).iter().all(|(n, _)| !n.contains("DUTY")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn saved_settings_become_the_daemons_environment() {
         let dir = std::env::temp_dir().join(format!("gather-ai-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -449,6 +535,7 @@ mod tests {
                 url: " http://localhost:11434/ ".to_string(),
                 chat_model: String::new(),
                 embed_model: "nomic-embed-text".to_string(),
+                speed: None,
             },
         )
         .unwrap();
@@ -464,12 +551,35 @@ mod tests {
         let env = daemon_env(&dir);
         assert!(env.contains(&("GATHER_OLLAMA_URL", "http://localhost:11434".to_string())));
         assert!(env.contains(&("GATHER_OLLAMA_MODEL", "none".to_string())));
+        assert!(
+            !env.iter()
+                .any(|(name, _)| *name == "GATHER_EXTRACTION_AI_DUTY_PERCENT"),
+            "no speed chosen: the daemon's default for this computer applies"
+        );
+
+        // A chosen speed is passed on as the share of time the model may work.
+        let fast = save(
+            &dir,
+            &AiSettings {
+                speed: Some(Speed::Full),
+                ..saved.clone()
+            },
+        )
+        .unwrap();
+        assert!(
+            daemon_env(&dir).contains(&("GATHER_EXTRACTION_AI_DUTY_PERCENT", "100".to_string()))
+        );
+        assert_eq!(Speed::from_duty_percent(60), Some(Speed::Balanced));
+        assert_eq!(Speed::from_duty_percent(45), None);
+        assert_eq!(Speed::Gentle.duty_percent(), 30);
+        assert_eq!(Speed::Balanced.duty_percent(), 60);
+        assert_eq!(fast.speed, Some(Speed::Full));
 
         save(
             &dir,
             &AiSettings {
                 enabled: false,
-                ..saved
+                ..saved.clone()
             },
         )
         .unwrap();
@@ -486,6 +596,7 @@ mod tests {
                 url: "http://10.0.0.2:11434".to_string(),
                 chat_model: String::new(),
                 embed_model: "nomic-embed-text".to_string(),
+                speed: None,
             }
         )
         .is_err());

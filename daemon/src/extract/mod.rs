@@ -14,6 +14,7 @@ pub mod image;
 pub mod ollama;
 pub mod pdf;
 pub mod persist;
+pub mod reread;
 pub mod rules;
 pub mod segment;
 
@@ -48,6 +49,26 @@ impl PassStats {
 /// requests from the app in, short enough that a big import is read in
 /// minutes or hours rather than days.
 const BUSY_PAUSE: Duration = Duration::from_millis(200);
+/// Longest rest after one pass, however long the pass took.
+const MAX_REST: Duration = Duration::from_secs(120);
+
+/// How long to rest after a busy pass that took `worked`, so the worker is
+/// busy `duty_percent` of the time: at 30 %, 3 s of work is followed by 7 s
+/// of rest. Never shorter than [`BUSY_PAUSE`].
+fn rest_after(worked: Duration, duty_percent: u8) -> Duration {
+    let duty = f64::from(duty_percent.clamp(10, 100));
+    let rest = worked.mul_f64((100.0 - duty) / duty);
+    rest.clamp(BUSY_PAUSE, MAX_REST)
+}
+/// Rest after one model request that took `worked`, so that the model is
+/// working `duty_percent` of the time however long a pass runs. Done per
+/// request, not per pass: a slow model can keep a pass going for minutes.
+pub(crate) async fn pace(worked: Duration, duty_percent: u8) {
+    if duty_percent < 100 {
+        tokio::time::sleep(rest_after(worked, duty_percent)).await;
+    }
+}
+
 /// How often, while busy, the log says how much is left.
 const PROGRESS_EVERY: Duration = Duration::from_secs(60);
 
@@ -124,7 +145,8 @@ pub async fn worker_loop(pool: PgPool, config: Config) {
                     );
                 }
             }
-            // More may be queued: go again almost at once.
+            // More may be queued: go again. (The model's share of the time is
+            // kept request by request, see `pace`.)
             tokio::time::sleep(BUSY_PAUSE).await;
         } else {
             if let Some(started) = busy_since.take() {
@@ -228,12 +250,25 @@ pub async fn run_one_pass(
             tracing::error!(error = %e, "extraction: reading sections failed; will retry");
             ChunkStats::default()
         });
+    // Nothing new to read: spend the time going back over earlier files with
+    // the AI model, if a re-read was asked for.
+    let reread = match ollama {
+        Some(client) if chunks.processed + chunks.failed == 0 => {
+            reread::run_pass(pool, config, client)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::error!(error = %e, "extraction: re-reading failed; will retry");
+                    ChunkStats::default()
+                })
+        }
+        _ => ChunkStats::default(),
+    };
     let stats = PassStats {
         pdfs_processed,
         images_processed,
-        chunks_processed: chunks.processed,
-        units_created: chunks.created,
-        chunks_failed: chunks.failed,
+        chunks_processed: chunks.processed + reread.processed,
+        units_created: chunks.created + reread.created,
+        chunks_failed: chunks.failed + reread.failed,
     };
 
     if let Some(client) = ollama {
@@ -465,10 +500,10 @@ async fn process_pending_images(pool: &PgPool, config: &Config) -> anyhow::Resul
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Default)]
-struct ChunkStats {
-    processed: usize,
-    created: usize,
-    failed: usize,
+pub struct ChunkStats {
+    pub processed: usize,
+    pub created: usize,
+    pub failed: usize,
 }
 
 /// Errors are kept short: enough to tell what went wrong, not a whole
@@ -501,14 +536,48 @@ async fn set_aside(pool: &PgPool, chunk: &Chunk, error: &str) -> Result<(), sqlx
     Ok(())
 }
 
-async fn process_unit_chunks(
-    pool: &PgPool,
-    config: &Config,
-    ollama: Option<&OllamaClient>,
-) -> anyhow::Result<ChunkStats> {
-    let mut chunks: Vec<Chunk> = Vec::new();
+/// Which chunks to take: those not yet read, or those a re-read job should
+/// still visit.
+pub(crate) enum Queue<'a> {
+    Fresh,
+    Reread { job: Uuid, model: &'a str },
+}
 
-    for row in sqlx::query(
+impl Queue<'_> {
+    /// The condition on chunk table alias `t`, and the text column's name for
+    /// the "has something to read" check on a re-read.
+    fn filter(&self, t: &str, text: &str) -> String {
+        match self {
+            Queue::Fresh => format!("{t}.units_extracted_at IS NULL"),
+            Queue::Reread { .. } => format!(
+                "{t}.units_extracted_at IS NOT NULL \
+                 AND {t}.units_llm_model IS DISTINCT FROM $2 \
+                 AND {t}.units_reread_job IS DISTINCT FROM $3 \
+                 AND length(trim(coalesce({t}.{text}, ''))) > 0"
+            ),
+        }
+    }
+}
+
+/// The next `limit` chunks of each kind in `queue`.
+pub(crate) async fn load_chunks(
+    pool: &PgPool,
+    limit: i64,
+    queue: &Queue<'_>,
+) -> anyhow::Result<Vec<Chunk>> {
+    let mut chunks: Vec<Chunk> = Vec::new();
+    // Bind $2/$3 only where the statement mentions them.
+    macro_rules! run {
+        ($sql:expr) => {{
+            let q = sqlx::query(sqlx::AssertSqlSafe($sql)).bind(limit);
+            match queue {
+                Queue::Fresh => q.fetch_all(pool).await?,
+                Queue::Reread { job, model } => q.bind(*model).bind(*job).fetch_all(pool).await?,
+            }
+        }};
+    }
+
+    for row in run!(format!(
         r#"
         SELECT m.id, m.content, m.role,
                COALESCE(m.created_at, a.source_created_at, a.ingested_at) AS source_time,
@@ -516,14 +585,11 @@ async fn process_unit_chunks(
         FROM messages m
         JOIN conversations c ON c.id = m.conversation_id
         JOIN artifacts a ON a.id = c.artifact_id
-        WHERE m.units_extracted_at IS NULL
+        WHERE {}
         ORDER BY a.ingested_at, m.conversation_id, m.id LIMIT $1
         "#,
-    )
-    .bind(config.extraction_batch)
-    .fetch_all(pool)
-    .await?
-    {
+        queue.filter("m", "content")
+    )) {
         chunks.push(Chunk {
             anchor: ChunkAnchor::Message(row.get("id")),
             artifact_id: row.get("artifact_id"),
@@ -534,7 +600,7 @@ async fn process_unit_chunks(
         });
     }
 
-    for row in sqlx::query(
+    for row in run!(format!(
         r#"
         SELECT s.id, s.content,
                COALESCE(a.source_created_at, a.ingested_at) AS source_time,
@@ -542,16 +608,13 @@ async fn process_unit_chunks(
         FROM document_segments s
         JOIN documents d ON d.id = s.document_id
         JOIN artifacts a ON a.id = d.artifact_id
-        WHERE s.units_extracted_at IS NULL
+        WHERE {}
         -- A file at a time, oldest first, so each finishes before the next
         -- starts instead of every file waiting for the end of the queue.
         ORDER BY a.ingested_at, s.document_id, s.seq LIMIT $1
         "#,
-    )
-    .bind(config.extraction_batch)
-    .fetch_all(pool)
-    .await?
-    {
+        queue.filter("s", "content")
+    )) {
         chunks.push(Chunk {
             anchor: ChunkAnchor::Segment(row.get("id")),
             artifact_id: row.get("artifact_id"),
@@ -562,23 +625,20 @@ async fn process_unit_chunks(
         });
     }
 
-    for row in sqlx::query(
+    for row in run!(format!(
         r#"
         SELECT i.id, i.ocr_text, i.ocr_confidence,
                COALESCE(i.taken_at, a.source_created_at, a.ingested_at) AS source_time,
                i.artifact_id
         FROM images i
         JOIN artifacts a ON a.id = i.artifact_id
-        WHERE i.units_extracted_at IS NULL
+        WHERE {}
           AND i.ocr_status = 'completed'
           AND i.ocr_text IS NOT NULL AND length(trim(i.ocr_text)) > 0
         ORDER BY i.id LIMIT $1
         "#,
-    )
-    .bind(config.extraction_batch)
-    .fetch_all(pool)
-    .await?
-    {
+        queue.filter("i", "ocr_text")
+    )) {
         chunks.push(Chunk {
             anchor: ChunkAnchor::Image(row.get("id")),
             artifact_id: row.get("artifact_id"),
@@ -588,6 +648,15 @@ async fn process_unit_chunks(
             ocr_confidence: row.get("ocr_confidence"),
         });
     }
+    Ok(chunks)
+}
+
+async fn process_unit_chunks(
+    pool: &PgPool,
+    config: &Config,
+    ollama: Option<&OllamaClient>,
+) -> anyhow::Result<ChunkStats> {
+    let chunks = load_chunks(pool, config.extraction_batch, &Queue::Fresh).await?;
 
     // Admission thresholds for this pass: tuned values from feedback when
     // present, env config otherwise.
@@ -599,12 +668,17 @@ async fn process_unit_chunks(
                 .into_iter()
                 .map(|u| (u, "rule_based", None))
                 .collect();
+        let mut llm_model = None;
 
         if let Some((client, chat_model)) = ollama.and_then(|c| c.model.as_deref().map(|m| (c, m)))
         {
-            match client.extract(&chunk.text).await {
+            let asked = std::time::Instant::now();
+            let answer = client.extract(&chunk.text).await;
+            pace(asked.elapsed(), config.extraction_ai_duty_percent).await;
+            match answer {
                 Ok(llm_units) => {
                     let model = Some(format!("ollama:{chat_model}"));
+                    llm_model = model.clone();
                     units.extend(
                         llm_units
                             .into_iter()
@@ -618,6 +692,7 @@ async fn process_unit_chunks(
         match persist::persist_chunk_units(
             pool,
             chunk,
+            &persist::Claim::Fresh { llm_model },
             &units,
             live.admit_hold_below,
             live.admit_drop_below,
@@ -661,4 +736,25 @@ async fn process_unit_chunks(
         }
     }
     Ok(stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rest_keeps_the_worker_to_its_share_of_the_time() {
+        let s = Duration::from_secs;
+        assert_eq!(rest_after(s(3), 30), Duration::from_secs_f64(7.0));
+        assert_eq!(rest_after(s(10), 50), s(10));
+        assert_eq!(
+            rest_after(s(10), 100),
+            BUSY_PAUSE,
+            "full speed: a breath only"
+        );
+        assert_eq!(rest_after(Duration::ZERO, 30), BUSY_PAUSE, "never shorter");
+        assert_eq!(rest_after(s(60), 10), MAX_REST, "capped");
+        // Out-of-range shares are pulled into 10-100.
+        assert_eq!(rest_after(s(1), 0), rest_after(s(1), 10));
+    }
 }

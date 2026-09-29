@@ -98,7 +98,11 @@ export interface AiSettings {
   chat_model: string;
   /** Model for search by meaning. */
   embed_model: string;
+  /** How hard the reading model may work (about 30 %, 60 % or all of the time). */
+  speed: ReadingSpeed;
 }
+
+export type ReadingSpeed = "gentle" | "balanced" | "full";
 
 export interface AiSettingsView extends AiSettings {
   /** Saved in Settings, taken from GATHER_OLLAMA_* variables, or the defaults. */

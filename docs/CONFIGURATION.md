@@ -81,6 +81,7 @@ Extracts PDF text, runs image OCR and produces atomic units.
 | `GATHER_EXTRACTION_ENABLED` | `true` | | Run the worker |
 | `GATHER_EXTRACTION_INTERVAL_SECS` | `30` | ≥ 1 | Seconds to wait when there is nothing to read. While work is queued, passes run back to back (a 200 ms pause between them) until the queue is empty |
 | `GATHER_EXTRACTION_BATCH` | `8` | 1–256 | Rows claimed per queue per pass |
+| `GATHER_EXTRACTION_AI_DUTY_PERCENT` | `60` (low: `30`) | 10–100 | While a local AI model is in use, the share of time the extraction worker may spend working. After each model request it rests long enough to stay within this share (at 30, 3 s of work is followed by 7 s of rest, up to 2 minutes), so a long pass cannot exceed it. Without it a model reading a big backlog would keep the processor near 100 %. `100` never rests. Not used without Ollama. In the desktop app, **Settings → AI model → Reading speed** sets it: Gentle 30, Balanced 60, Full speed 100 |
 
 Document sections are read a file at a time, oldest file first, so each file finishes before
 the next starts. A section that fails to save (for example a database error on one unit) is set
@@ -108,6 +109,8 @@ has. Saving first checks that the search model returns 768-dimension vectors, th
 with `GATHER_OLLAMA_URL`, `GATHER_OLLAMA_MODEL` and `GATHER_OLLAMA_EMBED_MODEL` set from it (an
 empty URL when turned off; an address without a port gets Ollama's 11434). Until something is
 saved there, the app's own environment applies.
+
+The model's reply to each request is capped (768 tokens for reading a section, 200 for a contradiction verdict), so a small model that loops on JSON output can't run for minutes on one section; a reply cut short is treated as no items from the model, and the built-in rules' items are kept.
 
 With Ollama enabled you get LLM-extracted units, embeddings for units, segments and entities,
 semantic search, and embedding-based entity-merge and contradiction candidates. Without it,
