@@ -83,7 +83,8 @@ pub async fn summary(pool: &PgPool, state: &AppState) -> Result<Value, sqlx::Err
     let c = &state.config;
     let counts = sqlx::query(
         r#"
-        SELECT count(*) FILTER (WHERE kind = 'claude_code' AND status = 'imported') AS sessions,
+        SELECT count(*) FILTER (WHERE kind = 'claude_code' AND status = 'imported'
+                        AND session_id IS NOT NULL) AS sessions,
                count(*) FILTER (WHERE kind = 'inbox' AND status = 'imported') AS inbox_done,
                count(*) FILTER (WHERE status IN ('failed', 'unrecognized')) AS needs_attention
         FROM import_sources
@@ -262,7 +263,18 @@ pub async fn scan_inbox(state: &AppState, dir: &Path) -> anyhow::Result<bool> {
 
 async fn handle_inbox_file(state: &AppState, dir: &Path, path: &Path, name: &str, seen: &Seen) {
     let pool = &state.pool;
-    let (status, detail, destination, note) = match process_inbox_file(state, path, name).await {
+    let result = process_inbox_file(state, path, name).await;
+    // A file that was replaced or added to while it was being read is not the
+    // one that was read: leave it in place to be read again (what was read is
+    // deduplicated by content), instead of filing away bytes never imported.
+    if !still_the_same(path, seen).await {
+        tracing::info!(
+            file = name,
+            "auto-import: changed while being read; will read again"
+        );
+        return;
+    }
+    let (status, detail, destination, note) = match result {
         Ok(Outcome::Imported(detail)) => ("imported", detail, INBOX_DONE, None),
         Ok(Outcome::Unrecognized(why)) => ("unrecognized", why.clone(), INBOX_FAILED, Some(why)),
         Err(e) if is_permanent(&e) => {
@@ -284,6 +296,57 @@ async fn handle_inbox_file(state: &AppState, dir: &Path, path: &Path, name: &str
     }
 }
 
+/// Whether `path` still has the size and modification time it had when it was
+/// picked up.
+async fn still_the_same(path: &Path, seen: &Seen) -> bool {
+    match tokio::fs::metadata(path).await {
+        Ok(meta) => {
+            meta.len() as i64 == seen.size
+                && meta
+                    .modified()
+                    .map(mtime_ns)
+                    .is_ok_and(|t| t == seen.mtime_ns)
+        }
+        Err(_) => false,
+    }
+}
+
+/// Claim a name in `target_dir` that nothing else has: `name` if it is free,
+/// else `stem-<time>.ext`, else with a counter. The file is created empty, so
+/// the name is held (`create_new` is atomic) until the move replaces it.
+async fn reserve_name(target_dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) => (stem.to_string(), format!(".{ext}")),
+        None => (name.to_string(), String::new()),
+    };
+    let stamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    for attempt in 0..1000u32 {
+        let candidate = match attempt {
+            0 => name.to_string(),
+            1 => format!("{stem}-{stamp}{ext}"),
+            n => format!("{stem}-{stamp}-{n}{ext}"),
+        };
+        let path = target_dir.join(candidate);
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+        {
+            Ok(_) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "no unused name in the destination folder",
+    ))
+}
+
 /// Move `path` into `dir/destination/`, never overwriting, with the reason in
 /// a `.txt` beside it when there is one.
 async fn move_aside(
@@ -295,19 +358,11 @@ async fn move_aside(
 ) -> std::io::Result<()> {
     let target_dir = dir.join(destination);
     tokio::fs::create_dir_all(&target_dir).await?;
-    let mut target = target_dir.join(name);
-    if target.exists() {
-        let stamp = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let (stem, ext) = match name.rsplit_once('.') {
-            Some((stem, ext)) => (stem.to_string(), format!(".{ext}")),
-            None => (name.to_string(), String::new()),
-        };
-        target = target_dir.join(format!("{stem}-{stamp}{ext}"));
+    let target = reserve_name(&target_dir, name).await?;
+    if let Err(e) = tokio::fs::rename(path, &target).await {
+        let _ = tokio::fs::remove_file(&target).await; // the empty placeholder
+        return Err(e);
     }
-    tokio::fs::rename(path, &target).await?;
     if let Some(note) = note {
         let mut sidecar = target.clone().into_os_string();
         sidecar.push(".why.txt");
@@ -695,9 +750,13 @@ async fn import_session_file(state: &AppState, file: &SessionFile) {
     }
 }
 
-/// The conversation as stored: one JSON object per line, the text only.
-fn transcript(messages: &[adapters::NormalizedMessage]) -> Vec<u8> {
-    let mut out = String::new();
+/// The conversation as stored: a first line naming the session, then one JSON
+/// object per message, the text only. The session line keeps two sessions that
+/// happen to say the same things (a copied or forked one) from being stored as
+/// one artifact.
+fn transcript(session_id: &str, messages: &[adapters::NormalizedMessage]) -> Vec<u8> {
+    let mut out = json!({ "session_id": session_id }).to_string();
+    out.push('\n');
     for m in messages {
         out.push_str(
             &json!({
@@ -722,7 +781,7 @@ pub(crate) async fn import_claude_code_session(
     let Some(session_id) = session.session_id.clone() else {
         return Err(ApiError::BadRequest("session has no id".into()));
     };
-    let text = transcript(&session.messages);
+    let text = transcript(&session_id, &session.messages);
     let mut tx = state.pool.begin().await?;
     // One writer per session, whichever door it came in by.
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
@@ -763,24 +822,24 @@ pub(crate) async fn import_claude_code_session(
                 json!({ "session_id": session_id, "cwd": session.cwd }),
             )
             .await?;
-            let added = if stored.deduplicated {
-                0 // this very transcript is already stored
-            } else {
-                let conversation = adapters::NormalizedConversation {
-                    external_id: Some(session_id.clone()),
-                    title: session.title.clone(),
-                    model: session.model.clone(),
-                    started_at: session.started_at,
-                    ended_at: session.ended_at,
-                    messages: session.messages.clone(),
-                };
-                let (_, messages) =
-                    persist_conversations(&mut tx, stored.id, "claude_code", &[conversation])
-                        .await?;
+            // A conversation for this session is stored whether or not the
+            // artifact was new: the session line makes the transcript unique
+            // to it, but an artifact left over from an earlier import still
+            // has to get its conversation.
+            let conversation = adapters::NormalizedConversation {
+                external_id: Some(session_id.clone()),
+                title: session.title.clone(),
+                model: session.model.clone(),
+                started_at: session.started_at,
+                ended_at: session.ended_at,
+                messages: session.messages.clone(),
+            };
+            let (_, added) =
+                persist_conversations(&mut tx, stored.id, "claude_code", &[conversation]).await?;
+            if !stored.deduplicated {
                 metrics::counter!("gather_ingest_artifacts_total", "kind" => "agent_log")
                     .increment(1);
-                messages
-            };
+            }
             sqlx::query(
                 "UPDATE ingestion_jobs SET status = 'completed', finished_at = now(), stats = $2
                  WHERE id = $1",
@@ -909,10 +968,64 @@ mod tests {
         let session = claude_code::parse_str(
             r#"{"type":"user","uuid":"u1","sessionId":"s","timestamp":"2026-03-01T09:00:00Z","message":{"role":"user","content":"I use Postgres."}}"#,
         );
-        let text = String::from_utf8(transcript(&session.messages)).unwrap();
-        let line: Value = serde_json::from_str(text.trim()).unwrap();
+        let text = String::from_utf8(transcript("s", &session.messages)).unwrap();
+        let mut lines = text.lines();
+        let header: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        assert_eq!(header["session_id"], "s");
+        let line: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        assert!(lines.next().is_none());
         assert_eq!(line["role"], "user");
         assert_eq!(line["content"], "I use Postgres.");
+    }
+
+    #[tokio::test]
+    async fn an_archived_file_never_takes_the_place_of_another() {
+        let dir = std::env::temp_dir().join(format!("gather-reserve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.json"), "first").unwrap();
+
+        // The plain name is taken, and so are the time-stamped ones as they
+        // are handed out: each caller gets a name of its own.
+        let mut names = std::collections::HashSet::new();
+        for _ in 0..4 {
+            let path = reserve_name(&dir, "a.json").await.unwrap();
+            assert!(names.insert(path.clone()), "{path:?} handed out twice");
+            assert_ne!(path, dir.join("a.json"));
+            assert!(path.to_string_lossy().ends_with(".json"));
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.json")).unwrap(),
+            "first"
+        );
+        // A free name is used as it is.
+        assert_eq!(
+            reserve_name(&dir, "fresh.md").await.unwrap(),
+            dir.join("fresh.md")
+        );
+        // Names without an extension work too.
+        assert!(reserve_name(&dir, "README").await.is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_file_that_changed_is_not_the_one_that_was_read() {
+        let dir = std::env::temp_dir().join(format!("gather-same-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("export.json");
+        std::fs::write(&path, "[]").unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let seen = Seen {
+            size: meta.len() as i64,
+            mtime_ns: mtime_ns(meta.modified().unwrap()),
+        };
+        assert!(still_the_same(&path, &seen).await);
+        std::fs::write(&path, "[1, 2, 3]").unwrap();
+        assert!(!still_the_same(&path, &seen).await, "size changed");
+        std::fs::remove_file(&path).unwrap();
+        assert!(!still_the_same(&path, &seen).await, "gone");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn write_zip(path: &Path, files: &[(&str, &[u8])]) {

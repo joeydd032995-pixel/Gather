@@ -412,3 +412,72 @@ async fn claude_code_sessions_are_imported_and_grow_without_repeating() {
 
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[tokio::test]
+async fn two_sessions_that_say_the_same_things_are_both_kept() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let marker = Uuid::new_v4().simple().to_string();
+    let root = temp_dir("twins");
+    // A session and a copy of it under another id: same messages, same
+    // message ids, same times.
+    let body = |id: &str| {
+        let mut text = String::new();
+        for (uuid, kind, said, at) in [
+            (
+                "u1",
+                "user",
+                format!("I back up with restic {marker}."),
+                "2026-03-01T09:00:00Z",
+            ),
+            (
+                "a1",
+                "assistant",
+                "Good.".to_string(),
+                "2026-03-01T09:00:05Z",
+            ),
+        ] {
+            text += &session_line(kind, uuid, None, &said, at).replace("SESSION", id);
+            text.push('\n');
+        }
+        text
+    };
+    let first = format!("first-{marker}");
+    let second = format!("second-{marker}");
+    put(
+        &root.join("p").join("first.jsonl"),
+        body(&first).as_bytes(),
+        60,
+    );
+    put(
+        &root.join("p").join("second.jsonl"),
+        body(&second).as_bytes(),
+        60,
+    );
+
+    autoimport::scan_claude_code(&state, &root).await.unwrap();
+
+    for id in [&first, &second] {
+        let (messages,): (i64,) = sqlx::query_as(
+            "SELECT count(m.id) FROM conversations c JOIN messages m ON m.conversation_id = c.id \
+             WHERE c.source_platform = 'claude_code' AND c.external_id = $1",
+        )
+        .bind(id)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        assert_eq!(messages, 2, "session {id} keeps its own conversation");
+    }
+    let (sessions,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM import_sources WHERE kind = 'claude_code' AND status = 'imported' \
+         AND session_id LIKE '%' || $1",
+    )
+    .bind(&marker)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(sessions, 2);
+
+    std::fs::remove_dir_all(&root).unwrap();
+}

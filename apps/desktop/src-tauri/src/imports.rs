@@ -6,7 +6,7 @@
 //! these folders and nothing is sent anywhere.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -86,6 +86,35 @@ fn saved(data: &Path) -> bool {
     data.join(FILE).is_file()
 }
 
+/// The folder as the file system sees it: links followed, for whatever of it
+/// exists, and the rest appended. Checks against the home folder and the
+/// folders people keep their files in must be made on this, or `Documents/..`
+/// or a link to `Documents` would pass as some other folder. A path with `..`
+/// in it is refused rather than interpreted.
+fn resolve(path: &Path) -> Result<PathBuf, String> {
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err("Give the folder's full path, without “..” in it.".to_string());
+    }
+    let mut existing = path.to_path_buf();
+    let mut rest = Vec::new();
+    while !existing.exists() {
+        match existing.file_name() {
+            Some(name) => rest.push(name.to_os_string()),
+            None => break,
+        }
+        if !existing.pop() {
+            break;
+        }
+    }
+    let base = fs::canonicalize(&existing)
+        .map_err(|e| format!("Can't use {}: {e}", existing.display()))?;
+    let mut resolved = dunce::simplified(&base).to_path_buf();
+    for part in rest.into_iter().rev() {
+        resolved.push(part);
+    }
+    Ok(resolved)
+}
+
 /// Check the inbox folder: an absolute path to a folder made for this, not
 /// one that holds someone's files (everything read there is moved into a
 /// `done` folder inside it).
@@ -98,6 +127,10 @@ pub fn check_inbox(path: &str, home: Option<&Path>) -> Result<PathBuf, String> {
     if !folder.is_absolute() || path.contains('\0') {
         return Err("The inbox needs a full folder path.".to_string());
     }
+    // Everything below is judged on where the folder really is.
+    let folder = resolve(&folder)?;
+    let home = home.map(|h| resolve(h).unwrap_or_else(|_| h.to_path_buf()));
+    let home = home.as_deref();
     if folder.parent().is_none() || folder.components().count() < 3 {
         return Err("Choose a folder of its own, not a drive or a top-level folder.".to_string());
     }
@@ -209,6 +242,48 @@ mod tests {
         assert!(check_inbox("/home/sam/Gather Inbox", Some(home)).is_ok());
         assert!(check_inbox("/home/sam/Documents/Gather Inbox", Some(home)).is_ok());
         assert!(check_inbox("/srv/gather-inbox", Some(home)).is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn another_spelling_of_a_protected_folder_is_still_protected() {
+        let home = temp("spelling");
+        fs::create_dir_all(home.join("Documents")).unwrap();
+        let home_str = home.display().to_string();
+
+        // `..` is refused, not interpreted.
+        let err = check_inbox(&format!("{home_str}/Documents/.."), Some(&home)).unwrap_err();
+        assert!(err.contains(".."), "{err}");
+        let err = check_inbox(
+            &format!("{home_str}/Gather Inbox/../Documents"),
+            Some(&home),
+        );
+        assert!(err.is_err());
+
+        // A link to Documents, or to the home folder, is that folder.
+        std::os::unix::fs::symlink(home.join("Documents"), home.join("inbox-link")).unwrap();
+        let err = check_inbox(&format!("{home_str}/inbox-link"), Some(&home)).unwrap_err();
+        assert!(err.contains("holds your own files"), "{err}");
+        std::os::unix::fs::symlink(&home, home.join("home-link")).unwrap();
+        let err = check_inbox(&format!("{home_str}/home-link"), Some(&home)).unwrap_err();
+        assert!(err.contains("holds your own files"), "{err}");
+        // A link inside a protected folder to somewhere else is fine, and the
+        // saved path is where it really is.
+        let elsewhere = temp("spelling-elsewhere");
+        std::os::unix::fs::symlink(&elsewhere, home.join("to-elsewhere")).unwrap();
+        let ok = check_inbox(&format!("{home_str}/to-elsewhere"), Some(&home)).unwrap();
+        assert_eq!(ok, fs::canonicalize(&elsewhere).unwrap());
+        // A folder that doesn't exist yet is judged on its real parent.
+        std::os::unix::fs::symlink(home.join("Documents"), home.join("docs-link")).unwrap();
+        let ok = check_inbox(&format!("{home_str}/docs-link/Gather Inbox"), Some(&home)).unwrap();
+        assert_eq!(
+            ok,
+            fs::canonicalize(home.join("Documents"))
+                .unwrap()
+                .join("Gather Inbox")
+        );
+        let _ = fs::remove_dir_all(home);
+        let _ = fs::remove_dir_all(elsewhere);
     }
 
     #[test]

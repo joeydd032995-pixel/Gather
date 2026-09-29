@@ -93,43 +93,65 @@ fn title(question: &str) -> String {
     }
 }
 
-/// A fence line opens or closes a code block: at most three spaces of
-/// indent, then three or more backticks or tildes.
-fn fence_marker(line: &str) -> Option<char> {
+/// An open code fence: what it was opened with. A block opened with four
+/// backticks is not closed by three, and a `~~~` block is not closed by
+/// backticks.
+#[derive(Clone, Copy)]
+struct Fence {
+    ch: char,
+    len: usize,
+}
+
+/// A line that could open or close a code block: at most three spaces of
+/// indent, then three or more backticks or tildes. The flag says whether
+/// nothing but spaces follows them, which a closing fence requires.
+fn fence_line(line: &str) -> Option<(Fence, bool)> {
     let indent = line.len() - line.trim_start_matches(' ').len();
     if indent > 3 {
         return None;
     }
     let rest = &line[indent..];
     let ch = rest.chars().next().filter(|c| *c == '`' || *c == '~')?;
-    (rest.chars().take_while(|c| *c == ch).count() >= 3).then_some(ch)
+    let len = rest.chars().take_while(|c| *c == ch).count();
+    (len >= 3).then(|| (Fence { ch, len }, rest[len..].trim().is_empty()))
+}
+
+/// Advance `fence` over `line`; true when the line belongs to a code block
+/// (its opening and closing lines included).
+fn in_code_block(fence: &mut Option<Fence>, line: &str) -> bool {
+    match (*fence, fence_line(line)) {
+        (Some(open), Some((f, bare))) if bare && f.ch == open.ch && f.len >= open.len => {
+            *fence = None;
+            true
+        }
+        (Some(_), _) => true,
+        (None, Some((f, _))) => {
+            *fence = Some(f);
+            true
+        }
+        (None, None) => false,
+    }
 }
 
 fn split_turns(text: &str) -> Vec<Turn<'_>> {
     let mut turns: Vec<Turn<'_>> = Vec::new();
-    let mut fence: Option<char> = None;
+    let mut fence: Option<Fence> = None;
     // The last non-blank line outside a code block, and whether anything but
     // the logo has come before the first question.
     let mut previous: Option<&str> = None;
     let mut preamble_is_logo_only = true;
 
     for line in text.lines() {
-        if let Some(open) = fence {
-            if fence_marker(line) == Some(open) {
-                fence = None;
-            }
-            if let Some(turn) = turns.last_mut() {
-                turn.body.push(line);
-            }
-            continue;
-        }
-        if let Some(marker) = fence_marker(line) {
-            fence = Some(marker);
+        let was_in_block = fence.is_some();
+        if in_code_block(&mut fence, line) {
             match turns.last_mut() {
                 Some(turn) => turn.body.push(line),
-                None => preamble_is_logo_only = false,
+                None if !was_in_block => preamble_is_logo_only = false,
+                None => {}
             }
-            previous = Some(line);
+            if !was_in_block {
+                previous = Some(line);
+            }
             continue;
         }
 
@@ -178,19 +200,13 @@ fn split_turns(text: &str) -> Vec<Turn<'_>> {
 /// listed underneath.
 fn answer_text(body: &[&str]) -> String {
     let mut sources: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
-    let mut kept: Vec<&str> = Vec::with_capacity(body.len());
-    let mut fence: Option<char> = None;
+    // Each kept line, and whether it is inside a code block (whose text is
+    // left exactly as it is).
+    let mut kept: Vec<(&str, bool)> = Vec::with_capacity(body.len());
+    let mut fence: Option<Fence> = None;
     for line in body {
-        if let Some(open) = fence {
-            if fence_marker(line) == Some(open) {
-                fence = None;
-            }
-            kept.push(line);
-            continue;
-        }
-        if let Some(marker) = fence_marker(line) {
-            fence = Some(marker);
-            kept.push(line);
+        if in_code_block(&mut fence, line) {
+            kept.push((line, true));
             continue;
         }
         let trimmed = line.trim();
@@ -209,22 +225,29 @@ fn answer_text(body: &[&str]) -> String {
             }
             continue;
         }
-        kept.push(line);
+        kept.push((line, false));
     }
 
-    let joined = kept.join("\n");
     let mut cited: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
-    let renumbered = FOOTNOTE_REF.replace_all(&joined, |caps: &regex::Captures<'_>| {
-        match caps[1].parse::<u32>() {
-            Ok(n) if sources.contains_key(&n) => {
-                cited.insert(n);
-                format!("[{n}]")
+    let lines: Vec<std::borrow::Cow<'_, str>> = kept
+        .iter()
+        .map(|(line, in_code)| {
+            if *in_code {
+                return std::borrow::Cow::Borrowed(*line);
             }
-            _ => String::new(),
-        }
-    });
+            FOOTNOTE_REF.replace_all(line, |caps: &regex::Captures<'_>| {
+                match caps[1].parse::<u32>() {
+                    Ok(n) if sources.contains_key(&n) => {
+                        cited.insert(n);
+                        format!("[{n}]")
+                    }
+                    _ => String::new(),
+                }
+            })
+        })
+        .collect();
 
-    let mut answer = renumbered.trim().to_string();
+    let mut answer = lines.join("\n").trim().to_string();
     if !cited.is_empty() {
         answer.push_str("\n\nSources:");
         for n in &cited {
@@ -404,6 +427,33 @@ Lock forecasts.[^3_2]
             .as_str()
             .unwrap()
             .contains("# Not a question"));
+    }
+
+    #[test]
+    fn a_longer_fence_is_not_closed_by_a_shorter_one() {
+        // A four-backtick block showing a three-backtick example: the inner
+        // fence does not end it, so the divider, heading and footnote-looking
+        // line inside stay part of the answer.
+        let text = "# Question\n\nHere is markdown:\n\n````markdown\n```text\ncode\n```\n\n---\n\n# Not a question\n\n[^1_1]: https://example.com/inside\n````\n\nAfter.[^1_2]\n\n[^1_2]: https://example.com/real\n\n---\n\n# Second question\n\nDone.\n";
+        let thread = parse(text).unwrap();
+        let entries = thread["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2, "{thread}");
+        let answer = entries[0]["answer"].as_str().unwrap();
+        assert!(answer.contains("# Not a question"));
+        assert!(
+            answer.contains("[^1_1]: https://example.com/inside"),
+            "kept as code"
+        );
+        assert!(answer.contains("After.[2]"));
+        assert!(answer.ends_with("Sources:\n[2] https://example.com/real"));
+        assert_eq!(entries[1]["query"], "Second question");
+        // A tilde fence is closed by tildes, not backticks; an info string
+        // does not close a fence.
+        let text = "# Q\n\n~~~\n```\n---\n\n# Inner\n~~~\n\nAfter\n";
+        let entries = parse(text).unwrap()["entries"].as_array().unwrap().len();
+        assert_eq!(entries, 1);
+        let text = "# Q\n\n```\n```rust\n---\n\n# Inner\n```\n\nAfter\n";
+        assert_eq!(parse(text).unwrap()["entries"].as_array().unwrap().len(), 1);
     }
 
     #[test]
