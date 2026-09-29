@@ -115,6 +115,35 @@ The first start takes a little longer. Gather creates your private database (you
    statement links them, and each file joined to what it mentions. Click a dot for details;
    drag, scroll and "Find in graph" to explore.
 
+### Bringing in your conversations
+
+Gather can read your conversations with AI assistants, and it stays offline while it does:
+it never signs in to any service, and only reads files and folders you choose.
+
+- **Claude Code** keeps every session on your computer. Turn on **Settings → Automatic
+  import → Import my Claude Code conversations** and Gather reads those files once a session
+  has been quiet for a moment, and again as it grows, adding only what is new. Only what was
+  said is kept, not the files and command output Claude Code worked with.
+- **ChatGPT, Claude (chat), Gemini, Grok, Copilot, Perplexity** keep conversations on their
+  own servers, so each one's own “export my data” option is the way in (usually in its
+  settings, under data or privacy controls). It gives you a file, often a `.zip`. Either drop
+  it on the Upload tab, or turn on **Watch an import folder** in **Settings → Automatic
+  import** and drop it in that folder: Gather recognises which service it came from, reads it,
+  moves it to a `done` folder, and moves anything it couldn't read to a `failed` folder with a
+  note saying why. Nothing is deleted.
+- **Perplexity** can export a thread as Markdown (or PDF); Markdown is best. Gather reads it as
+  a conversation: your questions and its answers, with each answer's numbered sources. (A PDF
+  is added as an ordinary document.)
+- From **ChatGPT** exports Gather keeps the conversation, not ChatGPT's hidden standing
+  instructions or the output of its tools (web searches, code runs). If a file has the right
+  shape for an export but no messages can be read from it, it goes to the `failed` folder with
+  a note saying so, rather than being filed as imported.
+- Gemini exports come from Google Takeout (*My Activity → Gemini Apps*); Takeout often leaves
+  out the answers, so those conversations hold only your prompts.
+
+Choose a folder just for this. Gather refuses your Documents or Downloads folder, or one that
+already holds many files, because it moves what it reads out of the import folder.
+
 The other tabs fill in only when Gather has something for you to decide:
 
 | Tab | Shows | Checked about every |

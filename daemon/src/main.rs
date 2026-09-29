@@ -150,6 +150,9 @@ async fn run() -> anyhow::Result<()> {
     };
 
     tokio::spawn(gather_daemon::gauge_refresher(pool.clone()));
+    // Watches the inbox folder and Claude Code's sessions when either is set
+    // up (GATHER_INBOX_DIR, GATHER_CLAUDE_CODE_DIR); otherwise returns at once.
+    tokio::spawn(gather_daemon::autoimport::worker_loop(state.clone()));
     if config.extraction_enabled {
         tokio::spawn(gather_daemon::extract::worker_loop(
             pool.clone(),

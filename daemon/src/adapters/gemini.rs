@@ -26,6 +26,8 @@ pub fn parse(data: &Value) -> Result<AdapterOutput, AdapterError> {
         let Some(title) = record.get("title").and_then(Value::as_str) else {
             continue; // non-prompt activity rows (e.g. "Used Gemini Apps")
         };
+        // Takeout puts a non-breaking space after "Prompted".
+        let title = title.replace('\u{a0}', " ");
         let Some(prompt) = title.strip_prefix(PROMPT_PREFIX) else {
             continue;
         };
@@ -48,11 +50,8 @@ pub fn parse(data: &Value) -> Result<AdapterOutput, AdapterError> {
             content: prompt.to_string(),
             created_at: time,
         }];
-        if let Some(html) = record
-            .pointer("/safeHtmlItem/htmlValue")
-            .and_then(Value::as_str)
-        {
-            let text = strip_html(html);
+        if let Some(html) = response_html(record) {
+            let text = strip_html(&html);
             if !text.is_empty() {
                 messages.push(NormalizedMessage {
                     external_id: None,
@@ -85,6 +84,26 @@ pub fn parse(data: &Value) -> Result<AdapterOutput, AdapterError> {
         source_format_version: FORMAT,
         conversations,
     })
+}
+
+/// The response HTML of an activity record: `safeHtmlItem` is a list of
+/// `{html}` objects in Takeout (a single `{htmlValue}` object in older
+/// exports); the parts of a list are joined.
+fn response_html(record: &Value) -> Option<String> {
+    let item = record.get("safeHtmlItem")?;
+    let one = |v: &Value| -> Option<String> {
+        v.get("html")
+            .or_else(|| v.get("htmlValue"))
+            .and_then(Value::as_str)
+            .map(String::from)
+    };
+    match item {
+        Value::Array(parts) => {
+            let joined: Vec<String> = parts.iter().filter_map(one).collect();
+            (!joined.is_empty()).then(|| joined.join("\n"))
+        }
+        other => one(other),
+    }
 }
 
 /// Minimal tag stripper for Takeout's sanitized HTML: drops tags, decodes
@@ -156,6 +175,27 @@ mod tests {
         assert_eq!(conv.messages[1].role, "assistant");
         assert_eq!(conv.messages[1].content, "Your budget is $75 per month.");
         assert!(conv.started_at.is_some());
+    }
+
+    #[test]
+    fn parses_the_takeout_shape() {
+        // A list of {html} parts and a non-breaking space after "Prompted".
+        let export = json!([{
+            "header": "Gemini Apps",
+            "title": "Prompted\u{a0}how do I back up Postgres",
+            "time": "2026-02-01T08:01:00.5Z",
+            "products": ["Gemini Apps"],
+            "safeHtmlItem": [
+                {"html": "<p>Use <code>pg_dump</code>.</p>"},
+                {"html": "<p>Test the restore.</p>"}
+            ]
+        }]);
+        let out = parse(&export).unwrap();
+        let conv = &out.conversations[0];
+        assert_eq!(conv.messages[0].content, "how do I back up Postgres");
+        assert_eq!(conv.messages.len(), 2);
+        assert!(conv.messages[1].content.contains("Use pg_dump"));
+        assert!(conv.messages[1].content.contains("Test the restore."));
     }
 
     #[test]

@@ -8,11 +8,14 @@
 
 pub mod chatgpt;
 pub mod claude;
+pub mod claude_code;
 pub mod copilot;
 pub mod gemini;
 pub mod generic;
 pub mod grok;
 pub mod perplexity;
+pub mod perplexity_md;
+pub mod sniff;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -74,8 +77,10 @@ pub fn normalize(platform: &str, data: &Value) -> Result<AdapterOutput, AdapterE
 }
 
 pub(crate) fn normalize_role(raw: &str) -> String {
-    match raw {
-        "system" | "user" | "assistant" | "tool" | "function" => raw.to_string(),
+    // Exports differ in case (`ASSISTANT`, `Human`): compare without it.
+    let lower = raw.trim().to_ascii_lowercase();
+    match lower.as_str() {
+        "system" | "user" | "assistant" | "tool" | "function" => lower,
         "human" => "user".to_string(),
         "ai" | "model" | "bot" => "assistant".to_string(),
         _ => "other".to_string(),

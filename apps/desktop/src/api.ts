@@ -468,6 +468,24 @@ export interface DaemonStatus {
   };
   /** The latest job to read earlier files with the AI model; null if none yet. */
   reread: RereadJob | null;
+  /** Automatic import: what is watched and what has been read. */
+  import: {
+    inbox_dir: string | null;
+    claude_code_dir: string | null;
+    /** Claude Code sessions imported. */
+    sessions: number;
+    /** Inbox files read. */
+    inbox_done: number;
+    /** Files that could not be read (in the inbox's failed folder, with why). */
+    needs_attention: number;
+    recent: {
+      name: string | null;
+      kind: "claude_code" | "inbox";
+      status: "imported" | "unrecognized" | "failed";
+      detail: string | null;
+      at: string;
+    }[];
+  };
 }
 
 export interface RereadJob {

@@ -47,6 +47,7 @@ pub async fn status(State(state): State<AppState>) -> Result<Json<Value>, crate:
         },
         "reading": reading,
         "reread": crate::extract::reread::latest(&state.pool).await?,
+        "import": crate::autoimport::summary(&state.pool, &state).await?,
     })))
 }
 

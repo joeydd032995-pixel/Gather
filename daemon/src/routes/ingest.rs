@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::adapters::{self, NormalizedConversation};
+use crate::adapters::{self, NormalizedConversation, NormalizedMessage};
 use crate::error::ApiError;
 use crate::extract::formats;
 use crate::extract::segment::{Segment, Segments};
@@ -38,7 +38,7 @@ pub struct StoredArtifact {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn store_artifact(
+pub(crate) async fn store_artifact(
     tx: &mut Transaction<'_, Postgres>,
     kind: &str,
     source_platform: &str,
@@ -126,7 +126,7 @@ pub(crate) async fn finish_job(
     Ok(())
 }
 
-async fn persist_conversations(
+pub(crate) async fn persist_conversations(
     tx: &mut Transaction<'_, Postgres>,
     artifact_id: Uuid,
     source_platform: &str,
@@ -156,39 +156,53 @@ async fn persist_conversations(
         // resolve parent_message_id from previously inserted external ids.
         let mut id_by_external: std::collections::HashMap<String, Uuid> =
             std::collections::HashMap::new();
-        for (seq, msg) in conv.messages.iter().enumerate() {
-            let parent_id = msg
-                .parent_external_id
-                .as_ref()
-                .and_then(|ext| id_by_external.get(ext))
-                .copied();
-            let (message_id,): (Uuid,) = sqlx::query_as(
-                r#"
-                INSERT INTO messages
-                    (conversation_id, external_id, parent_message_id, seq,
-                     role, author, model, content, created_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                RETURNING id
-                "#,
-            )
-            .bind(conversation_id)
-            .bind(&msg.external_id)
-            .bind(parent_id)
-            .bind(seq as i32)
-            .bind(&msg.role)
-            .bind(&msg.author)
-            .bind(&msg.model)
-            .bind(&msg.content)
-            .bind(msg.created_at)
-            .fetch_one(&mut **tx)
-            .await?;
-            if let Some(ext) = &msg.external_id {
-                id_by_external.insert(ext.clone(), message_id);
-            }
-            message_count += 1;
-        }
+        message_count +=
+            insert_messages(tx, conversation_id, 0, &conv.messages, &mut id_by_external).await?;
     }
     Ok((conversations.len(), message_count))
+}
+
+/// Insert `messages` into a conversation from sequence number `first_seq`.
+/// `id_by_external` maps the external ids already stored (and is extended
+/// with the new ones), so a message's parent resolves across batches.
+pub(crate) async fn insert_messages(
+    tx: &mut Transaction<'_, Postgres>,
+    conversation_id: Uuid,
+    first_seq: i32,
+    messages: &[NormalizedMessage],
+    id_by_external: &mut std::collections::HashMap<String, Uuid>,
+) -> Result<usize, ApiError> {
+    for (offset, msg) in messages.iter().enumerate() {
+        let parent_id = msg
+            .parent_external_id
+            .as_ref()
+            .and_then(|ext| id_by_external.get(ext))
+            .copied();
+        let (message_id,): (Uuid,) = sqlx::query_as(
+            r#"
+            INSERT INTO messages
+                (conversation_id, external_id, parent_message_id, seq,
+                 role, author, model, content, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            RETURNING id
+            "#,
+        )
+        .bind(conversation_id)
+        .bind(&msg.external_id)
+        .bind(parent_id)
+        .bind(first_seq + offset as i32)
+        .bind(&msg.role)
+        .bind(&msg.author)
+        .bind(&msg.model)
+        .bind(&msg.content)
+        .bind(msg.created_at)
+        .fetch_one(&mut **tx)
+        .await?;
+        if let Some(ext) = &msg.external_id {
+            id_by_external.insert(ext.clone(), message_id);
+        }
+    }
+    Ok(messages.len())
 }
 
 // ---------------------------------------------------------------------------
@@ -231,9 +245,33 @@ pub(crate) async fn chat_export_core(
 ) -> Result<ChatExportResponse, ApiError> {
     let normalized = adapters::normalize(&req.platform, &req.data)
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-
-    let raw = serde_json::to_vec(&req.data).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     let job_id = create_job(&state.pool, source).await?;
+    let response = store_chat_export(state, &req, &normalized, job_id).await?;
+
+    finish_job(
+        &state.pool,
+        job_id,
+        true,
+        json!({
+            "conversations": response.conversations,
+            "messages": response.messages,
+            "deduplicated": response.deduplicated,
+        }),
+    )
+    .await?;
+    Ok(response)
+}
+
+/// Store a normalized chat export under an existing ingestion job: the
+/// artifact (deduplicated by content hash) and its conversations. The caller
+/// owns the job's start and finish.
+async fn store_chat_export(
+    state: &AppState,
+    req: &ChatExportRequest,
+    normalized: &adapters::AdapterOutput,
+    job_id: Uuid,
+) -> Result<ChatExportResponse, ApiError> {
+    let raw = serde_json::to_vec(&req.data).map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
     let mut tx = state.pool.begin().await?;
     let stored = store_artifact(
@@ -256,14 +294,6 @@ pub(crate) async fn chat_export_core(
         persist_conversations(&mut tx, stored.id, &req.platform, &normalized.conversations).await?
     };
     tx.commit().await?;
-
-    finish_job(
-        &state.pool,
-        job_id,
-        true,
-        json!({"conversations": conv_count, "messages": msg_count, "deduplicated": stored.deduplicated}),
-    )
-    .await?;
 
     metrics::counter!("gather_ingest_artifacts_total", "kind" => "chat_export").increment(1);
     metrics::counter!("gather_ingest_messages_total", "platform" => req.platform.clone())
@@ -672,6 +702,38 @@ pub(crate) async fn ingest_one_file(
         }
         _ => None,
     };
+
+    // A Perplexity Markdown export is a conversation, not a document: keep
+    // who asked and who answered, and each turn's sources.
+    if kind == "document_markdown" {
+        if let Some((_, text)) = &text {
+            if adapters::perplexity_md::looks_like(text) {
+                if let Some(thread) = adapters::perplexity_md::parse(text) {
+                    let req = ChatExportRequest {
+                        platform: "perplexity".to_string(),
+                        data: thread,
+                        filename: Some(filename.to_string()),
+                    };
+                    let normalized = adapters::normalize(&req.platform, &req.data)
+                        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+                    let stored = store_chat_export(state, &req, &normalized, job_id).await?;
+                    return Ok(FileResult {
+                        filename: filename.to_string(),
+                        kind: Some("chat_export".to_string()),
+                        artifact_id: Some(stored.artifact_id),
+                        deduplicated: stored.deduplicated,
+                        status: if stored.deduplicated {
+                            "deduplicated".to_string()
+                        } else {
+                            "accepted".to_string()
+                        },
+                        detail: Some(format!("Perplexity thread: {} messages", stored.messages)),
+                        segments: 0,
+                    });
+                }
+            }
+        }
+    }
 
     let mut tx = state.pool.begin().await?;
     let stored = store_artifact(

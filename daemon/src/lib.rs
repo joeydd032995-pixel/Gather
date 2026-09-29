@@ -1,6 +1,7 @@
 pub mod adapters;
 pub mod auth;
 pub mod auth_token;
+pub mod autoimport;
 pub mod cluster;
 pub mod config;
 pub mod db;

@@ -65,6 +65,15 @@ pub struct Config {
     pub extraction_interval_secs: u64,
     /// Max rows claimed per queue per pass.
     pub extraction_batch: i64,
+    /// GATHER_INBOX_DIR: a folder Gather watches for exports and documents
+    /// dropped into it (read, then moved to `done/`). Unset = off.
+    pub inbox_dir: Option<std::path::PathBuf>,
+    /// GATHER_CLAUDE_CODE_DIR: the folder Claude Code keeps its session
+    /// transcripts in (usually `~/.claude/projects`), imported as they grow.
+    /// Unset = off.
+    pub claude_code_dir: Option<std::path::PathBuf>,
+    /// Seconds between looks at those two folders.
+    pub autoimport_interval_secs: u64,
     /// While a local AI model is in use, the share of time (10-100) the
     /// extraction worker may spend working; it pauses for the rest, which
     /// keeps the model from using every core for hours after a big import.
@@ -405,6 +414,15 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .map(|v: u64| v.max(1))
                 .unwrap_or(30),
+            inbox_dir: set("GATHER_INBOX_DIR").ok().map(std::path::PathBuf::from),
+            claude_code_dir: set("GATHER_CLAUDE_CODE_DIR")
+                .ok()
+                .map(std::path::PathBuf::from),
+            autoimport_interval_secs: var("GATHER_AUTOIMPORT_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .map(|v: u64| v.clamp(5, 3600))
+                .unwrap_or(60),
             extraction_batch: var("GATHER_EXTRACTION_BATCH")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -565,6 +583,9 @@ impl Config {
             extraction_enabled: true,
             extraction_interval_secs: 30,
             extraction_batch: 8,
+            inbox_dir: None,
+            claude_code_dir: None,
+            autoimport_interval_secs: 60,
             extraction_ai_duty_percent: 100,
             tesseract_path: "tesseract".to_string(),
             ollama_url: None,
