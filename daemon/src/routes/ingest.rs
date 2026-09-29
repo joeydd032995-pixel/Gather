@@ -682,8 +682,10 @@ async fn ingest_as_chat(
         data,
         filename: Some(filename.to_string()),
     };
-    let normalized = adapters::normalize(&req.platform, &req.data)
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    // A file that only looks like a conversation is still a fine document.
+    let Ok(normalized) = adapters::normalize(&req.platform, &req.data) else {
+        return Ok(None);
+    };
     if normalized
         .conversations
         .iter()
@@ -795,6 +797,28 @@ pub(crate) async fn ingest_one_file(
                 "ChatGPT shared conversation",
             )
             .await?
+            {
+                return Ok(done);
+            }
+        }
+    }
+
+    // A saved chat export in JSON (a Grok share link's data, a ChatGPT or
+    // Claude export dropped on Upload) is a conversation, recognised by its
+    // shape as in the import folder.
+    if kind == "document_text" && filename.to_ascii_lowercase().ends_with(".json") {
+        let owned = bytes.to_vec();
+        let found = tokio::task::spawn_blocking(move || {
+            let data: serde_json::Value = serde_json::from_slice(&owned).ok()?;
+            let platform = adapters::sniff::platform_of(&data)?;
+            Some((platform, data))
+        })
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("chat export read failed: {e}")))?;
+        if let Some((platform, data)) = found {
+            let label = format!("{platform} conversation");
+            if let Some(done) =
+                ingest_as_chat(state, job_id, filename, platform, data, &label).await?
             {
                 return Ok(done);
             }
