@@ -581,7 +581,7 @@ pub async fn scan_claude_code(state: &AppState, root: &Path) -> anyhow::Result<b
     let root_owned = root.to_path_buf();
     let mut files = tokio::task::spawn_blocking(move || collect_sessions(&root_owned)).await?;
     // Newest first: what is being worked on shows up first.
-    files.sort_by(|a, b| b.modified.cmp(&a.modified));
+    files.sort_by_key(|f| std::cmp::Reverse(f.modified));
 
     let known: HashMap<String, (i64, i64)> =
         sqlx::query("SELECT path, size, mtime_ns FROM import_sources WHERE kind = 'claude_code'")
