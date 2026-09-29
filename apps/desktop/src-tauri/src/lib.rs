@@ -141,16 +141,25 @@ fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
 
 #[tauri::command]
 fn get_ai_settings(app: AppHandle) -> Result<ai::AiSettingsView, String> {
-    Ok(ai::load(&data_dir(&app)?))
+    Ok(ai::load(&data_dir(&app)?, memory::current().profile))
 }
 
 /// Save the AI model choice and restart Gather's background service with it.
+/// The search model is checked first: the database stores 768-number
+/// vectors, and any other model would leave search quietly broken.
 #[tauri::command]
-fn save_ai_settings(
+async fn save_ai_settings(
     app: AppHandle,
     runtime: State<'_, Arc<Runtime>>,
     settings: ai::AiSettings,
 ) -> Result<ai::AiSettings, String> {
+    let settings = ai::validate(&settings)?;
+    if settings.enabled {
+        let (url, model) = (settings.url.clone(), settings.embed_model.clone());
+        tauri::async_runtime::spawn_blocking(move || ai::check_embed_model(&url, &model))
+            .await
+            .map_err(|e| e.to_string())??;
+    }
     let saved = ai::save(&data_dir(&app)?, &settings)?;
     runtime.restart("Applying your AI model settings")?;
     Ok(saved)

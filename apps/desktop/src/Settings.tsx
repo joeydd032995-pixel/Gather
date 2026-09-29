@@ -455,8 +455,8 @@ function AiSection() {
         </div>
       )}
       <p className="hint panel-pad">
-        Files already in Gather keep what was found in them; the new model reads files you add from
-        now on.
+        Saving checks the search model with Ollama first, so keep Ollama running. Files already in
+        Gather keep what was found in them; the new model reads files you add from now on.
       </p>
     </Panel>
   );

@@ -104,9 +104,10 @@ worker logs how much is left once a minute (`extraction: still reading`), and
 
 In the desktop app, **Settings → AI model** sets these instead: the Ollama address, the model
 for reading files and the model for search, with a connection test that lists the models Ollama
-has. Saving writes `ai-settings.json` in the app-data folder and restarts the background service
+has. Saving first checks that the search model returns 768-dimension vectors, then writes `ai-settings.json` in the app-data folder and restarts the background service
 with `GATHER_OLLAMA_URL`, `GATHER_OLLAMA_MODEL` and `GATHER_OLLAMA_EMBED_MODEL` set from it (an
-empty URL when turned off). Until something is saved there, the app's own environment applies.
+empty URL when turned off; an address without a port gets Ollama's 11434). Until something is
+saved there, the app's own environment applies.
 
 With Ollama enabled you get LLM-extracted units, embeddings for units, segments and entities,
 semantic search, and embedding-based entity-merge and contradiction candidates. Without it,

@@ -16,9 +16,16 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::memory::Profile;
+
 const FILE: &str = "ai-settings.json";
 pub const DEFAULT_URL: &str = "http://127.0.0.1:11434";
 pub const DEFAULT_EMBED_MODEL: &str = "nomic-embed-text";
+/// The daemon's reading model when GATHER_OLLAMA_MODEL isn't set, on the
+/// standard memory profile (the low profile has none).
+const DAEMON_DEFAULT_CHAT_MODEL: &str = "llama3.2:3b";
+/// Vector size of the database's embedding columns.
+pub const EMBED_DIMENSIONS: usize = 768;
 /// Enough for Ollama's model list; anything bigger isn't Ollama.
 const MAX_RESPONSE: u64 = 1024 * 1024;
 
@@ -68,8 +75,9 @@ fn saved(data: &Path) -> Option<AiSettings> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// What Settings shows: the saved choice, else what the environment set up.
-pub fn load(data: &Path) -> AiSettingsView {
+/// What Settings shows: the saved choice, else what the environment set up
+/// (with the daemon's own default model for `profile` where it sets none).
+pub fn load(data: &Path, profile: Profile) -> AiSettingsView {
     if let Some(settings) = saved(data) {
         return AiSettingsView {
             settings,
@@ -81,9 +89,12 @@ pub fn load(data: &Path) -> AiSettingsView {
             settings: AiSettings {
                 enabled: true,
                 url,
-                chat_model: env("GATHER_OLLAMA_MODEL")
-                    .filter(|m| !m.eq_ignore_ascii_case("none"))
-                    .unwrap_or_default(),
+                chat_model: match env("GATHER_OLLAMA_MODEL") {
+                    Some(m) if m.eq_ignore_ascii_case("none") => String::new(),
+                    Some(m) => m,
+                    None if profile == Profile::Low => String::new(),
+                    None => DAEMON_DEFAULT_CHAT_MODEL.to_string(),
+                },
                 embed_model: env("GATHER_OLLAMA_EMBED_MODEL")
                     .unwrap_or_else(|| DEFAULT_EMBED_MODEL.to_string()),
             },
@@ -129,15 +140,27 @@ pub fn daemon_env(data: &Path) -> Vec<(&'static str, String)> {
     ]
 }
 
-fn validate(s: &AiSettings) -> Result<AiSettings, String> {
+/// Tidy and check settings; the address comes back as `http://host:port`,
+/// with Ollama's port filled in when it was left out.
+pub fn validate(s: &AiSettings) -> Result<AiSettings, String> {
     let url = s.url.trim().trim_end_matches('/').to_string();
     let chat_model = s.chat_model.trim().to_string();
     let embed_model = s.embed_model.trim().to_string();
-    if s.enabled {
-        parse_url(&url)?;
-        if embed_model.is_empty() {
-            return Err("Choose a model for search, e.g. nomic-embed-text.".to_string());
+    let url = if url.is_empty() {
+        DEFAULT_URL.to_string()
+    } else if s.enabled {
+        let (host, port) = parse_url(&url)?;
+        // The daemon's HTTP client would take a missing port as 80.
+        if host.contains(':') {
+            format!("http://[{host}]:{port}")
+        } else {
+            format!("http://{host}:{port}")
         }
+    } else {
+        url
+    };
+    if s.enabled && embed_model.is_empty() {
+        return Err("Choose a model for search, e.g. nomic-embed-text.".to_string());
     }
     for model in [&chat_model, &embed_model] {
         if !model
@@ -149,11 +172,7 @@ fn validate(s: &AiSettings) -> Result<AiSettings, String> {
     }
     Ok(AiSettings {
         enabled: s.enabled,
-        url: if url.is_empty() {
-            DEFAULT_URL.to_string()
-        } else {
-            url
-        },
+        url,
         chat_model,
         embed_model: if embed_model.is_empty() {
             DEFAULT_EMBED_MODEL.to_string()
@@ -217,8 +236,15 @@ struct Tag {
     name: String,
 }
 
-/// Ask Ollama at `url` which models it has.
-pub fn check(url: &str) -> Result<OllamaCheck, String> {
+/// One HTTP/1.0 request to Ollama at `url`: its status and body. HTTP/1.0
+/// so the reply comes whole and the connection then closes.
+fn request(
+    url: &str,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    wait: Duration,
+) -> Result<(u16, Vec<u8>), String> {
     let (host, port) = parse_url(url)?;
     let unreachable = || {
         format!(
@@ -234,39 +260,115 @@ pub fn check(url: &str) -> Result<OllamaCheck, String> {
         .iter()
         .find_map(|a| TcpStream::connect_timeout(a, Duration::from_millis(1500)).ok())
         .ok_or_else(unreachable)?;
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_read_timeout(Some(wait));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-    // HTTP/1.0: the reply comes whole and the connection then closes.
+    let host_header = if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    };
+    let mut head =
+        format!("{method} {path} HTTP/1.0\r\nHost: {host_header}\r\nAccept: application/json\r\n");
+    if let Some(body) = body {
+        head.push_str(&format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n",
+            body.len()
+        ));
+    }
+    head.push_str("\r\n");
+    head.push_str(body.unwrap_or(""));
     stream
-        .write_all(
-            format!(
-                "GET /api/tags HTTP/1.0\r\nHost: {host}:{port}\r\nAccept: application/json\r\n\r\n"
-            )
-            .as_bytes(),
-        )
+        .write_all(head.as_bytes())
         .map_err(|_| unreachable())?;
     let mut response = Vec::new();
     stream
         .take(MAX_RESPONSE)
         .read_to_end(&mut response)
         .map_err(|e| format!("Ollama didn't finish answering: {e}"))?;
-    parse_tags(&response)
+    split_response(&response)
 }
 
-fn parse_tags(response: &[u8]) -> Result<OllamaCheck, String> {
-    let not_ollama = || "Something answered, but it doesn't look like Ollama.".to_string();
+fn not_ollama() -> String {
+    "Something answered, but it doesn't look like Ollama.".to_string()
+}
+
+/// Status code and body of a raw HTTP response.
+fn split_response(response: &[u8]) -> Result<(u16, Vec<u8>), String> {
     let split = response
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
         .ok_or_else(not_ollama)?;
     let head = String::from_utf8_lossy(&response[..split]);
-    if !(head.starts_with("HTTP/1.1 200") || head.starts_with("HTTP/1.0 200")) {
+    let status = head
+        .strip_prefix("HTTP/1.")
+        .and_then(|rest| rest.get(2..5))
+        .and_then(|code| code.parse().ok())
+        .ok_or_else(not_ollama)?;
+    Ok((status, response[split + 4..].to_vec()))
+}
+
+/// Ask Ollama at `url` which models it has.
+pub fn check(url: &str) -> Result<OllamaCheck, String> {
+    let (status, body) = request(url, "GET", "/api/tags", None, Duration::from_secs(5))?;
+    parse_tags(status, &body)
+}
+
+fn parse_tags(status: u16, body: &[u8]) -> Result<OllamaCheck, String> {
+    if status != 200 {
         return Err(not_ollama());
     }
-    let tags: Tags = serde_json::from_slice(&response[split + 4..]).map_err(|_| not_ollama())?;
+    let tags: Tags = serde_json::from_slice(body).map_err(|_| not_ollama())?;
     let mut models: Vec<String> = tags.models.into_iter().map(|t| t.name).collect();
     models.sort();
     Ok(OllamaCheck { models })
+}
+
+/// Check that `model` at `url` gives the vectors search is built for.
+/// Loading a model the first time can take a while, hence the long wait.
+pub fn check_embed_model(url: &str, model: &str) -> Result<(), String> {
+    let body = serde_json::json!({ "model": model, "input": "Gather dimension check" });
+    let (status, reply) = request(
+        url,
+        "POST",
+        "/api/embed",
+        Some(&body.to_string()),
+        Duration::from_secs(120),
+    )?;
+    embed_dimensions(model, status, &reply)
+}
+
+fn embed_dimensions(model: &str, status: u16, body: &[u8]) -> Result<(), String> {
+    #[derive(Deserialize)]
+    struct Reply {
+        #[serde(default)]
+        embeddings: Vec<Vec<f32>>,
+        #[serde(default)]
+        error: Option<String>,
+    }
+    let reply: Reply = serde_json::from_slice(body).map_err(|_| not_ollama())?;
+    if status == 404 {
+        return Err(format!(
+            "Ollama doesn't have “{model}” yet: run “ollama pull {model}”, then save again."
+        ));
+    }
+    if status != 200 {
+        return Err(format!(
+            "“{model}” can't be used for search: {}",
+            reply
+                .error
+                .unwrap_or_else(|| format!("Ollama answered {status}"))
+        ));
+    }
+    match reply.embeddings.first().map(Vec::len) {
+        Some(EMBED_DIMENSIONS) => Ok(()),
+        Some(n) => Err(format!(
+            "“{model}” gives {n}-number vectors, but Gather's search needs {EMBED_DIMENSIONS} \
+             (as {DEFAULT_EMBED_MODEL} gives). Choose a model like that one for search."
+        )),
+        None => Err(format!(
+            "“{model}” didn't return a vector: it isn't a search model."
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -297,12 +399,38 @@ mod tests {
     fn the_model_list_is_read_from_ollamas_reply() {
         let reply = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n\
             {\"models\":[{\"name\":\"nomic-embed-text:latest\"},{\"name\":\"llama3.2:1b\"}]}";
+        let (status, body) = split_response(reply).unwrap();
         assert_eq!(
-            parse_tags(reply).unwrap().models,
+            parse_tags(status, &body).unwrap().models,
             vec!["llama3.2:1b", "nomic-embed-text:latest"]
         );
-        assert!(parse_tags(b"HTTP/1.1 404 Not Found\r\n\r\n").is_err());
-        assert!(parse_tags(b"HTTP/1.1 200 OK\r\n\r\n<html>").is_err());
+        let (status, body) = split_response(b"HTTP/1.1 404 Not Found\r\n\r\n").unwrap();
+        assert!(parse_tags(status, &body).is_err());
+        let (status, body) = split_response(b"HTTP/1.1 200 OK\r\n\r\n<html>").unwrap();
+        assert!(parse_tags(status, &body).is_err());
+        assert!(split_response(b"garbage").is_err());
+    }
+
+    #[test]
+    fn only_768_number_vectors_are_accepted_for_search() {
+        let vector = |n: usize| format!("{{\"embeddings\":[[{}]]}}", vec!["0.1"; n].join(","));
+        assert!(embed_dimensions("nomic-embed-text", 200, vector(768).as_bytes()).is_ok());
+        let wrong = embed_dimensions("mxbai-embed-large", 200, vector(1024).as_bytes());
+        assert!(wrong.unwrap_err().contains("1024"));
+        let missing = embed_dimensions(
+            "nomic-embed-text",
+            404,
+            br#"{"error":"model \"nomic-embed-text\" not found, try pulling it first"}"#,
+        );
+        assert!(missing
+            .unwrap_err()
+            .contains("ollama pull nomic-embed-text"));
+        let chat = embed_dimensions(
+            "llama3.2:1b",
+            400,
+            br#"{"error":"\"llama3.2:1b\" does not support embeddings"}"#,
+        );
+        assert!(chat.unwrap_err().contains("does not support embeddings"));
     }
 
     #[test]
@@ -325,7 +453,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(saved.url, "http://localhost:11434");
-        assert_eq!(load(&dir).source, "saved");
+        assert_eq!(load(&dir, Profile::Standard).source, "saved");
+        // A missing port is Ollama's, written out for the daemon's client.
+        let portless = validate(&AiSettings {
+            url: "http://localhost".to_string(),
+            ..saved.clone()
+        })
+        .unwrap();
+        assert_eq!(portless.url, "http://localhost:11434");
         let env = daemon_env(&dir);
         assert!(env.contains(&("GATHER_OLLAMA_URL", "http://localhost:11434".to_string())));
         assert!(env.contains(&("GATHER_OLLAMA_MODEL", "none".to_string())));

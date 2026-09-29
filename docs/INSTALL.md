@@ -179,7 +179,9 @@ it can use a model running on this computer through [Ollama](https://ollama.com)
 2. Download the models, e.g. for a computer with about 4 GB of memory:
    `ollama pull nomic-embed-text` (search) and `ollama pull llama3.2:1b` (reading files).
 3. In Gather, open **Settings → AI model**, turn on **Use a local AI model**, press **Test** to
-   check Gather can reach Ollama, pick the models and press **Save and restart**.
+   check Gather can reach Ollama, pick the models and press **Save and restart**. Saving checks
+   that the search model gives the 768-number vectors Gather's search uses, so Ollama must be
+   running.
 
 Leave the model for reading files empty to use Ollama for search only, which needs far less
 memory. Files already in Gather keep what was found in them; the model reads files added after.
