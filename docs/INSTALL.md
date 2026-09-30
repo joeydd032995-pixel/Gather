@@ -134,6 +134,17 @@ it never signs in to any service, and only reads files and folders you choose.
 - **Perplexity** can export a thread as Markdown (or PDF); Markdown is best. Gather reads it as
   a conversation: your questions and its answers, with each answer's numbered sources. (A PDF
   is added as an ordinary document.)
+- Some ChatGPT products (Co-Work among them) and Grok/GrokBot can only be shared by link. Gather
+  never fetches a link itself, so these stay offline: you save the page or its data on your
+  own computer, then drop the file on Upload or in the import folder.
+  - **ChatGPT share link:** open it in your browser, choose **Save page as…** and pick
+    **“Webpage, HTML only”** (not “Complete”, not MHTML). Gather reads the conversation out of
+    that `.html` file.
+  - **Grok share link:** a share link like `https://grok.com/share/<id>` shows the
+    conversation, but the page itself doesn't carry it. Open
+    `https://grok.com/rest/app-chat/share_links/<id>` (the `<id>` is the part after `/share/`)
+    and save that page as a `.json` file. That address is not an official export and may
+    change; if it stops working, use Grok's own data export instead.
 - From **ChatGPT** exports Gather keeps the conversation, not ChatGPT's hidden standing
   instructions or the output of its tools (web searches, code runs). If a file has the right
   shape for an export but no messages can be read from it, it goes to the `failed` folder with
