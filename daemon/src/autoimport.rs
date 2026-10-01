@@ -880,7 +880,7 @@ pub(crate) async fn import_claude_code_session(
                 .filter(|m| {
                     m.external_id
                         .as_ref()
-                        .map_or(true, |ext| !id_by_external.contains_key(ext))
+                        .is_none_or(|ext| !id_by_external.contains_key(ext))
                 })
                 .cloned()
                 .collect();
