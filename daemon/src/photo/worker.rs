@@ -531,7 +531,7 @@ async fn reconcile(
         .await?;
 
         image_ids.extend(&group.members);
-        cluster_ids.extend(std::iter::repeat(cluster_id).take(group.members.len()));
+        cluster_ids.extend(std::iter::repeat_n(cluster_id, group.members.len()));
     }
 
     sqlx::query(grouping.clear_sql())
