@@ -1,0 +1,22 @@
+name: Resolve native dependency lock
+on:
+  push:
+    branches: [dependabot/npm_and_yarn/apps/desktop/npm-minor-patch-14d26132a0]
+permissions:
+  contents: read
+jobs:
+  lock:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: resolve matching native packages
+        working-directory: apps/desktop/src-tauri
+        run: |
+          cargo update -p tauri -p tauri-plugin-dialog
+          python3 - <<'PY'
+          from pathlib import Path
+          print("GATHER_LOCK_BEGIN")
+          print(Path("Cargo.lock").read_text(), end="")
+          print("GATHER_LOCK_END")
+          PY
