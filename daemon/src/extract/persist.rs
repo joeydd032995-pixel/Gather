@@ -189,16 +189,25 @@ pub async fn persist_chunk_units(
         }
 
         // Per-proposition serialization replaces global uniqueness. Reuse a
-        // episode with the same assertion time or this anchor's original
-        // episode, preserving explicit rejection until the user restores it.
+        // still-open episode unless another state intervened, or this anchor's
+        // original episode. Preserve explicit rejection until restored.
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
             .bind(&statement_hash)
             .execute(&mut *tx)
             .await?;
         let (message_id, segment_id, image_id) = anchor_columns(chunk.anchor);
-        let existing: Option<(Uuid,)> = sqlx::query_as(
-            "SELECT u.id FROM atomic_units u WHERE u.statement_hash = $1
-             AND ((u.status IN ('active', 'disputed') AND u.valid_from IS NOT DISTINCT FROM $5)
+        let episodes: Vec<(Uuid, bool, bool)> = sqlx::query_as(
+            "SELECT u.id,
+                    EXISTS (SELECT 1 FROM atomic_unit_provenance p
+                            WHERE p.atomic_unit_id = u.id
+                              AND p.message_id IS NOT DISTINCT FROM $2
+                              AND p.document_segment_id IS NOT DISTINCT FROM $3
+                              AND p.image_id IS NOT DISTINCT FROM $4) AS backed,
+                    coalesce((SELECT f.action FROM unit_feedback f
+                      WHERE f.target_kind = 'unit' AND f.target_id = u.id
+                        AND f.action IN ('reject', 'confirm')
+                      ORDER BY f.created_at DESC, f.id DESC LIMIT 1) = 'reject', false) AS rejected FROM atomic_units u WHERE u.statement_hash = $1
+             AND (u.status IN ('active', 'disputed')
                   OR EXISTS (SELECT 1 FROM atomic_unit_provenance p
                              WHERE p.atomic_unit_id = u.id
                                AND p.message_id IS NOT DISTINCT FROM $2
@@ -213,15 +222,21 @@ pub async fn persist_chunk_units(
                                 AND p.message_id IS NOT DISTINCT FROM $2
                                 AND p.document_segment_id IS NOT DISTINCT FROM $3
                                 AND p.image_id IS NOT DISTINCT FROM $4) DESC,
-                      u.created_at DESC, u.id DESC LIMIT 1",
+                      u.created_at DESC, u.id DESC",
         )
         .bind(&statement_hash)
         .bind(message_id)
         .bind(segment_id)
         .bind(image_id)
-        .bind(valid_from)
-        .fetch_optional(&mut *tx)
+        .fetch_all(&mut *tx)
         .await?;
+        let mut existing = None;
+        for (id, backed, rejected) in episodes {
+            if backed || rejected || !intervening_state(&mut tx, id, valid_from).await? {
+                existing = Some((id,));
+                break;
+            }
+        }
         let inserted: Option<(Uuid,)> = if existing.is_some() {
             None
         } else {
@@ -642,6 +657,85 @@ pub async fn embed_pending_units(
 }
 
 /// Changing the configured local model invalidates all incompatible vectors in
+/// one transaction, before serving searches or starting background workers.
+
+/// Repeated statements can corroborate one open episode across dates. A
+/// structurally conflicting assertion between those dates starts a new episode,
+/// even when the scanner has not yet closed the old one.
+async fn intervening_state(
+    tx: &mut Transaction<'_, Postgres>,
+    episode: Uuid,
+    asserted: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<bool, sqlx::Error> {
+    use crate::scan::score::{score_pair, UnitFacts};
+
+    let row = sqlx::query(
+        "SELECT id, statement, attrs, subject_entity_id, valid_from, valid_to
+         FROM atomic_units WHERE id = $1",
+    )
+    .bind(episode)
+    .fetch_one(&mut **tx)
+    .await?;
+    let start: Option<chrono::DateTime<chrono::Utc>> = row.get("valid_from");
+    let (Some(start), Some(asserted)) = (start, asserted) else {
+        return Ok(false);
+    };
+    if start == asserted {
+        return Ok(false);
+    }
+    let rows = sqlx::query(
+        "SELECT id, statement, attrs, subject_entity_id, valid_from, valid_to
+         FROM atomic_units WHERE subject_entity_id = $1 AND id <> $2
+           AND status IN ('active', 'disputed', 'superseded')
+           AND valid_from BETWEEN LEAST($3::timestamptz, $4::timestamptz)
+             AND GREATEST($3::timestamptz, $4::timestamptz)
+         ORDER BY valid_from, id LIMIT 101",
+    )
+    .bind(row.get::<Option<Uuid>, _>("subject_entity_id"))
+    .bind(episode)
+    .bind(start)
+    .bind(asserted)
+    .fetch_all(&mut **tx)
+    .await?;
+    // Bounded work: uncertainty creates another episode, never merges history.
+    if rows.len() > 100 {
+        return Ok(true);
+    }
+    let facts = |row: &sqlx::postgres::PgRow| UnitFacts {
+        id: row.get("id"),
+        statement: row.get("statement"),
+        attrs: row.get("attrs"),
+        subject_entity_id: row.get("subject_entity_id"),
+        valid_from: row.get("valid_from"),
+        valid_to: row.get("valid_to"),
+        assignments: vec![],
+    };
+    let mut previous = facts(&row);
+    previous.assignments = episode_assignments(tx, episode).await?;
+    for row in rows {
+        let mut candidate = facts(&row);
+        candidate.assignments = episode_assignments(tx, candidate.id).await?;
+        if score_pair(&previous, &candidate, None).is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+async fn episode_assignments(
+    tx: &mut Transaction<'_, Postgres>,
+    unit: Uuid,
+) -> Result<Vec<(Uuid, String, Uuid)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT source_entity_id, relation_type, target_entity_id FROM relationships
+         WHERE atomic_unit_id = $1 AND status IN ('active', 'superseded')",
+    )
+    .bind(unit)
+    .fetch_all(&mut **tx)
+    .await
+}
+
+/// Initialize the local embedding identity and clear incompatible vectors in
 /// one transaction, before serving searches or starting background workers.
 pub async fn ensure_embedding_model(pool: &PgPool, model: &str) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
