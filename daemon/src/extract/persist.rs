@@ -564,15 +564,14 @@ pub async fn embed_new_units(
     }
     let texts: Vec<String> = new_units.iter().map(|(_, s)| s.clone()).collect();
     let ids: Vec<Uuid> = new_units.iter().map(|(id, _)| *id).collect();
-    let revisions: std::collections::HashMap<Uuid, i64> = sqlx::query_as(
-        "SELECT id, content_revision FROM atomic_units WHERE id = ANY($1)",
-    )
-    .bind(&ids)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| error.to_string())?
-    .into_iter()
-    .collect();
+    let revisions: std::collections::HashMap<Uuid, i64> =
+        sqlx::query_as("SELECT id, content_revision FROM atomic_units WHERE id = ANY($1)")
+            .bind(&ids)
+            .fetch_all(pool)
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .collect();
     let embeddings = ollama.embed(&texts).await?;
     let Some(mut tx) = embedding_write_transaction(pool, &ollama.embed_model).await? else {
         return Ok(0);

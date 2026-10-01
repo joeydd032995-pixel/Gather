@@ -133,3 +133,24 @@ shared automation, and cleans up its scratch container and any restored
 plaintext on exit (even if interrupted). Run it periodically — quarterly is
 a reasonable cadence for a personal-scale backup — as your own check that
 "the backup exists" and "the backup restores" are actually the same thing.
+
+## Portable bundle limits and retention
+
+Core operation stays offline. The daemon never invokes restic or contacts a
+backup destination; the existing backup scripts run only when explicitly invoked
+or scheduled by the user.
+
+REST and gRPC export one repeatable-read snapshot and stream it in 64 KiB
+chunks. Imports stage their records in private temporary files, apply tables in
+dependency order, and commit once. A failure rolls back all imported records.
+Bundle uploads have a separate 64 GiB limit; each NDJSON record is limited to
+1 GiB, including hexadecimal raw file content. Temporary disk space must fit
+the uploaded bundle and its staged records. Heap use follows the largest record,
+rather than the total library. Interrupted uploads remove their temporary files.
+
+The backup scripts tag snapshots `gather-bundle` and apply retention only to
+that tag, grouping by `host,tags`. Random temporary export paths therefore
+share a retention history; unrelated snapshots are left alone. Existing Gather
+snapshots already carrying the tag enter this grouping on the next run.
+`bash scripts/ci-backup-retention.sh` verifies retention in a disposable local
+repository without a remote destination.

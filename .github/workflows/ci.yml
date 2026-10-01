@@ -149,6 +149,8 @@ jobs:
       - name: build daemon (debug)
         working-directory: daemon
         run: cargo build --locked
+      - name: verify backup retention with disposable local repository
+        run: bash scripts/ci-backup-retention.sh
       - name: run restore drill
         run: scripts/ci-restore-drill.sh
 

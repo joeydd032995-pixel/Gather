@@ -305,13 +305,13 @@ pub async fn embed_pending_entities(
                AND merged_into_entity_id IS NULL
                AND (SELECT model FROM embedding_state WHERE singleton) = $4",
         )
-            .bind(id)
-            .bind(Vector::from(embedding))
-            .bind(name)
-            .bind(&ollama.embed_model)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
+        .bind(id)
+        .bind(Vector::from(embedding))
+        .bind(name)
+        .bind(&ollama.embed_model)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
         updated += 1;
     }
     tx.commit().await.map_err(|error| error.to_string())?;

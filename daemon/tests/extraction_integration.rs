@@ -904,4 +904,9 @@ async fn withdrawal_during_extraction_cannot_create_claims() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
+    sqlx::query("DELETE FROM artifacts WHERE id = $1")
+        .bind(artifact_id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
 }

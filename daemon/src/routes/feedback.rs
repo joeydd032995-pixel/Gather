@@ -329,7 +329,8 @@ pub async fn edit_unit_core(
              embedding = NULL, embedding_model = NULL, embedding_retry_at = NULL, \
              embedding_attempts = 0, contradiction_scanned_at = NULL, \
              clustered_at = NULL, topic_cluster_id = NULL, \
-             attrs = $4, subject_entity_id = $5, extraction_model = NULL \
+             attrs = $4, subject_entity_id = $5, extraction_model = NULL, \
+             kind = coalesce($6::unit_kind, kind), observed_at = $7 \
          WHERE id = $1",
     )
     .bind(id)
@@ -337,18 +338,19 @@ pub async fn edit_unit_core(
     .bind(&hash)
     .bind(&attrs)
     .bind(subject)
+    .bind(parsed.map(|unit| unit.kind))
+    .bind(parsed.and_then(|unit| unit.event_time))
     .execute(&mut *tx)
     .await?;
     sqlx::query("DELETE FROM relationships WHERE atomic_unit_id = $1")
         .bind(id)
         .execute(&mut *tx)
         .await?;
-    if status == "active"
-        && crate::safety::modality::classify(&statement).asserts_positive_fact()
-    {
+    if status == "active" && crate::safety::modality::classify(&statement).asserts_positive_fact() {
         if let (Some(source), Some(parsed)) = (subject, parsed) {
             for (object, relation) in &parsed.objects {
-                let target = crate::extract::persist::resolve_or_create_entity(&mut tx, object).await?;
+                let target =
+                    crate::extract::persist::resolve_or_create_entity(&mut tx, object).await?;
                 if source != target {
                     sqlx::query(
                         "INSERT INTO relationships

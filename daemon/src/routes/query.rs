@@ -469,22 +469,31 @@ pub(crate) async fn search_core(
         }
     }
 
-    if req.embedding.is_some() && req.text.as_deref().is_some_and(|text| !text.trim().is_empty()) {
+    if req.embedding.is_some()
+        && req
+            .text
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty())
+    {
         let available: bool = match scope {
-            "atomic_units" => sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM atomic_units WHERE embedding IS NOT NULL
+            "atomic_units" => {
+                sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM atomic_units WHERE embedding IS NOT NULL
                  AND embedding_model IS NOT DISTINCT FROM $1 AND status = 'active')",
-            )
-            .bind(&embedding_model)
-            .fetch_one(&state.pool)
-            .await?,
-            "document_segments" => sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM document_segments WHERE embedding IS NOT NULL
+                )
+                .bind(&embedding_model)
+                .fetch_one(&state.pool)
+                .await?
+            }
+            "document_segments" => {
+                sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM document_segments WHERE embedding IS NOT NULL
                  AND embedding_model IS NOT DISTINCT FROM $1)",
-            )
-            .bind(&embedding_model)
-            .fetch_one(&state.pool)
-            .await?,
+                )
+                .bind(&embedding_model)
+                .fetch_one(&state.pool)
+                .await?
+            }
             _ => true,
         };
         if !available {

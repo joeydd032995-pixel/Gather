@@ -10,8 +10,8 @@ use super::{pb, status_from};
 use crate::routes::export::{
     bundle_stream, import_bundle_file, private_bundle_file, MAX_BUNDLE_BYTES,
 };
-use tokio::io::AsyncWriteExt;
 use crate::AppState;
+use tokio::io::AsyncWriteExt;
 
 pub struct ExportApi {
     pub state: AppState,
@@ -28,7 +28,9 @@ impl pb::export_service_server::ExportService for ExportApi {
     ) -> Result<Response<Self::ExportBundleStream>, Status> {
         let stream = bundle_stream(&self.state.pool).await.map_err(status_from)?;
         Ok(Response::new(Box::pin(stream.map(|chunk| {
-            chunk.map(|data| pb::BundleChunk { data }).map_err(status_from)
+            chunk
+                .map(|data| pb::BundleChunk { data })
+                .map_err(status_from)
         }))))
     }
 
@@ -39,7 +41,9 @@ impl pb::export_service_server::ExportService for ExportApi {
         let mut stream = request.into_inner();
         let temporary = private_bundle_file().map_err(status_from)?;
         let mut file = tokio::fs::File::from_std(
-            temporary.reopen().map_err(|error| Status::internal(error.to_string()))?,
+            temporary
+                .reopen()
+                .map_err(|error| Status::internal(error.to_string()))?,
         );
         let mut size = 0u64;
         while let Some(chunk) = stream.next().await {
@@ -48,9 +52,13 @@ impl pb::export_service_server::ExportService for ExportApi {
             if size > MAX_BUNDLE_BYTES {
                 return Err(Status::resource_exhausted("bundle exceeds 64 GiB"));
             }
-            file.write_all(&chunk.data).await.map_err(|error| Status::internal(error.to_string()))?;
+            file.write_all(&chunk.data)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
         }
-        file.flush().await.map_err(|error| Status::internal(error.to_string()))?;
+        file.flush()
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
         let counts = import_bundle_file(&self.state.pool, &temporary)
             .await
             .map_err(status_from)?;

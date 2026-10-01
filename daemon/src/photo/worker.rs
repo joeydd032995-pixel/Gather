@@ -260,9 +260,6 @@ async fn regroup_pass(
 
     let mut tx = pool.begin().await?;
     // Withdrawal takes this same source lock before clearing derived groups.
-    sqlx::query("SELECT id FROM artifacts WHERE retracted_at IS NULL ORDER BY id FOR UPDATE")
-        .fetch_all(&mut *tx)
-        .await?;
     let photos: Vec<PhotoRow> = sqlx::query(
         "SELECT i.id, i.phash, COALESCE(i.width, 0)::bigint * COALESCE(i.height, 0) AS pixels, \
                 COALESCE(i.taken_at, a.source_created_at, a.ingested_at) AS ordering_time, \
@@ -270,7 +267,7 @@ async fn regroup_pass(
                 a.id AS artifact_id, a.content_hash \
          FROM images i JOIN artifacts a ON a.id = i.artifact_id \
          WHERE i.photo_prepared_at IS NOT NULL AND a.retracted_at IS NULL \
-         ORDER BY i.id",
+         ORDER BY i.id FOR UPDATE OF a",
     )
     .fetch_all(&mut *tx)
     .await?
@@ -688,9 +685,10 @@ async fn join_nearest_topic(
     embedding: Vec<f32>,
 ) -> anyhow::Result<bool> {
     let neighbour = sqlx::query(
-        "SELECT id, topic_cluster_id, caption, (1 - (embedding <=> $1))::real AS sim \
-         FROM images WHERE id <> $2 AND embedding IS NOT NULL \
-         ORDER BY embedding <=> $1 LIMIT 1",
+        "SELECT i.id, i.topic_cluster_id, i.caption, (1 - (i.embedding <=> $1))::real AS sim \
+         FROM images i JOIN artifacts a ON a.id = i.artifact_id \
+         WHERE i.id <> $2 AND i.embedding IS NOT NULL AND a.retracted_at IS NULL \
+         ORDER BY i.embedding <=> $1 LIMIT 1 FOR UPDATE OF a",
     )
     .bind(Vector::from(embedding))
     .bind(id)

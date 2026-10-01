@@ -214,7 +214,9 @@ pub(crate) async fn bundle_stream(
                     let row = row?;
                     let json: String = row.get("j");
                     if json.len() as u64 > MAX_RECORD_BYTES - 128 {
-                        return Err(ApiError::PayloadTooLarge("bundle or record exceeds its size limit".into()));
+                        return Err(ApiError::PayloadTooLarge(
+                            "bundle or record exceeds its size limit".into(),
+                        ));
                     }
                     let line = format!("{{\"type\":\"{table}\",\"row\":{json}}}\n");
                     for chunk in line.as_bytes().chunks(CHUNK_BYTES) {
@@ -246,7 +248,9 @@ pub async fn import_bundle(
 ) -> Result<Json<Value>, ApiError> {
     let temporary = private_bundle_file()?;
     let mut file = tokio::fs::File::from_std(
-        temporary.reopen().map_err(|error| ApiError::Internal(error.into()))?,
+        temporary
+            .reopen()
+            .map_err(|error| ApiError::Internal(error.into()))?,
     );
     let mut stream = body.into_data_stream();
     let mut size = 0u64;
@@ -254,15 +258,21 @@ pub async fn import_bundle(
         let chunk = chunk.map_err(|error| ApiError::BadRequest(error.to_string()))?;
         size = size.saturating_add(chunk.len() as u64);
         if size > MAX_BUNDLE_BYTES {
-            return Err(ApiError::PayloadTooLarge("bundle or record exceeds its size limit".into()));
+            return Err(ApiError::PayloadTooLarge(
+                "bundle or record exceeds its size limit".into(),
+            ));
         }
         file.write_all(&chunk)
             .await
             .map_err(|error| ApiError::Internal(error.into()))?;
     }
-    file.flush().await.map_err(|error| ApiError::Internal(error.into()))?;
+    file.flush()
+        .await
+        .map_err(|error| ApiError::Internal(error.into()))?;
     let counts = import_bundle_file(&state.pool, &temporary).await?;
-    Ok(Json(json!({ "format": "gather-bundle-v1", "tables": counts })))
+    Ok(Json(
+        json!({ "format": "gather-bundle-v1", "tables": counts }),
+    ))
 }
 
 async fn read_record(reader: &mut BufReader<tokio::fs::File>) -> Result<Option<String>, ApiError> {
@@ -273,7 +283,9 @@ async fn read_record(reader: &mut BufReader<tokio::fs::File>) -> Result<Option<S
         .await
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
     if size as u64 > MAX_RECORD_BYTES {
-        return Err(ApiError::PayloadTooLarge("bundle or record exceeds its size limit".into()));
+        return Err(ApiError::PayloadTooLarge(
+            "bundle or record exceeds its size limit".into(),
+        ));
     }
     Ok((size > 0).then_some(line))
 }
@@ -285,7 +297,9 @@ pub(crate) async fn import_bundle_file(
     bundle: &tempfile::NamedTempFile,
 ) -> Result<serde_json::Map<String, Value>, ApiError> {
     let file = tokio::fs::File::from_std(
-        bundle.reopen().map_err(|error| ApiError::Internal(error.into()))?,
+        bundle
+            .reopen()
+            .map_err(|error| ApiError::Internal(error.into()))?,
     );
     let mut reader = BufReader::new(file);
     let mut tables = std::collections::HashMap::new();
@@ -299,14 +313,17 @@ pub(crate) async fn import_bundle_file(
         let value: Value = serde_json::from_str(&line).map_err(|error| {
             ApiError::BadRequest(format!("invalid NDJSON at line {line_number}: {error}"))
         })?;
-        let typ = value.get("type").and_then(Value::as_str).ok_or_else(|| {
-            ApiError::BadRequest(format!("line {line_number} missing 'type'"))
-        })?;
+        let typ = value
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::BadRequest(format!("line {line_number} missing 'type'")))?;
         if typ == "manifest" {
-            if manifest_seen || value.pointer("/row/format").and_then(Value::as_str)
-                != Some("gather-bundle-v1")
+            if manifest_seen
+                || value.pointer("/row/format").and_then(Value::as_str) != Some("gather-bundle-v1")
             {
-                return Err(ApiError::BadRequest("invalid or duplicate bundle manifest".into()));
+                return Err(ApiError::BadRequest(
+                    "invalid or duplicate bundle manifest".into(),
+                ));
             }
             manifest_seen = true;
             continue;
@@ -315,21 +332,29 @@ pub(crate) async fn import_bundle_file(
             return Err(ApiError::BadRequest(format!("unknown record type '{typ}'")));
         };
         if !value.get("row").is_some_and(Value::is_object) {
-            return Err(ApiError::BadRequest(format!("line {line_number} missing row object")));
+            return Err(ApiError::BadRequest(format!(
+                "line {line_number} missing row object"
+            )));
         }
         if !tables.contains_key(table) {
             let temporary = private_bundle_file()?;
             let writer = tokio::fs::File::from_std(
-                temporary.reopen().map_err(|error| ApiError::Internal(error.into()))?,
+                temporary
+                    .reopen()
+                    .map_err(|error| ApiError::Internal(error.into()))?,
             );
             tables.insert(*table, (temporary, writer, 0u64));
         }
         let (_, writer, count) = tables.get_mut(table).expect("inserted above");
-        writer.write_all(line.as_bytes())
+        writer
+            .write_all(line.as_bytes())
             .await
             .map_err(|error| ApiError::Internal(error.into()))?;
         if !line.ends_with('\n') {
-            writer.write_all(b"\n").await.map_err(|error| ApiError::Internal(error.into()))?;
+            writer
+                .write_all(b"\n")
+                .await
+                .map_err(|error| ApiError::Internal(error.into()))?;
         }
         *count += 1;
     }
@@ -343,15 +368,22 @@ pub(crate) async fn import_bundle_file(
         sqlx::query_scalar("SELECT model FROM embedding_state WHERE singleton FOR SHARE")
             .fetch_one(&mut *tx)
             .await?;
-    sqlx::query("SET CONSTRAINTS ALL DEFERRED").execute(&mut *tx).await?;
+    sqlx::query("SET CONSTRAINTS ALL DEFERRED")
+        .execute(&mut *tx)
+        .await?;
     let mut counts = serde_json::Map::new();
     for (table, columns) in TABLES {
         let Some((temporary, writer, count)) = tables.get_mut(table) else {
             continue;
         };
-        writer.flush().await.map_err(|error| ApiError::Internal(error.into()))?;
+        writer
+            .flush()
+            .await
+            .map_err(|error| ApiError::Internal(error.into()))?;
         let file = tokio::fs::File::from_std(
-            temporary.reopen().map_err(|error| ApiError::Internal(error.into()))?,
+            temporary
+                .reopen()
+                .map_err(|error| ApiError::Internal(error.into()))?,
         );
         let mut reader = BufReader::new(file);
         let sql = format!(
@@ -370,7 +402,8 @@ pub(crate) async fn import_bundle_file(
                 }
                 if ["atomic_units", "document_segments", "entities", "images"].contains(table)
                     && (model.is_none()
-                        || object.get("embedding_model").and_then(Value::as_str) != model.as_deref())
+                        || object.get("embedding_model").and_then(Value::as_str)
+                            != model.as_deref())
                 {
                     object.insert("embedding".into(), Value::Null);
                     object.insert("embedding_model".into(), Value::Null);
@@ -382,7 +415,10 @@ pub(crate) async fn import_bundle_file(
                 .await?
                 .rows_affected();
         }
-        counts.insert((*table).to_string(), json!({ "in_bundle": count, "inserted": inserted }));
+        counts.insert(
+            (*table).to_string(),
+            json!({ "in_bundle": count, "inserted": inserted }),
+        );
     }
     tx.commit().await?;
     Ok(counts)
