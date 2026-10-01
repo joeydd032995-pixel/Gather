@@ -331,7 +331,7 @@ jobs:
       # --- bundled PostgreSQL + pgvector (cached per OS and script version) --
       - name: cache bundled PostgreSQL
         id: pg-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: apps/desktop/src-tauri/resources/postgres
           key: pg-bundle-${{ matrix.platform }}-${{ hashFiles('scripts/bundle-postgres.sh', 'scripts/bundle-postgres.ps1') }}
