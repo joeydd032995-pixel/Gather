@@ -382,23 +382,23 @@ fn docx_to_text(bytes: &[u8]) -> Result<String, String> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => match e.local_name().as_ref() {
-                b"t" => in_text = true,
-                b"p" => {
+                "t" => in_text = true,
+                "p" => {
                     paragraph.clear();
                     heading = None;
                 }
                 _ => {}
             },
             Ok(Event::Empty(e)) => match e.local_name().as_ref() {
-                b"tab" => paragraph.push('\t'),
-                b"br" | b"cr" => paragraph.push('\n'),
-                b"pStyle" => {
+                "tab" => paragraph.push('\t'),
+                "br" | "cr" => paragraph.push('\n'),
+                "pStyle" => {
                     heading = e
                         .attributes()
                         .flatten()
-                        .find(|a| a.key.local_name().as_ref() == b"val")
+                        .find(|a| a.key.local_name().as_ref() == "val")
                         .and_then(|a| {
-                            let v = String::from_utf8_lossy(&a.value).to_ascii_lowercase();
+                            let v = a.value.to_ascii_lowercase();
                             if v == "title" {
                                 return Some(1);
                             }
@@ -410,23 +410,19 @@ fn docx_to_text(bytes: &[u8]) -> Result<String, String> {
                 _ => {}
             },
             Ok(Event::Text(t)) if in_text => {
-                if let Ok(s) = t.decode() {
-                    paragraph.push_str(&s);
-                }
+                paragraph.push_str(&t);
             }
             Ok(Event::GeneralRef(r)) if in_text => {
                 if let Ok(Some(c)) = r.resolve_char_ref() {
                     paragraph.push(c);
-                } else if let Ok(name) = r.decode() {
-                    if let Some(s) = quick_xml::escape::resolve_predefined_entity(&name) {
-                        paragraph.push_str(s);
-                    }
+                } else if let Some(s) = quick_xml::escape::resolve_predefined_entity(&r) {
+                    paragraph.push_str(s);
                 }
             }
             Ok(Event::End(e)) => match e.local_name().as_ref() {
-                b"t" => in_text = false,
-                b"tc" => paragraph.push_str(" | "),
-                b"p" => {
+                "t" => in_text = false,
+                "tc" => paragraph.push_str(" | "),
+                "p" => {
                     let line = paragraph.trim();
                     if !line.is_empty() {
                         if let Some(level) = heading {
@@ -445,7 +441,7 @@ fn docx_to_text(bytes: &[u8]) -> Result<String, String> {
                         break;
                     }
                 }
-                b"tr" => out.push('\n'),
+                "tr" => out.push('\n'),
                 _ => {}
             },
             Ok(Event::Eof) => break,
@@ -587,6 +583,26 @@ mod tests {
         assert!(text.contains("The budget is $40,000 & rising."), "{text}");
         assert!(text.contains("Owner"));
         assert!(text.contains("Dana"));
+    }
+
+    #[test]
+    fn docx_preserves_unicode_references_and_breaks() {
+        let document = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Café &amp; &#x1F30D;</w:t><w:tab/><w:t>next</w:t><w:br/><w:t>line</w:t></w:r></w:p></w:body></w:document>"#;
+        let docx = zip_with(&[("word/document.xml", document.as_bytes())]);
+        assert_eq!(
+            to_text(Format::Docx, &docx).unwrap(),
+            "Café & 🌍\tnext\nline"
+        );
+    }
+
+    #[test]
+    fn docx_rejects_invalid_utf8() {
+        let document = b"<w:document><w:p><w:r><w:t>\xff</w:t></w:r></w:p></w:document>";
+        let docx = zip_with(&[("word/document.xml", document)]);
+        assert_eq!(
+            to_text(Format::Docx, &docx).unwrap_err(),
+            "this Word file is damaged"
+        );
     }
 
     #[test]
