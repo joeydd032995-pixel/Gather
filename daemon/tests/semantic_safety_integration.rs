@@ -868,7 +868,10 @@ async fn the_migration_is_reversible() {
         .iter()
         .filter(|migration| migration.version <= 15)
     {
-        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+        sqlx::raw_sql(migration.sql.clone())
+            .execute(&pool)
+            .await
+            .unwrap();
     }
     let exists = |pool: sqlx::PgPool| async move {
         sqlx::query_scalar::<_, bool>(
