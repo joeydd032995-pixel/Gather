@@ -672,7 +672,10 @@ pub async fn ensure_embedding_model(pool: &PgPool, model: &str) -> Result<(), sq
         )
         .execute(&mut *tx)
         .await?;
-        sqlx::query("DELETE FROM cluster_members WHERE member_kind IN ('unit', 'image')")
+        sqlx::query(
+            "DELETE FROM cluster_members m USING clusters c WHERE m.cluster_id = c.id
+             AND (m.member_kind = 'unit' OR (m.member_kind = 'image' AND c.kind = 'photo_topic'))",
+        )
             .execute(&mut *tx)
             .await?;
         sqlx::query(

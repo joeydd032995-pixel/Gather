@@ -16,4 +16,5 @@ UPDATE atomic_units SET embedding = NULL, clustered_at = NULL,
 UPDATE document_segments SET embedding = NULL;
 UPDATE entities SET embedding = NULL;
 UPDATE images SET embedding = NULL, captioned_at = NULL, topic_cluster_id = NULL;
-DELETE FROM cluster_members WHERE member_kind = 'unit';
+DELETE FROM cluster_members m USING clusters c WHERE m.cluster_id = c.id
+    AND (m.member_kind = 'unit' OR (m.member_kind = 'image' AND c.kind = 'photo_topic'));

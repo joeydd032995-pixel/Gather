@@ -440,6 +440,29 @@ async fn local_embedding_retry_revision_guard_and_model_change() {
     persist::embed_new_units(&state.pool, &client, &[(unit, current.clone())])
         .await
         .unwrap();
+    // Albums are based on EXIF, not the embedding model, and must survive a switch.
+    let album: Uuid = sqlx::query_scalar("INSERT INTO clusters (kind) VALUES ('album') RETURNING id")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    let photo: Uuid = sqlx::query_scalar(
+        "INSERT INTO images (artifact_id, width, height, album_cluster_id)
+         VALUES ($1, 1, 1, $2) RETURNING id",
+    )
+    .bind(chunk.artifact_id)
+    .bind(album)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO cluster_members (cluster_id, member_kind, member_id)
+         VALUES ($1, 'image', $2)",
+    )
+    .bind(album)
+    .bind(photo)
+    .execute(&state.pool)
+    .await
+    .unwrap();
     persist::ensure_embedding_model(&state.pool, "offline-test-model-b")
         .await
         .unwrap();
@@ -456,6 +479,24 @@ async fn local_embedding_retry_revision_guard_and_model_change() {
             .unwrap(),
         0
     );
+
+    let album_members: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM cluster_members WHERE cluster_id = $1")
+            .bind(album)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert_eq!(album_members, 1);
+    sqlx::query("DELETE FROM images WHERE id = $1")
+        .bind(photo)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM clusters WHERE id = $1")
+        .bind(album)
+        .execute(&state.pool)
+        .await
+        .unwrap();
 
     // Leave this shared integration database ready for the other test binaries.
     sqlx::query(

@@ -420,9 +420,23 @@ pub(crate) async fn import_bundle_file(
                 .map_err(|error| ApiError::Internal(error.into()))?,
         );
         let mut reader = BufReader::new(file);
+        let membership = if *table == "cluster_members" {
+            // Vector invalidation clears topic pointers before members restore.
+            // Keep only memberships still represented by the restored rows.
+            " WHERE member_kind = 'entity'
+              OR (member_kind = 'unit' AND EXISTS (
+                SELECT 1 FROM atomic_units u WHERE u.id = r.member_id
+                  AND u.topic_cluster_id = r.cluster_id))
+              OR (member_kind = 'image' AND EXISTS (
+                SELECT 1 FROM images i WHERE i.id = r.member_id AND r.cluster_id IN
+                  (i.topic_cluster_id, i.dup_cluster_id, i.album_cluster_id)))"
+        } else {
+            ""
+        };
         let sql = format!(
             "INSERT INTO {table} ({columns}) SELECT {columns}
-             FROM jsonb_populate_record(NULL::{table}, $1::jsonb) ON CONFLICT DO NOTHING"
+             FROM jsonb_populate_record(NULL::{table}, $1::jsonb) r{membership}
+             ON CONFLICT DO NOTHING"
         );
         let mut inserted = 0u64;
         while let Some(line) = read_record(&mut reader).await? {
