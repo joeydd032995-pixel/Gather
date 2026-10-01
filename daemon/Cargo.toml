@@ -39,7 +39,7 @@ keyring = { version = "3", features = ["sync-secret-service", "vendored", "apple
 getrandom = "0.4"
 regex = "1"
 pdf-extract = "0.12"
-lopdf = "0.44"
+lopdf = "0.45"
 imagesize = "0.15"
 kamadak-exif = "0.6"
 # Pure-Rust decoders for perceptual hashing and thumbnails (no C libs, offline).
