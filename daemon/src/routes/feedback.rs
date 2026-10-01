@@ -330,7 +330,9 @@ pub async fn edit_unit_core(
              embedding_attempts = 0, contradiction_scanned_at = NULL, \
              clustered_at = NULL, topic_cluster_id = NULL, \
              attrs = $4, subject_entity_id = $5, extraction_model = NULL, \
-             kind = coalesce($6::unit_kind, kind), observed_at = $7 \
+             kind = coalesce($6::unit_kind, 'fact'::unit_kind), \
+             valid_from = CASE WHEN observed_at IS NOT NULL THEN $7 ELSE coalesce($7, valid_from) END, \
+             observed_at = $7 \
          WHERE id = $1",
     )
     .bind(id)

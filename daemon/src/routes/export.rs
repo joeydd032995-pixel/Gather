@@ -408,12 +408,24 @@ pub(crate) async fn import_bundle_file(
                     object.entry("embedding_attempts").or_insert(json!(0));
                 }
                 if ["atomic_units", "document_segments", "entities", "images"].contains(table)
+                    && object.get("embedding").is_some_and(|embedding| !embedding.is_null())
                     && (model.is_none()
                         || object.get("embedding_model").and_then(Value::as_str)
                             != model.as_deref())
                 {
                     object.insert("embedding".into(), Value::Null);
                     object.insert("embedding_model".into(), Value::Null);
+                    if *table == "atomic_units" {
+                        object.insert("contradiction_scanned_at".into(), Value::Null);
+                        object.insert("clustered_at".into(), Value::Null);
+                        object.insert("topic_cluster_id".into(), Value::Null);
+                        object.insert("embedding_retry_at".into(), Value::Null);
+                        object.insert("embedding_attempts".into(), json!(0));
+                    }
+                    if *table == "images" {
+                        object.insert("captioned_at".into(), Value::Null);
+                        object.insert("topic_cluster_id".into(), Value::Null);
+                    }
                 }
             }
             inserted += sqlx::query(sqlx::AssertSqlSafe(sql.clone()))

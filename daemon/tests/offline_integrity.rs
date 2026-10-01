@@ -249,7 +249,15 @@ async fn similarity_cache_changes_when_unit_status_changes_without_new_rows() {
     .unwrap();
     let before = gather_daemon::projects::similarity::load(&state.pool, 1000).await.unwrap();
     assert!(!before.signatures[&project].entities.is_empty());
-    routes::feedback::reject_unit_core(&state.pool, unit, None).await.unwrap();
+    let mut tx = state.pool.begin().await.unwrap();
+    sqlx::query("UPDATE atomic_units SET status = 'retracted' WHERE id = $1")
+        .bind(unit)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let pending = gather_daemon::projects::similarity::load(&state.pool, 1000).await.unwrap();
+    assert!(!pending.signatures[&project].entities.is_empty());
+    tx.commit().await.unwrap();
     let after = gather_daemon::projects::similarity::load(&state.pool, 1000).await.unwrap();
     assert!(after.signatures[&project].entities.is_empty());
     assert!(!Arc::ptr_eq(&before, &after));
@@ -269,9 +277,10 @@ async fn local_embedding_retry_revision_guard_and_model_change() {
         entered: Notify,
         release: Notify,
     }
-    async fn embed(State(mock): State<Arc<Mock>>, Json(body): Json<Value>)
-        -> (StatusCode, Json<Value>)
-    {
+    async fn embed(
+        State(mock): State<Arc<Mock>>,
+        Json(body): Json<Value>,
+    ) -> (StatusCode, Json<Value>) {
         if mock.fail.load(Ordering::SeqCst) {
             return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({})));
         }
@@ -295,36 +304,62 @@ async fn local_embedding_retry_revision_guard_and_model_change() {
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let router = Router::new().route("/api/embed", post(embed)).with_state(mock.clone());
+    let router = Router::new()
+        .route("/api/embed", post(embed))
+        .with_state(mock.clone());
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let mut config = (*state.config).clone();
     config.ollama_url = Some(format!("http://{address}"));
     config.ollama_embed_model = "offline-test-model-a".into();
     config.ollama_one_at_a_time = false;
-    let client = Arc::new(extract::ollama::OllamaClient::from_config(&config).unwrap().unwrap());
-    persist::ensure_embedding_model(&state.pool, &client.embed_model).await.unwrap();
+    let client = Arc::new(
+        extract::ollama::OllamaClient::from_config(&config)
+            .unwrap()
+            .unwrap(),
+    );
+    persist::ensure_embedding_model(&state.pool, &client.embed_model)
+        .await
+        .unwrap();
     let text = format!("I use Retry{} for storage.", Uuid::new_v4().simple());
     let chunk = chunk(&state, &text, 1).await;
     let result = persist(&state, &chunk, Claim::Fresh { llm_model: None }).await;
     let unit = result.new_units[0].0;
 
-    assert!(persist::embed_pending_units(&state.pool, &client, 1000).await.is_err());
+    assert!(persist::embed_pending_units(&state.pool, &client, 1000)
+        .await
+        .is_err());
     let waiting: bool = sqlx::query_scalar(
         "SELECT embedding IS NULL AND embedding_attempts = 1
                 AND embedding_retry_at > now() FROM atomic_units WHERE id = $1",
-    ).bind(unit).fetch_one(&state.pool).await.unwrap();
+    )
+    .bind(unit)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
     assert!(waiting);
     sqlx::query("UPDATE atomic_units SET embedding_retry_at = now() WHERE id = $1")
-        .bind(unit).execute(&state.pool).await.unwrap();
+        .bind(unit)
+        .execute(&state.pool)
+        .await
+        .unwrap();
     mock.fail.store(false, Ordering::SeqCst);
-    persist::embed_pending_units(&state.pool, &client, 1000).await.unwrap();
+    persist::embed_pending_units(&state.pool, &client, 1000)
+        .await
+        .unwrap();
     let stored: bool = sqlx::query_scalar(
         "SELECT embedding IS NOT NULL AND embedding_model = $2 FROM atomic_units WHERE id = $1",
-    ).bind(unit).bind(&client.embed_model).fetch_one(&state.pool).await.unwrap();
+    )
+    .bind(unit)
+    .bind(&client.embed_model)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
     assert!(stored);
 
     let corrected = format!("Corrected wording {}", Uuid::new_v4());
-    routes::feedback::edit_unit_core(&state.pool, unit, &corrected, None).await.unwrap();
+    routes::feedback::edit_unit_core(&state.pool, unit, &corrected, None)
+        .await
+        .unwrap();
     mock.block.store(true, Ordering::SeqCst);
     let pool = state.pool.clone();
     let delayed_client = client.clone();
@@ -333,28 +368,48 @@ async fn local_embedding_retry_revision_guard_and_model_change() {
         persist::embed_new_units(&pool, &delayed_client, &[(unit, old_text)]).await
     });
     tokio::time::timeout(std::time::Duration::from_secs(5), mock.entered.notified())
-        .await.unwrap();
+        .await
+        .unwrap();
     let current = format!("Another correction {}", Uuid::new_v4());
-    routes::feedback::edit_unit_core(&state.pool, unit, &current, None).await.unwrap();
+    routes::feedback::edit_unit_core(&state.pool, unit, &current, None)
+        .await
+        .unwrap();
     mock.block.store(false, Ordering::SeqCst);
     mock.release.notify_one();
     assert_eq!(delayed.await.unwrap().unwrap(), 0);
 
-    persist::embed_new_units(&state.pool, &client, &[(unit, current.clone())]).await.unwrap();
-    persist::ensure_embedding_model(&state.pool, "offline-test-model-b").await.unwrap();
-    let empty: bool = sqlx::query_scalar("SELECT embedding IS NULL FROM atomic_units WHERE id = $1")
-        .bind(unit).fetch_one(&state.pool).await.unwrap();
+    persist::embed_new_units(&state.pool, &client, &[(unit, current.clone())])
+        .await
+        .unwrap();
+    persist::ensure_embedding_model(&state.pool, "offline-test-model-b")
+        .await
+        .unwrap();
+    let empty: bool =
+        sqlx::query_scalar("SELECT embedding IS NULL FROM atomic_units WHERE id = $1")
+            .bind(unit)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
     assert!(empty);
-    assert_eq!(persist::embed_new_units(&state.pool, &client, &[(unit, current)])
-        .await.unwrap(), 0);
+    assert_eq!(
+        persist::embed_new_units(&state.pool, &client, &[(unit, current)])
+            .await
+            .unwrap(),
+        0
+    );
 
     // Leave this shared integration database ready for the other test binaries.
     sqlx::query(
         "UPDATE atomic_units SET embedding = NULL, embedding_model = NULL,
          embedding_retry_at = NULL, embedding_attempts = 0
          WHERE embedding_model LIKE 'offline-test-model-%' OR embedding IS NULL",
-    ).execute(&state.pool).await.unwrap();
+    )
+    .execute(&state.pool)
+    .await
+    .unwrap();
     sqlx::query("UPDATE embedding_state SET model = NULL WHERE singleton")
-        .execute(&state.pool).await.unwrap();
+        .execute(&state.pool)
+        .await
+        .unwrap();
     server.abort();
 }
