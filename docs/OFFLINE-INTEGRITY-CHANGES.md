@@ -9,7 +9,7 @@ network activity.
 | --- | --- | --- |
 | P1 | Source withdrawal | Queue filters and a locked liveness check before persistence; photo grouping and captions check sources in their write transaction. |
 | P1 | Corrections | Save the complete previous unit and its edges; withdraw dependent conclusions; rebuild deterministic structure or clear it; reject delayed scanner and embedding writes. |
-| P1 | Temporal recurrence | Reuse a live or anchor-backed episode; retain ended episodes; allow a new episode after supersession; preserve explicit rejection. |
+| P1 | Temporal recurrence | Reuse an episode with the same assertion time or anchor; retain ended episodes; allow a new episode after supersession; preserve explicit rejection. |
 | P1 | Consistent exports | All export tables use one read-only repeatable-read snapshot. |
 | P2 | Backup retention | Filter Gather's tag and group by host/tags across random export filenames. |
 | P2 | Bundle memory and limits | Stream export with backpressure; stage imports in private files; enforce separate bundle/record limits; import atomically in dependency order. |
@@ -25,7 +25,8 @@ network activity.
 Migrations 0020–0023 add revision history, remove global statement uniqueness,
 add the semantic cache ledger, and add embedding identity/retry state. Existing
 claims, dates and provenance are retained; missing temporal history is not
-fabricated. Embeddings with unknown identity are cleared and rebuilt using the
+fabricated. Ingestion time is not used as a source's asserted date. Distinct
+dated assertions have separate episodes even if scanning has not run yet. Embeddings with unknown identity are cleared and rebuilt using the
 user's configured local model. Startup model changes clear incompatible vectors
 in one transaction. Import also clears incompatible vector-derived state.
 

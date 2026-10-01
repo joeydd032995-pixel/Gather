@@ -590,7 +590,7 @@ pub(crate) async fn load_chunks(
     for row in run!(format!(
         r#"
         SELECT m.id, m.content, m.role,
-               COALESCE(m.created_at, a.source_created_at, a.ingested_at) AS source_time,
+               COALESCE(m.created_at, a.source_created_at) AS source_time,
                c.artifact_id
         FROM messages m
         JOIN conversations c ON c.id = m.conversation_id
@@ -613,7 +613,7 @@ pub(crate) async fn load_chunks(
     for row in run!(format!(
         r#"
         SELECT s.id, s.content,
-               COALESCE(a.source_created_at, a.ingested_at) AS source_time,
+               a.source_created_at AS source_time,
                d.artifact_id
         FROM document_segments s
         JOIN documents d ON d.id = s.document_id
@@ -638,7 +638,7 @@ pub(crate) async fn load_chunks(
     for row in run!(format!(
         r#"
         SELECT i.id, i.ocr_text, i.ocr_confidence,
-               COALESCE(i.taken_at, a.source_created_at, a.ingested_at) AS source_time,
+               COALESCE(i.taken_at, a.source_created_at) AS source_time,
                i.artifact_id
         FROM images i
         JOIN artifacts a ON a.id = i.artifact_id

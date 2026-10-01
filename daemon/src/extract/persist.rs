@@ -189,7 +189,7 @@ pub async fn persist_chunk_units(
         }
 
         // Per-proposition serialization replaces global uniqueness. Reuse a
-        // live episode or this anchor's original episode, and preserve an
+        // episode with the same assertion time or this anchor's original episode, and preserve an
         // explicit rejection until the user restores it.
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
             .bind(&statement_hash)
@@ -198,7 +198,7 @@ pub async fn persist_chunk_units(
         let (message_id, segment_id, image_id) = anchor_columns(chunk.anchor);
         let existing: Option<(Uuid,)> = sqlx::query_as(
             "SELECT u.id FROM atomic_units u WHERE u.statement_hash = $1
-             AND (u.status = 'active'
+             AND ((u.status IN ('active', 'disputed') AND u.valid_from IS NOT DISTINCT FROM $5)
                   OR EXISTS (SELECT 1 FROM atomic_unit_provenance p
                              WHERE p.atomic_unit_id = u.id
                                AND p.message_id IS NOT DISTINCT FROM $2
@@ -219,6 +219,7 @@ pub async fn persist_chunk_units(
         .bind(message_id)
         .bind(segment_id)
         .bind(image_id)
+        .bind(valid_from)
         .fetch_optional(&mut *tx)
         .await?;
         let inserted: Option<(Uuid,)> = if existing.is_some() {

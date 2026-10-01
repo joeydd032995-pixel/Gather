@@ -91,35 +91,33 @@ async fn recurring_claim_has_a_new_episode_without_reversing_rejection() {
     let middle = chunk(&state, &middle_text, 2).await;
     let middle_result = persist(&state, &middle, Claim::Fresh { llm_model: None }).await;
     let middle_unit = middle_result.new_units[0].0;
-    for _ in 0..200 {
-        gather_daemon::scan::run_one_scan(&state.pool, &state.config, None).await.unwrap();
-        let status: String =
-            sqlx::query_scalar("SELECT status::text FROM atomic_units WHERE id = $1")
-                .bind(old).fetch_one(&state.pool).await.unwrap();
-        if status == "superseded" {
-            break;
-        }
-    }
-    let status: String = sqlx::query_scalar("SELECT status::text FROM atomic_units WHERE id = $1")
-        .bind(old).fetch_one(&state.pool).await.unwrap();
-    assert_eq!(status, "superseded");
     let second = chunk(&state, &text, 3).await;
     let result = persist(&state, &second, Claim::Fresh { llm_model: None }).await;
     assert_eq!(result.units_created, 1);
     assert_ne!(old, result.new_units[0].0);
     let new = result.new_units[0].0;
+    // Extraction gets ahead of scanning: all three assertions already exist.
     for _ in 0..200 {
         gather_daemon::scan::run_one_scan(&state.pool, &state.config, None).await.unwrap();
-        let status: String =
-            sqlx::query_scalar("SELECT status::text FROM atomic_units WHERE id = $1")
-                .bind(middle_unit).fetch_one(&state.pool).await.unwrap();
-        if status == "superseded" {
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM atomic_units WHERE id = ANY($1) AND status <> 'superseded'",
+        )
+        .bind(vec![old, middle_unit])
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        if pending == 0 {
             break;
         }
     }
-    let status: String = sqlx::query_scalar("SELECT status::text FROM atomic_units WHERE id = $1")
-        .bind(middle_unit).fetch_one(&state.pool).await.unwrap();
-    assert_eq!(status, "superseded");
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM atomic_units WHERE id = ANY($1) AND status <> 'superseded'",
+    )
+    .bind(vec![old, middle_unit])
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(pending, 0);
     let old_end: Option<chrono::DateTime<Utc>> =
         sqlx::query_scalar("SELECT valid_to FROM atomic_units WHERE id = $1")
             .bind(old)
