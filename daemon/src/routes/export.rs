@@ -212,17 +212,23 @@ pub(crate) async fn bundle_stream(
                 let mut rows = sqlx::query(sqlx::AssertSqlSafe(sql)).fetch(&mut *tx);
                 while let Some(row) = rows.next().await {
                     let row = row?;
-                    let json: String = row.get("j");
+                    let json: &str = row.try_get("j")?;
                     if json.len() as u64 > MAX_RECORD_BYTES - 128 {
                         return Err(ApiError::PayloadTooLarge(
                             "bundle or record exceeds its size limit".into(),
                         ));
                     }
-                    let line = format!("{{\"type\":\"{table}\",\"row\":{json}}}\n");
-                    for chunk in line.as_bytes().chunks(CHUNK_BYTES) {
+                    let prefix = format!("{{\"type\":\"{table}\",\"row\":");
+                    if sender.send(Ok(prefix.into_bytes())).await.is_err() {
+                        return Ok(());
+                    }
+                    for chunk in json.as_bytes().chunks(CHUNK_BYTES) {
                         if sender.send(Ok(chunk.to_vec())).await.is_err() {
                             return Ok(());
                         }
+                    }
+                    if sender.send(Ok(b"}\n".to_vec())).await.is_err() {
+                        return Ok(());
                     }
                 }
             }
@@ -392,9 +398,10 @@ pub(crate) async fn import_bundle_file(
         );
         let mut inserted = 0u64;
         while let Some(line) = read_record(&mut reader).await? {
-            let value: Value = serde_json::from_str(&line)
+            let mut value: Value = serde_json::from_str(&line)
                 .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-            let mut row = value["row"].clone();
+            drop(line);
+            let mut row = value["row"].take();
             if let Some(object) = row.as_object_mut() {
                 if *table == "atomic_units" {
                     object.entry("content_revision").or_insert(json!(0));

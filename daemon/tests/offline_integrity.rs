@@ -108,12 +108,18 @@ async fn recurring_claim_has_a_new_episode_without_reversing_rejection() {
     let reread = persist(
         &state,
         &first,
-        Claim::Reread { job: Uuid::new_v4(), model: "local-test".into() },
-    ).await;
+        Claim::Reread {
+            job: Uuid::new_v4(),
+            model: "local-test".into(),
+        },
+    )
+    .await;
     assert_eq!(reread.units_created, 0);
     assert_eq!(reread.units_reasserted, 0);
 
-    routes::feedback::reject_unit_core(&state.pool, new, None).await.unwrap();
+    routes::feedback::reject_unit_core(&state.pool, new, None)
+        .await
+        .unwrap();
     let third = chunk(&state, &text, 4).await;
     let result = persist(&state, &third, Claim::Fresh { llm_model: None }).await;
     assert_eq!(result.units_created, 0);
@@ -133,9 +139,10 @@ async fn export_keeps_source_and_claim_state_from_one_snapshot() {
     let result = persist(&state, &chunk, Claim::Fresh { llm_model: None }).await;
     let unit = result.new_units[0].0;
     let app = routes::build_router(state.clone());
-    let response = app.oneshot(
-        Request::get("/api/v1/export").body(Body::empty()).unwrap()
-    ).await.unwrap();
+    let response = app
+        .oneshot(Request::get("/api/v1/export").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let mut body = response.into_body();
     let mut pending = Vec::new();
@@ -191,14 +198,25 @@ async fn invalid_import_rolls_back_prior_records() {
             "created_at": Utc::now()
         }}),
     ];
-    let bundle = records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
+    let bundle = records
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
     let response = routes::build_router(state.clone())
-        .oneshot(Request::post("/api/v1/import")
-            .header(header::CONTENT_TYPE, "application/x-ndjson")
-            .body(Body::from(bundle)).unwrap())
-        .await.unwrap();
+        .oneshot(
+            Request::post("/api/v1/import")
+                .header(header::CONTENT_TYPE, "application/x-ndjson")
+                .body(Body::from(bundle))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_ne!(response.status(), StatusCode::OK);
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE id = $1)")
-        .bind(project).fetch_one(&state.pool).await.unwrap();
+        .bind(project)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
     assert!(!exists);
 }

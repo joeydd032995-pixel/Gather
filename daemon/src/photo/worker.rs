@@ -307,7 +307,7 @@ async fn regroup_pass(
 
     let album_groups = albums(&photos, config);
     stats.albums = album_groups.len();
-    reconcile(pool, Grouping::Albums, &album_groups).await?;
+    reconcile(&mut tx, Grouping::Albums, &album_groups).await?;
 
     // Stamp exactly the photos this pass saw, so one prepared concurrently
     // still triggers the next regroup.
