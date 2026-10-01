@@ -299,7 +299,7 @@ pub async fn embed_pending_entities(
     };
     let mut updated = 0usize;
     for ((id, name), embedding) in rows.iter().zip(embeddings) {
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE entities SET embedding = $2, embedding_model = $4
              WHERE id = $1 AND name = $3 AND embedding IS NULL
                AND merged_into_entity_id IS NULL
@@ -312,7 +312,7 @@ pub async fn embed_pending_entities(
         .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
-        updated += 1;
+        updated += result.rows_affected() as usize;
     }
     tx.commit().await.map_err(|error| error.to_string())?;
     Ok(updated)

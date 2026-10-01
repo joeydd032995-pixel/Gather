@@ -578,7 +578,7 @@ pub async fn embed_new_units(
     };
     let mut updated = 0usize;
     for ((id, statement), embedding) in new_units.iter().zip(embeddings) {
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE atomic_units SET embedding = $2, embedding_model = $4,
                     embedding_attempts = 0, embedding_retry_at = NULL
              WHERE id = $1 AND statement = $3 AND content_revision = $5
@@ -593,7 +593,7 @@ pub async fn embed_new_units(
         .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
-        updated += 1;
+        updated += result.rows_affected() as usize;
     }
     tx.commit().await.map_err(|error| error.to_string())?;
     Ok(updated)
@@ -686,6 +686,16 @@ pub async fn embedding_write_transaction<'a>(
     model: &str,
 ) -> Result<Option<Transaction<'a, Postgres>>, String> {
     let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
+    // Also supports library users/tests that construct a client without main.
+    // Once set, only the explicit startup model-change path may replace it.
+    sqlx::query(
+        "UPDATE embedding_state SET model = $1, generation = generation + 1
+         WHERE singleton AND model IS NULL",
+    )
+    .bind(model)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| error.to_string())?;
     let current: Option<String> =
         sqlx::query_scalar("SELECT model FROM embedding_state WHERE singleton FOR SHARE")
             .fetch_one(&mut *tx)
@@ -719,7 +729,7 @@ pub async fn embed_pending_segments(
     };
     let mut updated = 0usize;
     for ((id, statement), embedding) in rows.iter().zip(embeddings) {
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE document_segments SET embedding = $2, embedding_model = $4
              WHERE id = $1 AND content = $3 AND embedding IS NULL
                AND (SELECT model FROM embedding_state WHERE singleton) = $4",
@@ -731,7 +741,7 @@ pub async fn embed_pending_segments(
         .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
-        updated += 1;
+        updated += result.rows_affected() as usize;
     }
     tx.commit().await.map_err(|error| error.to_string())?;
     Ok(updated)
