@@ -864,11 +864,11 @@ async fn the_migration_is_reversible() {
     // Test this historical migration at its own schema version. Later
     // migrations deliberately depend on the safety columns being present.
     let migrations = sqlx::migrate!("./migrations");
-    for migration in migrations.iter().filter(|migration| migration.version <= 15) {
-        sqlx::raw_sql(&migration.sql)
-            .execute(&pool)
-            .await
-            .unwrap();
+    for migration in migrations
+        .iter()
+        .filter(|migration| migration.version <= 15)
+    {
+        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
     }
     let exists = |pool: sqlx::PgPool| async move {
         sqlx::query_scalar::<_, bool>(

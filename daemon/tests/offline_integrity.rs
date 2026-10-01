@@ -441,10 +441,11 @@ async fn local_embedding_retry_revision_guard_and_model_change() {
         .await
         .unwrap();
     // Albums are based on EXIF, not the embedding model, and must survive a switch.
-    let album: Uuid = sqlx::query_scalar("INSERT INTO clusters (kind) VALUES ('album') RETURNING id")
-        .fetch_one(&state.pool)
-        .await
-        .unwrap();
+    let album: Uuid =
+        sqlx::query_scalar("INSERT INTO clusters (kind) VALUES ('album') RETURNING id")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
     let photo: Uuid = sqlx::query_scalar(
         "INSERT INTO images (artifact_id, width, height, album_cluster_id)
          VALUES ($1, 1, 1, $2) RETURNING id",

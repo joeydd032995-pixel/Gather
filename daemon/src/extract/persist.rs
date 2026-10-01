@@ -6,7 +6,7 @@
 use chrono::{DateTime, Utc};
 use pgvector::Vector;
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use super::ollama::OllamaClient;
@@ -656,9 +656,6 @@ pub async fn embed_pending_units(
     }
 }
 
-/// Changing the configured local model invalidates all incompatible vectors in
-/// one transaction, before serving searches or starting background workers.
-
 /// Repeated statements can corroborate one open episode across dates. A
 /// structurally conflicting assertion between those dates starts a new episode,
 /// even when the scanner has not yet closed the old one.
@@ -770,8 +767,8 @@ pub async fn ensure_embedding_model(pool: &PgPool, model: &str) -> Result<(), sq
             "DELETE FROM cluster_members m USING clusters c WHERE m.cluster_id = c.id
              AND (m.member_kind = 'unit' OR (m.member_kind = 'image' AND c.kind = 'photo_topic'))",
         )
-            .execute(&mut *tx)
-            .await?;
+        .execute(&mut *tx)
+        .await?;
         sqlx::query(
             "UPDATE embedding_state SET model = $1, generation = generation + 1 WHERE singleton",
         )
