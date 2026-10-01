@@ -13,9 +13,9 @@ pub mod safety;
 pub mod tuning;
 
 use axum::extract::{DefaultBodyLimit, MatchedPath, Request, State};
-use axum::http::{HeaderValue, Method};
+use axum::http::{HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
@@ -185,6 +185,7 @@ pub fn build_router(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .layer(DefaultBodyLimit::max(max_body))
+        .layer(middleware::from_fn(require_trusted_origin))
         .with_state(state)
 }
 
@@ -229,4 +230,30 @@ async fn record_http_metrics(
     .record(elapsed);
 
     response
+}
+
+/// CORS response headers alone do not prevent a browser from sending a simple
+/// cross-origin POST. Reject untrusted origins before a handler can mutate.
+async fn require_trusted_origin(request: Request, next: Next) -> Response {
+    if !matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    ) {
+        let origins = request.headers().get_all(axum::http::header::ORIGIN);
+        let values: Vec<_> = origins.iter().collect();
+        if !values.is_empty()
+            && (values.len() != 1
+                || !values[0]
+                    .to_str()
+                    .map(|origin| ALLOWED_ORIGINS.contains(&origin))
+                    .unwrap_or(false))
+        {
+            return (
+                StatusCode::FORBIDDEN,
+                axum::Json(serde_json::json!({ "error": "untrusted browser origin" })),
+            )
+                .into_response();
+        }
+    }
+    next.run(request).await
 }

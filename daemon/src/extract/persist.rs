@@ -78,6 +78,19 @@ pub async fn persist_chunk_units(
 ) -> Result<Option<PersistOutcome>, ApiError> {
     let mut tx = pool.begin().await?;
 
+    // Serialize with source withdrawal before touching chunk or derived rows.
+    // The model call happens before this transaction, so check liveness again.
+    let live: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM artifacts WHERE id = $1 AND retracted_at IS NULL FOR UPDATE",
+    )
+    .bind(chunk.artifact_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if live.is_none() {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+
     // Claim: stamp the marker iff still unstamped (or, for a re-read, still
     // not read by this model or job); concurrent workers skip.
     let claim_sql = match (claim, chunk.anchor) {

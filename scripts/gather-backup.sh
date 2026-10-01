@@ -81,9 +81,10 @@ if ! restic backup "$bundle" --tag gather-bundle; then
   log "backup: FAILED — restic backup failed"
   exit 1
 fi
-snapshot_id=$(restic snapshots --latest 1 --json | grep -o '"short_id":"[a-f0-9]*"' | head -1 | cut -d'"' -f4)
+snapshot_id=$(restic snapshots --tag gather-bundle --latest 1 --json | grep -o '"short_id":"[a-f0-9]*"' | head -1 | cut -d'"' -f4)
 
 if ! restic forget \
+  --tag gather-bundle --group-by host,tags \
   --keep-daily "$RESTIC_KEEP_DAILY" \
   --keep-weekly "$RESTIC_KEEP_WEEKLY" \
   --keep-monthly "$RESTIC_KEEP_MONTHLY" \

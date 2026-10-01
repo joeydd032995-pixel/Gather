@@ -173,6 +173,10 @@ pub async fn export_bundle(State(state): State<AppState>) -> Result<impl IntoRes
 
 /// Serialize the entire store as a gather-bundle-v1 NDJSON string (REST + gRPC).
 pub(crate) async fn build_bundle(pool: &sqlx::PgPool) -> Result<String, ApiError> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await?;
     let mut out = String::new();
     out.push_str(
         &json!({
@@ -194,13 +198,14 @@ pub(crate) async fn build_bundle(pool: &sqlx::PgPool) -> Result<String, ApiError
             format!("SELECT row_to_json(t)::text AS j FROM (SELECT {columns} FROM {table}) t");
         // Safe: table/column names come from the TABLES constant, not input.
         let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
-            .fetch_all(pool)
+            .fetch_all(&mut *tx)
             .await?;
         for row in rows {
             let j: String = row.get("j");
             out.push_str(&format!("{{\"type\":\"{table}\",\"row\":{j}}}\n"));
         }
     }
+    tx.commit().await?;
     Ok(out)
 }
 
