@@ -998,8 +998,20 @@ pub fn touch() {
 pub async fn load(pool: &PgPool, max: usize) -> Result<Arc<Loaded>, ApiError> {
     let mut store = STORE.lock().await;
     let writes = WRITES.load(Ordering::Relaxed);
+    // Compaction never locks a semantic writer's uncommitted revision. Its
+    // new marker commits with deletion, so another daemon's cache sees it too.
+    sqlx::query(
+        "WITH removed AS (
+             DELETE FROM gather_semantic_revisions
+             WHERE revision < (SELECT max(revision) - 256 FROM gather_semantic_revisions)
+             RETURNING revision)
+         INSERT INTO gather_semantic_revisions (revision)
+         SELECT nextval('gather_semantic_revision') WHERE EXISTS (SELECT 1 FROM removed)",
+    )
+    .execute(pool)
+    .await?;
     let revision: Arc<[i64]> =
-        sqlx::query_scalar("SELECT revision FROM gather_semantic_revisions ORDER BY revision")
+        sqlx::query_scalar("SELECT revision FROM gather_semantic_revisions ORDER BY revision DESC LIMIT 257")
             .fetch_all(pool)
             .await?
             .into();
@@ -1175,7 +1187,9 @@ async fn compute(pool: &PgPool, ids: &[Uuid]) -> Result<HashMap<Uuid, Signature>
                FROM units un \
                JOIN relationships r ON r.atomic_unit_id = un.atomic_unit_id \
               CROSS JOIN LATERAL (VALUES (r.source_entity_id), (r.target_entity_id)) y(entity_id) \
-              WHERE r.status = 'active') x \
+              WHERE r.status = 'active' \
+                AND EXISTS (SELECT 1 FROM atomic_units u WHERE u.id = r.atomic_unit_id \
+                            AND u.status IN ('active', 'disputed'))) x \
          JOIN entities e ON e.id = x.entity_id AND e.merged_into_entity_id IS NULL",
     )
     .bind(ids)

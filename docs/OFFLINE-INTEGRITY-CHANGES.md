@@ -29,9 +29,10 @@ fabricated. Embeddings with unknown identity are cleared and rebuilt using the
 user's configured local model. Startup model changes clear incompatible vectors
 in one transaction. Import also clears incompatible vector-derived state.
 
-The revision ledger keeps the latest 257 revisions plus any older transactions
-that commit late. Cache keys use the exact committed set, avoiding both a shared
-counter lock and a missed late commit. Invalidation is conservative across the
+Cache checks compact the revision ledger to the latest 257 visible revisions,
+recording compaction in the same transaction. Cache keys use that committed set,
+avoiding both a shared counter lock and a missed late commit. Writes append
+revisions until the next cache check. Invalidation is conservative across the
 bounded project cache.
 
 The v1 bundle format remains supported, with new columns/tables exported and

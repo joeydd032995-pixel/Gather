@@ -87,17 +87,39 @@ async fn recurring_claim_has_a_new_episode_without_reversing_rejection() {
     assert_eq!(result.units_created, 1);
     let old = result.new_units[0].0;
     let ended = Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap();
-    sqlx::query("UPDATE atomic_units SET status = 'superseded', valid_to = $2 WHERE id = $1")
-        .bind(old)
-        .bind(ended)
-        .execute(&state.pool)
-        .await
-        .unwrap();
+    let middle_text = text.replace("$50", "$75");
+    let middle = chunk(&state, &middle_text, 2).await;
+    let middle_result = persist(&state, &middle, Claim::Fresh { llm_model: None }).await;
+    let middle_unit = middle_result.new_units[0].0;
+    for _ in 0..200 {
+        gather_daemon::scan::run_one_scan(&state.pool, &state.config, None).await.unwrap();
+        let status: String =
+            sqlx::query_scalar("SELECT status::text FROM atomic_units WHERE id = $1")
+                .bind(old).fetch_one(&state.pool).await.unwrap();
+        if status == "superseded" {
+            break;
+        }
+    }
+    let status: String = sqlx::query_scalar("SELECT status::text FROM atomic_units WHERE id = $1")
+        .bind(old).fetch_one(&state.pool).await.unwrap();
+    assert_eq!(status, "superseded");
     let second = chunk(&state, &text, 3).await;
     let result = persist(&state, &second, Claim::Fresh { llm_model: None }).await;
     assert_eq!(result.units_created, 1);
     assert_ne!(old, result.new_units[0].0);
     let new = result.new_units[0].0;
+    for _ in 0..200 {
+        gather_daemon::scan::run_one_scan(&state.pool, &state.config, None).await.unwrap();
+        let status: String =
+            sqlx::query_scalar("SELECT status::text FROM atomic_units WHERE id = $1")
+                .bind(middle_unit).fetch_one(&state.pool).await.unwrap();
+        if status == "superseded" {
+            break;
+        }
+    }
+    let status: String = sqlx::query_scalar("SELECT status::text FROM atomic_units WHERE id = $1")
+        .bind(middle_unit).fetch_one(&state.pool).await.unwrap();
+    assert_eq!(status, "superseded");
     let old_end: Option<chrono::DateTime<Utc>> =
         sqlx::query_scalar("SELECT valid_to FROM atomic_units WHERE id = $1")
             .bind(old)
@@ -418,4 +440,22 @@ async fn local_embedding_retry_revision_guard_and_model_change() {
         .await
         .unwrap();
     server.abort();
+}
+
+#[tokio::test]
+async fn restore_cannot_reactivate_a_claim_after_its_only_source_was_withdrawn() {
+    let Some(state) = state().await else {
+        return;
+    };
+    let text = format!("I use Gone{} for storage.", Uuid::new_v4().simple());
+    let chunk = chunk(&state, &text, 1).await;
+    let result = persist(&state, &chunk, Claim::Fresh { llm_model: None }).await;
+    let unit = result.new_units[0].0;
+    gather_daemon::safety::service::retract_artifact(
+        &state.pool, chunk.artifact_id, None, false, None,
+    ).await.unwrap();
+    assert!(routes::feedback::restore_unit_core(&state.pool, unit, None).await.is_err());
+    let status: String = sqlx::query_scalar("SELECT status::text FROM atomic_units WHERE id = $1")
+        .bind(unit).fetch_one(&state.pool).await.unwrap();
+    assert_eq!(status, "retracted");
 }

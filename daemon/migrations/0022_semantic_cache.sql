@@ -1,17 +1,14 @@
 -- Commit-visible revisions catch semantic changes without a shared-row lock.
--- Keep a bounded ledger: even an older transaction that commits late changes
--- the exact visible revision set, so it cannot hide behind a newer generation.
+-- Cache checks compact the ledger and mark that compaction atomically. Even an
+-- older transaction that commits late cannot hide behind a newer generation.
 CREATE SEQUENCE gather_semantic_revision;
 CREATE TABLE gather_semantic_revisions (
     revision bigint PRIMARY KEY DEFAULT nextval('gather_semantic_revision')
 );
 INSERT INTO gather_semantic_revisions DEFAULT VALUES;
 CREATE FUNCTION gather_touch_semantics() RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE new_revision bigint;
 BEGIN
-    INSERT INTO gather_semantic_revisions DEFAULT VALUES
-        RETURNING revision INTO new_revision;
-    DELETE FROM gather_semantic_revisions WHERE revision < new_revision - 256;
+    INSERT INTO gather_semantic_revisions DEFAULT VALUES;
     RETURN NULL;
 END $$;
 DO $$

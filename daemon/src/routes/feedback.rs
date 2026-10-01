@@ -196,7 +196,7 @@ pub async fn restore_unit_core(
     .await?;
     if unsupported {
         return Err(ApiError::BadRequest(
-            "restore a supporting source before restoring this claim".into(),
+            "this claim cannot be restored because its sources were withdrawn".into(),
         ));
     }
     // Rescan: conclusions withdrawn with the reject are re-derived afresh.
