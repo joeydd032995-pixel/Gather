@@ -164,6 +164,30 @@ pub(crate) const MAX_BUNDLE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_RECORD_BYTES: u64 = 1024 * 1024 * 1024;
 const CHUNK_BYTES: usize = 64 * 1024;
 
+pub(crate) struct BundleLimit {
+    bytes: u64,
+    limit: u64,
+}
+
+impl Default for BundleLimit {
+    fn default() -> Self {
+        Self { bytes: 0, limit: MAX_BUNDLE_BYTES }
+    }
+}
+
+pub(crate) async fn write_bundle_chunk(
+    file: &mut tokio::fs::File,
+    limit: &mut BundleLimit,
+    chunk: &[u8],
+) -> Result<(), ApiError> {
+    let total = limit.bytes.checked_add(chunk.len() as u64)
+        .filter(|total| *total <= limit.limit)
+        .ok_or_else(|| ApiError::PayloadTooLarge("bundle exceeds its size limit".into()))?;
+    file.write_all(chunk).await.map_err(|error| ApiError::Internal(error.into()))?;
+    limit.bytes = total;
+    Ok(())
+}
+
 pub async fn export_bundle(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
     let stream = bundle_stream(&state.pool).await?;
     Ok((
@@ -264,18 +288,10 @@ pub async fn import_bundle(
             .map_err(|error| ApiError::Internal(error.into()))?,
     );
     let mut stream = body.into_data_stream();
-    let mut size = 0u64;
+    let mut limit = BundleLimit::default();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|error| ApiError::BadRequest(error.to_string()))?;
-        size = size.saturating_add(chunk.len() as u64);
-        if size > MAX_BUNDLE_BYTES {
-            return Err(ApiError::PayloadTooLarge(
-                "bundle or record exceeds its size limit".into(),
-            ));
-        }
-        file.write_all(&chunk)
-            .await
-            .map_err(|error| ApiError::Internal(error.into()))?;
+        write_bundle_chunk(&mut file, &mut limit, &chunk).await?;
     }
     file.flush()
         .await
@@ -448,4 +464,23 @@ pub(crate) async fn import_bundle_file(
     }
     tx.commit().await?;
     Ok(counts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn aggregate_import_limit_rejects_before_writing_the_excess_chunk() {
+        let temporary = private_bundle_file().unwrap();
+        let mut file = tokio::fs::File::from_std(temporary.reopen().unwrap());
+        let mut limit = BundleLimit { bytes: 0, limit: 4 };
+        write_bundle_chunk(&mut file, &mut limit, b"abc").await.unwrap();
+        assert!(matches!(
+            write_bundle_chunk(&mut file, &mut limit, b"de").await,
+            Err(ApiError::PayloadTooLarge(_))
+        ));
+        file.flush().await.unwrap();
+        assert_eq!(std::fs::read(temporary.path()).unwrap(), b"abc");
+    }
 }

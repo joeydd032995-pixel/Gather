@@ -18,6 +18,10 @@ use tauri::{AppHandle, Manager, RunEvent, State};
 use runtime::{Paths, Runtime, Status};
 use updates::{InstallError, PendingUpdate, UpdateCheck, UpdateSettings};
 
+struct DesktopInstanceLock {
+    _file: std::fs::File,
+}
+
 /// Read a file the user explicitly selected via the native dialog so the
 /// webview can upload it to the local daemon. Scope: only invoked with paths
 /// returned by the dialog plugin; rejects directories. Returned as raw bytes
@@ -271,7 +275,7 @@ pub fn run() {
                 .open(data.join("desktop.lock"))?;
             match lock.try_lock() {
                 Ok(()) => {
-                    app.manage(lock);
+                    app.manage(DesktopInstanceLock { _file: lock });
                 }
                 Err(std::fs::TryLockError::WouldBlock) => {
                     std::fs::write(data.join("focus.request"), [])?;

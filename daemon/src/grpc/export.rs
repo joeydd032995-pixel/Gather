@@ -8,7 +8,7 @@ use tonic::{Request, Response, Status, Streaming};
 
 use super::{pb, status_from};
 use crate::routes::export::{
-    bundle_stream, import_bundle_file, private_bundle_file, MAX_BUNDLE_BYTES,
+    bundle_stream, import_bundle_file, private_bundle_file, write_bundle_chunk, BundleLimit,
 };
 use crate::AppState;
 use tokio::io::AsyncWriteExt;
@@ -45,16 +45,12 @@ impl pb::export_service_server::ExportService for ExportApi {
                 .reopen()
                 .map_err(|error| Status::internal(error.to_string()))?,
         );
-        let mut size = 0u64;
+        let mut limit = BundleLimit::default();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
-            size = size.saturating_add(chunk.data.len() as u64);
-            if size > MAX_BUNDLE_BYTES {
-                return Err(Status::resource_exhausted("bundle exceeds 64 GiB"));
-            }
-            file.write_all(&chunk.data)
+            write_bundle_chunk(&mut file, &mut limit, &chunk.data)
                 .await
-                .map_err(|error| Status::internal(error.to_string()))?;
+                .map_err(status_from)?;
         }
         file.flush()
             .await

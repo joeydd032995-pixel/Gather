@@ -381,6 +381,35 @@ async fn local_embedding_retry_revision_guard_and_model_change() {
     .await
     .unwrap();
     assert!(stored);
+    let ChunkAnchor::Segment(segment) = chunk.anchor else {
+        unreachable!();
+    };
+    let mut vector = vec![0.0f32; 768];
+    vector[0] = 1.0;
+    sqlx::query(
+        "UPDATE document_segments SET embedding = $2, embedding_model = $3 WHERE id = $1",
+    )
+    .bind(segment)
+    .bind(pgvector::Vector::from(vector.clone()))
+    .bind(&client.embed_model)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    let response = routes::build_router(state.clone())
+        .oneshot(
+            Request::post("/api/v1/search/semantic")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({
+                    "embedding": vector, "scope": "document_segments"
+                }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let hits: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(hits["hits"][0]["id"], segment.to_string());
 
     let corrected = format!("Corrected wording {}", Uuid::new_v4());
     routes::feedback::edit_unit_core(&state.pool, unit, &corrected, None)
@@ -456,4 +485,19 @@ async fn restore_cannot_reactivate_a_claim_after_its_only_source_was_withdrawn()
     let status: String = sqlx::query_scalar("SELECT status::text FROM atomic_units WHERE id = $1")
         .bind(unit).fetch_one(&state.pool).await.unwrap();
     assert_eq!(status, "retracted");
+    let response = routes::build_router(state.clone())
+        .oneshot(
+            Request::post("/api/v1/search/semantic")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({
+                    "text": text, "scope": "document_segments"
+                }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let results: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(results["hits"].as_array().unwrap().is_empty());
 }

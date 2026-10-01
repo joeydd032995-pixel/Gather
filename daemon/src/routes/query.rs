@@ -487,8 +487,10 @@ pub(crate) async fn search_core(
             }
             "document_segments" => {
                 sqlx::query_scalar(
-                    "SELECT EXISTS (SELECT 1 FROM document_segments WHERE embedding IS NOT NULL
-                 AND embedding_model IS NOT DISTINCT FROM $1)",
+                    "SELECT EXISTS (SELECT 1 FROM document_segments s
+                 JOIN documents d ON d.id = s.document_id
+                 JOIN artifacts a ON a.id = d.artifact_id AND a.retracted_at IS NULL
+                 WHERE s.embedding IS NOT NULL AND s.embedding_model IS NOT DISTINCT FROM $1)",
                 )
                 .bind(&embedding_model)
                 .fetch_one(&state.pool)
@@ -508,7 +510,8 @@ pub(crate) async fn search_core(
                 SELECT u.id, u.statement AS content,
                        1 - (u.embedding <=> $1) AS score,
                        (SELECT p.artifact_id FROM atomic_unit_provenance p
-                        WHERE p.atomic_unit_id = u.id LIMIT 1) AS artifact_id
+                        JOIN artifacts a ON a.id = p.artifact_id AND a.retracted_at IS NULL
+                        WHERE p.atomic_unit_id = u.id ORDER BY p.created_at DESC LIMIT 1) AS artifact_id
                 FROM atomic_units u
                 WHERE u.embedding IS NOT NULL AND u.status = 'active'
                   AND u.embedding_model IS NOT DISTINCT FROM $3
@@ -533,6 +536,7 @@ pub(crate) async fn search_core(
                        d.artifact_id
                 FROM document_segments s
                 JOIN documents d ON d.id = s.document_id
+                JOIN artifacts a ON a.id = d.artifact_id AND a.retracted_at IS NULL
                 WHERE s.embedding IS NOT NULL
                   AND s.embedding_model IS NOT DISTINCT FROM $3
                 ORDER BY s.embedding <=> $1
@@ -541,6 +545,7 @@ pub(crate) async fn search_core(
             )
             .bind(vec)
             .bind(limit)
+            .bind(&embedding_model)
             .fetch_all(&state.pool)
             .await?
             .iter()
@@ -553,7 +558,8 @@ pub(crate) async fn search_core(
                 SELECT u.id, u.statement AS content,
                        ts_rank(u.statement_tsv, websearch_to_tsquery('english', $1))::float8 AS score,
                        (SELECT p.artifact_id FROM atomic_unit_provenance p
-                        WHERE p.atomic_unit_id = u.id LIMIT 1) AS artifact_id
+                        JOIN artifacts a ON a.id = p.artifact_id AND a.retracted_at IS NULL
+                        WHERE p.atomic_unit_id = u.id ORDER BY p.created_at DESC LIMIT 1) AS artifact_id
                 FROM atomic_units u
                 WHERE u.statement_tsv @@ websearch_to_tsquery('english', $1)
                   AND u.status = 'active'
@@ -577,6 +583,7 @@ pub(crate) async fn search_core(
                        c.artifact_id
                 FROM messages m
                 JOIN conversations c ON c.id = m.conversation_id
+                JOIN artifacts a ON a.id = c.artifact_id AND a.retracted_at IS NULL
                 WHERE m.content_tsv @@ websearch_to_tsquery('english', $1)
                 ORDER BY score DESC
                 LIMIT $2
@@ -598,6 +605,7 @@ pub(crate) async fn search_core(
                        d.artifact_id
                 FROM document_segments s
                 JOIN documents d ON d.id = s.document_id
+                JOIN artifacts a ON a.id = d.artifact_id AND a.retracted_at IS NULL
                 WHERE s.content_tsv @@ websearch_to_tsquery('english', $1)
                 ORDER BY score DESC
                 LIMIT $2

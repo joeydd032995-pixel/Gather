@@ -1177,6 +1177,7 @@ async fn compute(pool: &PgPool, ids: &[Uuid]) -> Result<HashMap<Uuid, Signature>
              SELECT DISTINCT i.project_id, pv.atomic_unit_id \
                FROM project_items i \
                JOIN atomic_unit_provenance pv ON pv.artifact_id = i.artifact_id \
+               JOIN artifacts a ON a.id = i.artifact_id AND a.retracted_at IS NULL \
               WHERE i.project_id = ANY($1)) \
          SELECT DISTINCT x.project_id, e.id, e.name FROM ( \
              SELECT un.project_id, u.subject_entity_id AS entity_id \
@@ -1213,6 +1214,7 @@ async fn compute(pool: &PgPool, ids: &[Uuid]) -> Result<HashMap<Uuid, Signature>
                     row_number() OVER (PARTITION BY i.project_id ORDER BY s.id) AS n \
                FROM project_items i \
                JOIN documents d ON d.artifact_id = i.artifact_id \
+           JOIN artifacts a ON a.id = d.artifact_id AND a.retracted_at IS NULL \
                JOIN document_segments s ON s.document_id = d.id \
               WHERE i.project_id = ANY($1)), \
          counts AS ( \
@@ -1252,6 +1254,7 @@ async fn compute(pool: &PgPool, ids: &[Uuid]) -> Result<HashMap<Uuid, Signature>
         "SELECT i.project_id, avg(s.embedding) AS centroid \
            FROM project_items i \
            JOIN documents d ON d.artifact_id = i.artifact_id \
+           JOIN artifacts a ON a.id = d.artifact_id AND a.retracted_at IS NULL \
            JOIN document_segments s ON s.document_id = d.id \
           WHERE i.project_id = ANY($1) AND s.embedding IS NOT NULL \
           GROUP BY 1",

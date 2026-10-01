@@ -189,8 +189,8 @@ pub async fn persist_chunk_units(
         }
 
         // Per-proposition serialization replaces global uniqueness. Reuse a
-        // episode with the same assertion time or this anchor's original episode, and preserve an
-        // explicit rejection until the user restores it.
+        // episode with the same assertion time or this anchor's original
+        // episode, preserving explicit rejection until the user restores it.
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
             .bind(&statement_hash)
             .execute(&mut *tx)
@@ -720,7 +720,10 @@ pub async fn embed_pending_segments(
     batch: i64,
 ) -> Result<usize, String> {
     let rows: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT id, content FROM document_segments WHERE embedding IS NULL ORDER BY id LIMIT $1",
+        "SELECT s.id, s.content FROM document_segments s
+         JOIN documents d ON d.id = s.document_id
+         JOIN artifacts a ON a.id = d.artifact_id
+         WHERE s.embedding IS NULL AND a.retracted_at IS NULL ORDER BY s.id LIMIT $1",
     )
     .bind(batch)
     .fetch_all(pool)
