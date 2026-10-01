@@ -7,7 +7,7 @@ network activity.
 
 | Priority | Change | Implementation |
 | --- | --- | --- |
-| P1 | Source withdrawal | Queue filters and a locked liveness check before persistence; photo grouping and captions check sources in their write transaction. |
+| P1 | Source withdrawal | Queue filters and a locked liveness check before persistence; photo grouping and captions check sources in their write transaction; remembered source lineage prevents unsupported restoration after hard deletion. |
 | P1 | Corrections | Save the complete previous unit and its edges; withdraw dependent conclusions; rebuild deterministic structure or clear it; reject delayed scanner and embedding writes. |
 | P1 | Temporal recurrence | Reuse an open episode or the same anchor; split on intervening structural conflicts even before scanning; retain ended episodes and explicit rejection. |
 | P1 | Consistent exports | All export tables use one read-only repeatable-read snapshot. |
@@ -22,8 +22,8 @@ network activity.
 
 ## Migrations and compatibility
 
-Migrations 0020–0023 add revision history, remove global statement uniqueness,
-add the semantic cache ledger, and add embedding identity/retry state. Existing
+Migrations 0020–0024 add revision history, remove global statement uniqueness,
+add the semantic cache ledger, add embedding identity/retry state, and remember source lineage after provenance deletion. Existing
 claims, dates and provenance are retained; missing temporal history is not
 fabricated. Ingestion time is not used as a source's asserted date. A returning state has a separate episode after an intervening conflicting
 assertion, even if scanning has not run yet. Repeated statements without a

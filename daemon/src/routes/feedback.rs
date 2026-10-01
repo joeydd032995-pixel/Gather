@@ -186,7 +186,7 @@ pub async fn restore_unit_core(
         )));
     }
     let unsupported: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM atomic_unit_provenance WHERE atomic_unit_id = $1)
+        "SELECT (SELECT has_source_history FROM atomic_units WHERE id = $1)
          AND NOT EXISTS (SELECT 1 FROM atomic_unit_provenance p
                          JOIN artifacts a ON a.id = p.artifact_id
                          WHERE p.atomic_unit_id = $1 AND a.retracted_at IS NULL)",

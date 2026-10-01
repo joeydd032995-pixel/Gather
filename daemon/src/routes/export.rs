@@ -85,7 +85,7 @@ const TABLES: &[(&str, &str)] = &[
         "id, kind, statement, statement_hash, subject_entity_id, confidence, \
          extraction_method, extraction_model, embedding, valid_from, valid_to, \
          status, superseded_by_unit_id, attrs, created_at, updated_at, \
-         contradiction_scanned_at, topic_cluster_id, clustered_at, asserted_at, observed_at, content_revision, embedding_model, embedding_retry_at, embedding_attempts",
+         contradiction_scanned_at, topic_cluster_id, clustered_at, asserted_at, observed_at, content_revision, embedding_model, embedding_retry_at, embedding_attempts, has_source_history",
     ),
     (
         "atomic_unit_revisions",
@@ -447,6 +447,7 @@ pub(crate) async fn import_bundle_file(
             if let Some(object) = row.as_object_mut() {
                 if *table == "atomic_units" {
                     object.entry("content_revision").or_insert(json!(0));
+                    object.entry("has_source_history").or_insert(json!(false));
                     object.entry("embedding_attempts").or_insert(json!(0));
                 }
                 if ["atomic_units", "document_segments", "entities", "images"].contains(table)

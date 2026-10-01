@@ -530,46 +530,63 @@ async fn restore_cannot_reactivate_a_claim_after_its_only_source_was_withdrawn()
     let Some(state) = state().await else {
         return;
     };
-    let text = format!("I use Gone{} for storage.", Uuid::new_v4().simple());
-    let chunk = chunk(&state, &text, 1).await;
-    let result = persist(&state, &chunk, Claim::Fresh { llm_model: None }).await;
-    let unit = result.new_units[0].0;
-    gather_daemon::safety::service::retract_artifact(
-        &state.pool,
-        chunk.artifact_id,
-        None,
-        false,
-        None,
-    )
-    .await
-    .unwrap();
-    assert!(routes::feedback::restore_unit_core(&state.pool, unit, None)
-        .await
-        .is_err());
-    let status: String = sqlx::query_scalar("SELECT status::text FROM atomic_units WHERE id = $1")
-        .bind(unit)
-        .fetch_one(&state.pool)
-        .await
-        .unwrap();
-    assert_eq!(status, "retracted");
-    let response = routes::build_router(state.clone())
-        .oneshot(
-            Request::post("/api/v1/search/semantic")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    json!({
-                        "text": text, "scope": "document_segments"
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
+    for delete in [false, true] {
+        let text = format!("I use Gone{} for storage.", Uuid::new_v4().simple());
+        let chunk = chunk(&state, &text, 1).await;
+        let result = persist(&state, &chunk, Claim::Fresh { llm_model: None }).await;
+        let unit = result.new_units[0].0;
+        gather_daemon::safety::service::retract_artifact(
+            &state.pool,
+            chunk.artifact_id,
+            None,
+            delete,
+            None,
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let results: Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(results["hits"].as_array().unwrap().is_empty());
+        if delete {
+            let sources: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM atomic_unit_provenance WHERE atomic_unit_id = $1",
+            )
+            .bind(unit)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+            assert_eq!(sources, 0);
+            // Corrections must not erase the remembered source lineage either.
+            routes::feedback::edit_unit_core(&state.pool, unit, "Corrected orphan", None)
+                .await
+                .unwrap();
+        }
+        assert!(routes::feedback::restore_unit_core(&state.pool, unit, None)
+            .await
+            .is_err());
+        let status: String =
+            sqlx::query_scalar("SELECT status::text FROM atomic_units WHERE id = $1")
+                .bind(unit)
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "retracted");
+        let response = routes::build_router(state.clone())
+            .oneshot(
+                Request::post("/api/v1/search/semantic")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "text": text, "scope": "document_segments"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let results: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(results["hits"].as_array().unwrap().is_empty());
+    }
 }
 
 #[tokio::test]
