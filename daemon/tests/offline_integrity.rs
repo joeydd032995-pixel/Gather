@@ -561,3 +561,72 @@ async fn restore_cannot_reactivate_a_claim_after_its_only_source_was_withdrawn()
     let results: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(results["hits"].as_array().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn importing_unknown_vectors_drops_their_topic_memberships() {
+    let Some(state) = state().await else {
+        return;
+    };
+    let unit = Uuid::new_v4();
+    let topic = Uuid::new_v4();
+    let now = Utc::now();
+    let records = [
+        json!({ "type": "manifest", "row": { "format": "gather-bundle-v1" } }),
+        json!({ "type": "clusters", "row": {
+            "id": topic, "kind": "topic", "label": "Imported topic",
+            "cohesion": 1.0, "size": 1, "created_at": now, "updated_at": now
+        }}),
+        json!({ "type": "atomic_units", "row": {
+            "id": unit, "kind": "fact", "statement": format!("Imported {unit}"),
+            "statement_hash": format!("{:0<64}", unit.simple()),
+            "confidence": 0.7, "extraction_method": "rule_based",
+            "attrs": {}, "status": "active", "created_at": now, "updated_at": now,
+            "embedding": format!("[{}]", vec!["1"; 768].join(",")),
+            "embedding_model": "unknown-import-model", "topic_cluster_id": topic
+        }}),
+        json!({ "type": "cluster_members", "row": {
+            "cluster_id": topic, "member_kind": "unit", "member_id": unit, "sim": 1.0
+        }}),
+    ];
+    let bundle = records
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let response = routes::build_router(state.clone())
+        .oneshot(
+            Request::post("/api/v1/import")
+                .header(header::CONTENT_TYPE, "application/x-ndjson")
+                .body(Body::from(bundle))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let invalidated: bool = sqlx::query_scalar(
+        "SELECT embedding IS NULL AND topic_cluster_id IS NULL
+         FROM atomic_units WHERE id = $1",
+    )
+    .bind(unit)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert!(invalidated);
+    let members: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM cluster_members WHERE cluster_id = $1")
+            .bind(topic)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert_eq!(members, 0);
+    sqlx::query("DELETE FROM atomic_units WHERE id = $1")
+        .bind(unit)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM clusters WHERE id = $1")
+        .bind(topic)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+}
