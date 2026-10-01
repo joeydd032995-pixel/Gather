@@ -189,7 +189,7 @@ async fn invalid_import_rolls_back_prior_records() {
     let records = [
         json!({ "type": "manifest", "row": { "format": "gather-bundle-v1" } }),
         json!({ "type": "projects", "row": {
-            "id": project, "name": "Rollback fixture", "source": "manual",
+            "id": project, "name": "Rollback fixture", "source": "folder",
             "created_at": Utc::now(), "updated_at": Utc::now()
         }}),
         json!({ "type": "project_items", "row": {
@@ -231,7 +231,7 @@ async fn similarity_cache_changes_when_unit_status_changes_without_new_rows() {
     let result = persist(&state, &chunk, Claim::Fresh { llm_model: None }).await;
     let unit = result.new_units[0].0;
     let project: Uuid = sqlx::query_scalar(
-        "INSERT INTO projects (name, source) VALUES ($1, 'manual') RETURNING id",
+        "INSERT INTO projects (name, source) VALUES ($1, 'folder') RETURNING id",
     )
     .bind(format!("Cache fixture {}", Uuid::new_v4()))
     .fetch_one(&state.pool)
@@ -247,7 +247,9 @@ async fn similarity_cache_changes_when_unit_status_changes_without_new_rows() {
     .execute(&state.pool)
     .await
     .unwrap();
-    let before = gather_daemon::projects::similarity::load(&state.pool, 1000).await.unwrap();
+    let before = gather_daemon::projects::similarity::load(&state.pool, 1000)
+        .await
+        .unwrap();
     assert!(!before.signatures[&project].entities.is_empty());
     let mut tx = state.pool.begin().await.unwrap();
     sqlx::query("UPDATE atomic_units SET status = 'retracted' WHERE id = $1")
@@ -255,10 +257,14 @@ async fn similarity_cache_changes_when_unit_status_changes_without_new_rows() {
         .execute(&mut *tx)
         .await
         .unwrap();
-    let pending = gather_daemon::projects::similarity::load(&state.pool, 1000).await.unwrap();
+    let pending = gather_daemon::projects::similarity::load(&state.pool, 1000)
+        .await
+        .unwrap();
     assert!(!pending.signatures[&project].entities.is_empty());
     tx.commit().await.unwrap();
-    let after = gather_daemon::projects::similarity::load(&state.pool, 1000).await.unwrap();
+    let after = gather_daemon::projects::similarity::load(&state.pool, 1000)
+        .await
+        .unwrap();
     assert!(after.signatures[&project].entities.is_empty());
     assert!(!Arc::ptr_eq(&before, &after));
 }

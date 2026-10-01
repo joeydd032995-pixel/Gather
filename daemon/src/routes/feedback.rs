@@ -84,6 +84,9 @@ async fn unit_status(
 /// label. Shared by the REST handler and the review tray.
 pub async fn reject_unit_core(pool: &PgPool, id: Uuid, note: Option<&str>) -> Result<(), ApiError> {
     let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('gather.scan.write'))")
+        .execute(&mut *tx)
+        .await?;
     unit_status(&mut tx, id).await?;
     sqlx::query("UPDATE atomic_units SET status = 'retracted' WHERE id = $1")
         .bind(id)
@@ -170,6 +173,9 @@ pub async fn restore_unit_core(
     note: Option<&str>,
 ) -> Result<(), ApiError> {
     let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('gather.scan.write'))")
+        .execute(&mut *tx)
+        .await?;
     let status = unit_status(&mut tx, id).await?;
     // Restore is the inverse of reject, nothing else. A unit superseded by a
     // contradiction resolution carries superseded_by_unit_id / valid_to that
@@ -178,6 +184,20 @@ pub async fn restore_unit_core(
         return Err(ApiError::BadRequest(format!(
             "only a retracted unit can be restored; unit {id} is '{status}'"
         )));
+    }
+    let unsupported: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM atomic_unit_provenance WHERE atomic_unit_id = $1)
+         AND NOT EXISTS (SELECT 1 FROM atomic_unit_provenance p
+                         JOIN artifacts a ON a.id = p.artifact_id
+                         WHERE p.atomic_unit_id = $1 AND a.retracted_at IS NULL)",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if unsupported {
+        return Err(ApiError::BadRequest(
+            "restore a supporting source before restoring this claim".into(),
+        ));
     }
     // Rescan: conclusions withdrawn with the reject are re-derived afresh.
     sqlx::query(

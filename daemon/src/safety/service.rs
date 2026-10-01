@@ -391,6 +391,9 @@ pub async fn retract_artifact(
     actor: Option<String>,
 ) -> Result<RetractionReport, ApiError> {
     let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('gather.scan.write'))")
+        .execute(&mut *tx)
+        .await?;
     let row = sqlx::query(
         "SELECT original_filename, content_hash, kind::text AS kind FROM artifacts \
          WHERE id = $1 FOR UPDATE",

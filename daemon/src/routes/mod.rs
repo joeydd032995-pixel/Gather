@@ -253,7 +253,10 @@ async fn require_trusted_origin(request: Request, next: Next) -> Response {
         {
             return (
                 StatusCode::FORBIDDEN,
-                axum::Json(serde_json::json!({ "error": "untrusted browser origin" })),
+                axum::Json(serde_json::json!({ "error": {
+                    "code": "untrusted_origin",
+                    "message": "untrusted browser origin"
+                } })),
             )
                 .into_response();
         }

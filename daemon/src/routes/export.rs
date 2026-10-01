@@ -202,6 +202,7 @@ pub(crate) async fn bundle_stream(
                     }
                 })
             );
+            let mut bytes_sent = manifest.len() as u64;
             if sender.send(Ok(manifest.into_bytes())).await.is_err() {
                 return Ok(());
             }
@@ -219,6 +220,10 @@ pub(crate) async fn bundle_stream(
                         ));
                     }
                     let prefix = format!("{{\"type\":\"{table}\",\"row\":");
+                    bytes_sent = bytes_sent.saturating_add((prefix.len() + json.len() + 2) as u64);
+                    if bytes_sent > MAX_BUNDLE_BYTES {
+                        return Err(ApiError::PayloadTooLarge("bundle exceeds 64 GiB".into()));
+                    }
                     if sender.send(Ok(prefix.into_bytes())).await.is_err() {
                         return Ok(());
                     }
@@ -408,7 +413,9 @@ pub(crate) async fn import_bundle_file(
                     object.entry("embedding_attempts").or_insert(json!(0));
                 }
                 if ["atomic_units", "document_segments", "entities", "images"].contains(table)
-                    && object.get("embedding").is_some_and(|embedding| !embedding.is_null())
+                    && object
+                        .get("embedding")
+                        .is_some_and(|embedding| !embedding.is_null())
                     && (model.is_none()
                         || object.get("embedding_model").and_then(Value::as_str)
                             != model.as_deref())

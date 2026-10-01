@@ -1,4 +1,4 @@
-//! Persistence for extracted units: dedup on normalized statement hash,
+//! Persistence for extracted units: dedup within a live or anchored episode,
 //! provenance anchoring, entity resolution, relationship edges, temporal
 //! validity, and optional embedding backfill. One transaction per chunk —
 //! a crash mid-pass never leaves a chunk half-persisted or double-stamped.
@@ -77,6 +77,9 @@ pub async fn persist_chunk_units(
     drop_below: f32,
 ) -> Result<Option<PersistOutcome>, ApiError> {
     let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('gather.scan.write'))")
+        .execute(&mut *tx)
+        .await?;
 
     // Serialize with source withdrawal before touching chunk or derived rows.
     // The model call happens before this transaction, so check liveness again.
@@ -641,6 +644,9 @@ pub async fn embed_pending_units(
 /// one transaction, before serving searches or starting background workers.
 pub async fn ensure_embedding_model(pool: &PgPool, model: &str) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('gather.scan.write'))")
+        .execute(&mut *tx)
+        .await?;
     let current: Option<String> =
         sqlx::query_scalar("SELECT model FROM embedding_state WHERE singleton FOR UPDATE")
             .fetch_one(&mut *tx)
