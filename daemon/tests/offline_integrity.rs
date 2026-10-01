@@ -12,6 +12,10 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+// These workers operate on the whole database, so fixture tests take turns.
+// Intentional concurrency is driven inside each individual regression.
+static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn state() -> Option<AppState> {
     let database_url = std::env::var("DATABASE_URL").ok()?;
     let pool = db::connect(&database_url).await.unwrap();
@@ -80,6 +84,7 @@ async fn persist(state: &AppState, chunk: &Chunk, claim: Claim) -> persist::Pers
 
 #[tokio::test]
 async fn recurring_claim_has_a_new_episode_without_reversing_rejection() {
+    let _guard = LOCK.lock().await;
     let Some(state) = state().await else { return };
     let text = format!("My Budget{} is $50 per month.", Uuid::new_v4().simple());
     let first = chunk(&state, &text, 1).await;
@@ -156,6 +161,7 @@ async fn recurring_claim_has_a_new_episode_without_reversing_rejection() {
 
 #[tokio::test]
 async fn export_keeps_source_and_claim_state_from_one_snapshot() {
+    let _guard = LOCK.lock().await;
     let Some(state) = state().await else { return };
     let text = format!("I use Snapshot{} for storage.", Uuid::new_v4().simple());
     let chunk = chunk(&state, &text, 1).await;
@@ -207,6 +213,7 @@ async fn export_keeps_source_and_claim_state_from_one_snapshot() {
 
 #[tokio::test]
 async fn invalid_import_rolls_back_prior_records() {
+    let _guard = LOCK.lock().await;
     let Some(state) = state().await else { return };
     let project = Uuid::new_v4();
     let records = [
@@ -246,6 +253,7 @@ async fn invalid_import_rolls_back_prior_records() {
 
 #[tokio::test]
 async fn similarity_cache_changes_when_unit_status_changes_without_new_rows() {
+    let _guard = LOCK.lock().await;
     let Some(state) = state().await else {
         return;
     };
@@ -294,6 +302,7 @@ async fn similarity_cache_changes_when_unit_status_changes_without_new_rows() {
 
 #[tokio::test]
 async fn local_embedding_retry_revision_guard_and_model_change() {
+    let _guard = LOCK.lock().await;
     use axum::extract::State;
     use axum::routing::post;
     use axum::{Json, Router};
@@ -517,6 +526,7 @@ async fn local_embedding_retry_revision_guard_and_model_change() {
 
 #[tokio::test]
 async fn restore_cannot_reactivate_a_claim_after_its_only_source_was_withdrawn() {
+    let _guard = LOCK.lock().await;
     let Some(state) = state().await else {
         return;
     };
@@ -564,6 +574,7 @@ async fn restore_cannot_reactivate_a_claim_after_its_only_source_was_withdrawn()
 
 #[tokio::test]
 async fn importing_unknown_vectors_drops_their_topic_memberships() {
+    let _guard = LOCK.lock().await;
     let Some(state) = state().await else {
         return;
     };
