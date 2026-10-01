@@ -86,14 +86,18 @@ async fn drain_extraction(state: &AppState) {
         let (busy,): (i64,) = sqlx::query_as(
             r#"
             SELECT
-              (SELECT count(*) FROM documents
-               WHERE extraction_status IN ('pending','processing'))
-            + (SELECT count(*) FROM images
-               WHERE ocr_status IN ('pending','processing'))
-            + (SELECT count(*) FROM messages WHERE units_extracted_at IS NULL)
-            + (SELECT count(*) FROM document_segments WHERE units_extracted_at IS NULL)
-            + (SELECT count(*) FROM images
-               WHERE units_extracted_at IS NULL AND ocr_status = 'completed'
+              (SELECT count(*) FROM documents d JOIN artifacts a ON a.id = d.artifact_id
+               WHERE extraction_status IN ('pending','processing') AND a.retracted_at IS NULL)
+            + (SELECT count(*) FROM images i JOIN artifacts a ON a.id = i.artifact_id
+               WHERE ocr_status IN ('pending','processing') AND a.retracted_at IS NULL)
+            + (SELECT count(*) FROM messages m JOIN conversations c ON c.id = m.conversation_id
+               JOIN artifacts a ON a.id = c.artifact_id
+               WHERE units_extracted_at IS NULL AND a.retracted_at IS NULL)
+            + (SELECT count(*) FROM document_segments s JOIN documents d ON d.id = s.document_id
+               JOIN artifacts a ON a.id = d.artifact_id
+               WHERE units_extracted_at IS NULL AND a.retracted_at IS NULL)
+            + (SELECT count(*) FROM images i JOIN artifacts a ON a.id = i.artifact_id
+               WHERE a.retracted_at IS NULL AND units_extracted_at IS NULL AND ocr_status = 'completed'
                  AND ocr_text IS NOT NULL AND length(trim(ocr_text)) > 0)
             "#,
         )

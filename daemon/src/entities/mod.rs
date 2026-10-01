@@ -292,15 +292,28 @@ pub async fn embed_pending_entities(
     }
     let texts: Vec<String> = rows.iter().map(|(_, n)| n.clone()).collect();
     let embeddings = ollama.embed(&texts).await?;
+    let Some(mut tx) =
+        crate::extract::persist::embedding_write_transaction(pool, &ollama.embed_model).await?
+    else {
+        return Ok(0);
+    };
     let mut updated = 0usize;
-    for ((id, _), embedding) in rows.iter().zip(embeddings) {
-        sqlx::query("UPDATE entities SET embedding = $2 WHERE id = $1")
+    for ((id, name), embedding) in rows.iter().zip(embeddings) {
+        sqlx::query(
+            "UPDATE entities SET embedding = $2, embedding_model = $4
+             WHERE id = $1 AND name = $3 AND embedding IS NULL
+               AND merged_into_entity_id IS NULL
+               AND (SELECT model FROM embedding_state WHERE singleton) = $4",
+        )
             .bind(id)
             .bind(Vector::from(embedding))
-            .execute(pool)
+            .bind(name)
+            .bind(&ollama.embed_model)
+            .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
         updated += 1;
     }
+    tx.commit().await.map_err(|error| error.to_string())?;
     Ok(updated)
 }

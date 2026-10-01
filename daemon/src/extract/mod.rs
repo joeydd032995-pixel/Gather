@@ -195,9 +195,12 @@ pub async fn backlog(pool: &PgPool) -> Result<Backlog, sqlx::Error> {
             UNION
             SELECT artifact_id FROM images WHERE ocr_status IN ('pending', 'processing')
         )
-        SELECT (SELECT count(*) FROM pending) AS chunks,
+        SELECT (SELECT count(*) FROM pending p JOIN artifacts a ON a.id = p.artifact_id
+                WHERE a.retracted_at IS NULL) AS chunks,
                (SELECT count(*) FROM (SELECT artifact_id FROM pending
-                                      UNION SELECT artifact_id FROM unopened) f) AS files,
+                                      UNION SELECT artifact_id FROM unopened) f
+                                      JOIN artifacts a ON a.id = f.artifact_id
+                                      WHERE a.retracted_at IS NULL) AS files,
                (SELECT count(*) FROM document_segments WHERE units_extract_error IS NOT NULL)
              + (SELECT count(*) FROM messages WHERE units_extract_error IS NOT NULL)
              + (SELECT count(*) FROM images WHERE units_extract_error IS NOT NULL) AS failed
@@ -272,6 +275,11 @@ pub async fn run_one_pass(
     };
 
     if let Some(client) = ollama {
+        match persist::embed_pending_units(pool, client, config.extraction_batch).await {
+            Ok(n) if n > 0 => tracing::debug!(units = n, "embedded pending claims"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "claim embedding failed; will retry"),
+        }
         match persist::embed_pending_segments(pool, client, config.extraction_batch).await {
             Ok(n) if n > 0 => tracing::debug!(segments = n, "embedded document segments"),
             Ok(_) => {}

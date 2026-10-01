@@ -87,7 +87,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/entities/{id}/aliases", post(entities::add_alias))
         // export / import
         .route("/export", get(export::export_bundle))
-        .route("/import", post(export::import_bundle))
+        .route(
+            "/import",
+            post(export::import_bundle).layer(DefaultBodyLimit::disable()),
+        )
         // contradiction review
         .route("/contradictions", get(contradictions::list_contradictions))
         .route(

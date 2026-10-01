@@ -309,8 +309,7 @@ pub async fn edit_unit_core(
     // Unstructured corrections carry no inherited subject or numeric attributes.
     let parsed = crate::extract::rules::extract_units(&statement);
     let parsed = parsed.first().filter(|unit| {
-        parsed.len() == 1
-            && normalize_statement(&unit.statement) == normalize_statement(&statement)
+        parsed.len() == 1 && normalize_statement(&unit.statement) == normalize_statement(&statement)
     });
     let attrs = parsed
         .map(|unit| unit.attrs.clone())
@@ -327,7 +326,8 @@ pub async fn edit_unit_core(
     sqlx::query(
         "UPDATE atomic_units \
          SET statement = $2, statement_hash = $3, extraction_method = 'manual', \
-             embedding = NULL, contradiction_scanned_at = NULL, \
+             embedding = NULL, embedding_model = NULL, embedding_retry_at = NULL, \
+             embedding_attempts = 0, contradiction_scanned_at = NULL, \
              clustered_at = NULL, topic_cluster_id = NULL, \
              attrs = $4, subject_entity_id = $5, extraction_model = NULL \
          WHERE id = $1",
@@ -343,6 +343,31 @@ pub async fn edit_unit_core(
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    if status == "active"
+        && crate::safety::modality::classify(&statement).asserts_positive_fact()
+    {
+        if let (Some(source), Some(parsed)) = (subject, parsed) {
+            for (object, relation) in &parsed.objects {
+                let target = crate::extract::persist::resolve_or_create_entity(&mut tx, object).await?;
+                if source != target {
+                    sqlx::query(
+                        "INSERT INTO relationships
+                            (source_entity_id, target_entity_id, relation_type,
+                             atomic_unit_id, confidence)
+                         VALUES ($1, $2, $3, $4,
+                                 (SELECT confidence FROM atomic_units WHERE id = $4))
+                         ON CONFLICT DO NOTHING",
+                    )
+                    .bind(source)
+                    .bind(target)
+                    .bind(relation)
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+        }
+    }
     sqlx::query("DELETE FROM cluster_members WHERE member_kind = 'unit' AND member_id = $1")
         .bind(id)
         .execute(&mut *tx)

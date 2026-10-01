@@ -141,6 +141,10 @@ async fn run() -> anyhow::Result<()> {
         }
     };
 
+    if let Some(client) = &ollama_client {
+        gather_daemon::extract::persist::ensure_embedding_model(&pool, &client.embed_model).await?;
+    }
+
     let state = AppState {
         pool: pool.clone(),
         config: Arc::new(config.clone()),

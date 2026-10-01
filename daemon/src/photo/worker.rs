@@ -258,6 +258,11 @@ async fn regroup_pass(
         return Ok(());
     }
 
+    let mut tx = pool.begin().await?;
+    // Withdrawal takes this same source lock before clearing derived groups.
+    sqlx::query("SELECT id FROM artifacts WHERE retracted_at IS NULL ORDER BY id FOR UPDATE")
+        .fetch_all(&mut *tx)
+        .await?;
     let photos: Vec<PhotoRow> = sqlx::query(
         "SELECT i.id, i.phash, COALESCE(i.width, 0)::bigint * COALESCE(i.height, 0) AS pixels, \
                 COALESCE(i.taken_at, a.source_created_at, a.ingested_at) AS ordering_time, \
@@ -267,7 +272,7 @@ async fn regroup_pass(
          WHERE i.photo_prepared_at IS NOT NULL AND a.retracted_at IS NULL \
          ORDER BY i.id",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?
     .iter()
     .map(|r| {
@@ -300,8 +305,8 @@ async fn regroup_pass(
         config.safety_hub_degree,
     );
     stats.duplicate_groups = dup_groups.len();
-    reconcile(pool, Grouping::Duplicates, &dup_groups).await?;
-    record_photo_certificates(pool, &photos, &dup_groups, &flagged).await?;
+    reconcile(&mut tx, Grouping::Duplicates, &dup_groups).await?;
+    record_photo_certificates(&mut tx, &photos, &dup_groups, &flagged).await?;
 
     let album_groups = albums(&photos, config);
     stats.albums = album_groups.len();
@@ -315,8 +320,9 @@ async fn regroup_pass(
          WHERE id = ANY($1) AND photo_grouped_at IS NULL",
     )
     .bind(&seen)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -383,12 +389,11 @@ fn duplicate_groups(
 /// review/blocked ones for photos left out, and superseded ones for groups
 /// that no longer exist.
 async fn record_photo_certificates(
-    pool: &PgPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     photos: &[PhotoRow],
     groups: &[Group],
     flagged: &[InferenceCertificate],
 ) -> anyhow::Result<()> {
-    let mut tx = pool.begin().await?;
     let mut keys: Vec<String> = Vec::new();
     for g in groups {
         let Some(mut cert) = g.certificate.clone() else {
@@ -396,30 +401,29 @@ async fn record_photo_certificates(
         };
         cert.conclusion_id = sqlx::query_scalar("SELECT dup_cluster_id FROM images WHERE id = $1")
             .bind(g.members[0])
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?;
         keys.push(cert.conclusion_key.clone());
-        store::record(&mut tx, &cert).await?;
+        store::record(tx, &cert).await?;
     }
     for cert in flagged {
-        store::record(&mut tx, cert).await?;
+        store::record(tx, cert).await?;
     }
     let ids: Vec<Uuid> = photos.iter().map(|p| p.id).collect();
-    let stale: Vec<Uuid> = store::live_for_subjects(&mut tx, "photo_duplicate_group", &ids, None)
+    let stale: Vec<Uuid> = store::live_for_subjects(tx, "photo_duplicate_group", &ids, None)
         .await?
         .into_iter()
         .filter(|(_, key, _)| key.starts_with("photo-dup:") && !keys.contains(key))
         .map(|(id, _, _)| id)
         .collect();
     store::withdraw(
-        &mut tx,
+        tx,
         &stale,
         Outcome::Superseded,
         "the photos were regrouped",
         None,
     )
     .await?;
-    tx.commit().await?;
     Ok(())
 }
 
@@ -458,10 +462,13 @@ fn albums(photos: &[PhotoRow], config: &Config) -> Vec<Group> {
 /// Make the stored clusters of one grouping match `groups`, reusing a cluster
 /// id when most of a group's members already carry it, so ids (and anything a
 /// UI bookmarked) stay stable as photos arrive. One transaction.
-async fn reconcile(pool: &PgPool, grouping: Grouping, groups: &[Group]) -> anyhow::Result<()> {
-    let mut tx = pool.begin().await?;
+async fn reconcile(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    grouping: Grouping,
+    groups: &[Group],
+) -> anyhow::Result<()> {
     let current: HashMap<Uuid, Uuid> = sqlx::query_as::<_, (Uuid, Uuid)>(grouping.current_sql())
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await?
         .into_iter()
         .collect();
@@ -492,7 +499,7 @@ async fn reconcile(pool: &PgPool, grouping: Grouping, groups: &[Group]) -> anyho
                 .bind(group.cohesion)
                 .bind(group.members.len() as i32)
                 .bind(group.representative)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
                 id
             }
@@ -506,7 +513,7 @@ async fn reconcile(pool: &PgPool, grouping: Grouping, groups: &[Group]) -> anyho
                 .bind(group.cohesion)
                 .bind(group.members.len() as i32)
                 .bind(group.representative)
-                .fetch_one(&mut *tx)
+                .fetch_one(&mut **tx)
                 .await?
             }
         };
@@ -514,7 +521,7 @@ async fn reconcile(pool: &PgPool, grouping: Grouping, groups: &[Group]) -> anyho
 
         sqlx::query("DELETE FROM cluster_members WHERE cluster_id = $1")
             .bind(cluster_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         sqlx::query(
             "INSERT INTO cluster_members (cluster_id, member_kind, member_id, sim) \
@@ -523,7 +530,7 @@ async fn reconcile(pool: &PgPool, grouping: Grouping, groups: &[Group]) -> anyho
         .bind(cluster_id)
         .bind(&group.members)
         .bind(group.cohesion)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
         image_ids.extend(&group.members);
@@ -532,15 +539,14 @@ async fn reconcile(pool: &PgPool, grouping: Grouping, groups: &[Group]) -> anyho
 
     sqlx::query(grouping.clear_sql())
         .bind(&image_ids)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     sqlx::query(grouping.assign_sql())
         .bind(&image_ids)
         .bind(&cluster_ids)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    sqlx::query(grouping.prune_sql()).execute(&mut *tx).await?;
-    tx.commit().await?;
+    sqlx::query(grouping.prune_sql()).execute(&mut **tx).await?;
     Ok(())
 }
 
@@ -631,17 +637,34 @@ async fn caption_pass(
 
         // Caption, cursor and topic assignment commit together: a failure in
         // between must leave the photo retryable, not captioned-but-ungrouped.
-        let mut tx = pool.begin().await?;
+        let Some(mut tx) =
+            crate::extract::persist::embedding_write_transaction(pool, &client.embed_model)
+                .await
+                .map_err(anyhow::Error::msg)?
+        else {
+            continue;
+        };
+        let live: Option<Uuid> = sqlx::query_scalar(
+            "SELECT a.id FROM artifacts a JOIN images i ON i.artifact_id = a.id
+             WHERE i.id = $1 AND a.retracted_at IS NULL FOR UPDATE OF a",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if live.is_none() {
+            continue;
+        }
         sqlx::query(
             "UPDATE images SET caption = $2, \
              caption_model = CASE WHEN $5 THEN $3 ELSE caption_model END, \
-             embedding = $4, captioned_at = now() WHERE id = $1",
+             embedding = $4, embedding_model = $6, captioned_at = now() WHERE id = $1",
         )
         .bind(id)
         .bind(&caption)
         .bind(&model)
         .bind(Vector::from(embedding.clone()))
         .bind(generated)
+        .bind(&client.embed_model)
         .execute(&mut *tx)
         .await?;
         let joined = join_nearest_topic(&mut tx, config, id, &caption, embedding).await?;

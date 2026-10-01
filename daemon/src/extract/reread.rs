@@ -53,16 +53,18 @@ fn stored_model(model: &str) -> String {
 pub async fn unread_by(pool: &PgPool, model: &str) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
         r#"
-        SELECT (SELECT count(*) FROM messages
-                 WHERE units_extracted_at IS NOT NULL
+        SELECT (SELECT count(*) FROM messages m JOIN conversations c ON c.id = m.conversation_id
+                 JOIN artifacts a ON a.id = c.artifact_id
+                 WHERE a.retracted_at IS NULL AND units_extracted_at IS NOT NULL
                    AND units_llm_model IS DISTINCT FROM $1
                    AND length(trim(coalesce(content, ''))) > 0)
-             + (SELECT count(*) FROM document_segments
-                 WHERE units_extracted_at IS NOT NULL
+             + (SELECT count(*) FROM document_segments s JOIN documents d ON d.id = s.document_id
+                 JOIN artifacts a ON a.id = d.artifact_id
+                 WHERE a.retracted_at IS NULL AND units_extracted_at IS NOT NULL
                    AND units_llm_model IS DISTINCT FROM $1
                    AND length(trim(coalesce(content, ''))) > 0)
-             + (SELECT count(*) FROM images
-                 WHERE units_extracted_at IS NOT NULL
+             + (SELECT count(*) FROM images i JOIN artifacts a ON a.id = i.artifact_id
+                 WHERE a.retracted_at IS NULL AND units_extracted_at IS NOT NULL
                    AND units_llm_model IS DISTINCT FROM $1
                    AND ocr_status = 'completed'
                    AND length(trim(coalesce(ocr_text, ''))) > 0)

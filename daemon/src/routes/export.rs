@@ -10,12 +10,15 @@
 //! This is the exact payload the optional VPS replication encrypts and ships:
 //! `GET /api/v1/export` -> age/restic encryption -> rsync/SSH (see write-up §7).
 
+use axum::body::Body;
 use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::{json, Value};
 use sqlx::Row;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 
 use crate::error::ApiError;
 use crate::AppState;
@@ -55,7 +58,7 @@ const TABLES: &[(&str, &str)] = &[
     ),
     (
         "document_segments",
-        "id, document_id, seq, page, heading, content, content_hash, embedding, metadata, \
+        "id, document_id, seq, page, heading, content, content_hash, embedding, embedding_model, metadata, \
          units_extracted_at, units_extract_error, units_llm_model",
     ),
     // Clusters before images and atomic_units, whose *_cluster_id columns
@@ -68,12 +71,12 @@ const TABLES: &[(&str, &str)] = &[
         "images",
         "id, artifact_id, width, height, exif, taken_at, ocr_text, ocr_confidence, \
          ocr_status, caption, caption_model, metadata, units_extracted_at, phash, latitude, \
-         longitude, embedding, photo_prepared_at, photo_grouped_at, captioned_at, \
+         longitude, embedding, embedding_model, photo_prepared_at, photo_grouped_at, captioned_at, \
          dup_cluster_id, album_cluster_id, topic_cluster_id, units_extract_error, units_llm_model",
     ),
     (
         "entities",
-        "id, name, kind, description, merged_into_entity_id, embedding, metadata, \
+        "id, name, kind, description, merged_into_entity_id, embedding, embedding_model, metadata, \
          created_at, updated_at",
     ),
     ("entity_aliases", "id, entity_id, alias"),
@@ -82,7 +85,7 @@ const TABLES: &[(&str, &str)] = &[
         "id, kind, statement, statement_hash, subject_entity_id, confidence, \
          extraction_method, extraction_model, embedding, valid_from, valid_to, \
          status, superseded_by_unit_id, attrs, created_at, updated_at, \
-         contradiction_scanned_at, topic_cluster_id, clustered_at, asserted_at, observed_at, content_revision",
+         contradiction_scanned_at, topic_cluster_id, clustered_at, asserted_at, observed_at, content_revision, embedding_model, embedding_retry_at, embedding_attempts",
     ),
     (
         "atomic_unit_revisions",
@@ -156,12 +159,13 @@ const TABLES: &[(&str, &str)] = &[
     ),
 ];
 
-// ---------------------------------------------------------------------------
-// GET /api/v1/export
-// ---------------------------------------------------------------------------
+/// Bundle limits are independent of the per-file ingestion limit.
+pub(crate) const MAX_BUNDLE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+const MAX_RECORD_BYTES: u64 = 1024 * 1024 * 1024;
+const CHUNK_BYTES: usize = 64 * 1024;
 
 pub async fn export_bundle(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
-    let out = build_bundle(&state.pool).await?;
+    let stream = bundle_stream(&state.pool).await?;
     Ok((
         StatusCode::OK,
         [
@@ -171,156 +175,214 @@ pub async fn export_bundle(State(state): State<AppState>) -> Result<impl IntoRes
                 "attachment; filename=\"gather-bundle.ndjson\"",
             ),
         ],
-        out,
+        Body::from_stream(stream),
     ))
 }
 
-/// Serialize the entire store as a gather-bundle-v1 NDJSON string (REST + gRPC).
-pub(crate) async fn build_bundle(pool: &sqlx::PgPool) -> Result<String, ApiError> {
+/// A bounded producer holds one database snapshot and at most one serialized
+/// row. Dropping the receiver cancels production and rolls back the snapshot.
+pub(crate) async fn bundle_stream(
+    pool: &sqlx::PgPool,
+) -> Result<ReceiverStream<Result<Vec<u8>, ApiError>>, ApiError> {
     let mut tx = pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .execute(&mut *tx)
         .await?;
-    let mut out = String::new();
-    out.push_str(
-        &json!({
-            "type": "manifest",
-            "row": {
-                "format": "gather-bundle-v1",
-                "exported_at": chrono::Utc::now(),
-                "tables": TABLES.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+    let (sender, receiver) = tokio::sync::mpsc::channel(2);
+    tokio::spawn(async move {
+        let result: Result<(), ApiError> = async {
+            let manifest = format!(
+                "{}\n",
+                json!({
+                    "type": "manifest",
+                    "row": {
+                        "format": "gather-bundle-v1",
+                        "exported_at": chrono::Utc::now(),
+                        "tables": TABLES.iter().map(|(table, _)| *table).collect::<Vec<_>>(),
+                    }
+                })
+            );
+            if sender.send(Ok(manifest.into_bytes())).await.is_err() {
+                return Ok(());
             }
-        })
-        .to_string(),
-    );
-    out.push('\n');
-
-    for (table, columns) in TABLES {
-        // `table` and `columns` come from the compile-time constant above,
-        // never from request input.
-        let sql =
-            format!("SELECT row_to_json(t)::text AS j FROM (SELECT {columns} FROM {table}) t");
-        // Safe: table/column names come from the TABLES constant, not input.
-        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
-            .fetch_all(&mut *tx)
-            .await?;
-        for row in rows {
-            let j: String = row.get("j");
-            out.push_str(&format!("{{\"type\":\"{table}\",\"row\":{j}}}\n"));
+            for (table, columns) in TABLES {
+                let sql = format!(
+                    "SELECT row_to_json(t)::text AS j FROM (SELECT {columns} FROM {table}) t"
+                );
+                let mut rows = sqlx::query(sqlx::AssertSqlSafe(sql)).fetch(&mut *tx);
+                while let Some(row) = rows.next().await {
+                    let row = row?;
+                    let json: String = row.get("j");
+                    if json.len() as u64 > MAX_RECORD_BYTES - 128 {
+                        return Err(ApiError::PayloadTooLarge("bundle or record exceeds its size limit".into()));
+                    }
+                    let line = format!("{{\"type\":\"{table}\",\"row\":{json}}}\n");
+                    for chunk in line.as_bytes().chunks(CHUNK_BYTES) {
+                        if sender.send(Ok(chunk.to_vec())).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            tx.commit().await?;
+            Ok(())
         }
-    }
-    tx.commit().await?;
-    Ok(out)
+        .await;
+        if let Err(error) = result {
+            let _ = sender.send(Err(error)).await;
+        }
+    });
+    Ok(ReceiverStream::new(receiver))
 }
 
-// ---------------------------------------------------------------------------
-// POST /api/v1/import
-// ---------------------------------------------------------------------------
+/// NamedTempFile creates a private file and removes it on error or cancellation.
+pub(crate) fn private_bundle_file() -> Result<tempfile::NamedTempFile, ApiError> {
+    tempfile::NamedTempFile::new().map_err(|error| ApiError::Internal(error.into()))
+}
 
 pub async fn import_bundle(
     State(state): State<AppState>,
-    body: String,
+    body: Body,
 ) -> Result<Json<Value>, ApiError> {
-    let counts = import_bundle_core(&state.pool, &body).await?;
-    Ok(Json(
-        json!({ "format": "gather-bundle-v1", "tables": counts }),
-    ))
+    let temporary = private_bundle_file()?;
+    let mut file = tokio::fs::File::from_std(
+        temporary.reopen().map_err(|error| ApiError::Internal(error.into()))?,
+    );
+    let mut stream = body.into_data_stream();
+    let mut size = 0u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        size = size.saturating_add(chunk.len() as u64);
+        if size > MAX_BUNDLE_BYTES {
+            return Err(ApiError::PayloadTooLarge("bundle or record exceeds its size limit".into()));
+        }
+        file.write_all(&chunk)
+            .await
+            .map_err(|error| ApiError::Internal(error.into()))?;
+    }
+    file.flush().await.map_err(|error| ApiError::Internal(error.into()))?;
+    let counts = import_bundle_file(&state.pool, &temporary).await?;
+    Ok(Json(json!({ "format": "gather-bundle-v1", "tables": counts })))
 }
 
-/// Parse and apply a gather-bundle-v1 NDJSON document (REST + gRPC).
-pub(crate) async fn import_bundle_core(
-    pool: &sqlx::PgPool,
-    body: &str,
-) -> Result<serde_json::Map<String, Value>, ApiError> {
-    // Group lines by table so inserts run in FK-dependency order regardless
-    // of line order in the bundle.
-    let mut by_table: std::collections::HashMap<&str, Vec<Value>> =
-        std::collections::HashMap::new();
-    let mut manifest_seen = false;
+async fn read_record(reader: &mut BufReader<tokio::fs::File>) -> Result<Option<String>, ApiError> {
+    let mut line = String::new();
+    let mut bounded = reader.take(MAX_RECORD_BYTES + 1);
+    let size = bounded
+        .read_line(&mut line)
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    if size as u64 > MAX_RECORD_BYTES {
+        return Err(ApiError::PayloadTooLarge("bundle or record exceeds its size limit".into()));
+    }
+    Ok((size > 0).then_some(line))
+}
 
-    for (lineno, line) in body.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
+/// Stage records on disk by table, then apply in dependency order in one
+/// transaction. The library size affects disk space, rather than heap use.
+pub(crate) async fn import_bundle_file(
+    pool: &sqlx::PgPool,
+    bundle: &tempfile::NamedTempFile,
+) -> Result<serde_json::Map<String, Value>, ApiError> {
+    let file = tokio::fs::File::from_std(
+        bundle.reopen().map_err(|error| ApiError::Internal(error.into()))?,
+    );
+    let mut reader = BufReader::new(file);
+    let mut tables = std::collections::HashMap::new();
+    let mut manifest_seen = false;
+    let mut line_number = 0;
+    while let Some(line) = read_record(&mut reader).await? {
+        line_number += 1;
+        if line.trim().is_empty() {
             continue;
         }
-        let v: Value = serde_json::from_str(line).map_err(|e| {
-            ApiError::BadRequest(format!("invalid NDJSON at line {}: {e}", lineno + 1))
+        let value: Value = serde_json::from_str(&line).map_err(|error| {
+            ApiError::BadRequest(format!("invalid NDJSON at line {line_number}: {error}"))
         })?;
-        let typ = v
-            .get("type")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ApiError::BadRequest(format!("line {} missing 'type'", lineno + 1)))?;
+        let typ = value.get("type").and_then(Value::as_str).ok_or_else(|| {
+            ApiError::BadRequest(format!("line {line_number} missing 'type'"))
+        })?;
         if typ == "manifest" {
-            let format = v.pointer("/row/format").and_then(Value::as_str);
-            if format != Some("gather-bundle-v1") {
-                return Err(ApiError::BadRequest(format!(
-                    "unsupported bundle format {format:?}"
-                )));
+            if manifest_seen || value.pointer("/row/format").and_then(Value::as_str)
+                != Some("gather-bundle-v1")
+            {
+                return Err(ApiError::BadRequest("invalid or duplicate bundle manifest".into()));
             }
             manifest_seen = true;
             continue;
         }
-        let Some((table, _)) = TABLES.iter().find(|(t, _)| *t == typ) else {
-            return Err(ApiError::BadRequest(format!(
-                "line {}: unknown record type '{typ}'",
-                lineno + 1
-            )));
+        let Some((table, _)) = TABLES.iter().find(|(table, _)| *table == typ) else {
+            return Err(ApiError::BadRequest(format!("unknown record type '{typ}'")));
         };
-        let row = v
-            .get("row")
-            .cloned()
-            .ok_or_else(|| ApiError::BadRequest(format!("line {} missing 'row'", lineno + 1)))?;
-        let mut row = row;
-        if *table == "atomic_units" {
-            if let Some(row) = row.as_object_mut() {
-                row.entry("content_revision").or_insert(json!(0));
-            }
+        if !value.get("row").is_some_and(Value::is_object) {
+            return Err(ApiError::BadRequest(format!("line {line_number} missing row object")));
         }
-        by_table.entry(table).or_default().push(row);
+        if !tables.contains_key(table) {
+            let temporary = private_bundle_file()?;
+            let writer = tokio::fs::File::from_std(
+                temporary.reopen().map_err(|error| ApiError::Internal(error.into()))?,
+            );
+            tables.insert(*table, (temporary, writer, 0u64));
+        }
+        let (_, writer, count) = tables.get_mut(table).expect("inserted above");
+        writer.write_all(line.as_bytes())
+            .await
+            .map_err(|error| ApiError::Internal(error.into()))?;
+        if !line.ends_with('\n') {
+            writer.write_all(b"\n").await.map_err(|error| ApiError::Internal(error.into()))?;
+        }
+        *count += 1;
     }
-
     if !manifest_seen {
-        return Err(ApiError::BadRequest(
-            "bundle has no manifest line (expected format gather-bundle-v1)".to_string(),
-        ));
+        return Err(ApiError::BadRequest("bundle has no manifest line".into()));
     }
 
     let mut tx = pool.begin().await?;
-
-    // TABLES fixes the order between tables, but not within one. `entities` is
-    // self-referential via merged_into_entity_id (DEFERRABLE INITIALLY
-    // IMMEDIATE, 0001), and the export emits its rows unordered — so a bundle
-    // where a merged-away row precedes its winner would abort on the FK before
-    // the winner exists. Deferring to COMMIT makes a bundle restorable
-    // regardless of row order and merge direction.
-    sqlx::query("SET CONSTRAINTS ALL DEFERRED")
-        .execute(&mut *tx)
-        .await?;
-
+    // Lock model identity before inserting vector-bearing records.
+    let model: Option<String> =
+        sqlx::query_scalar("SELECT model FROM embedding_state WHERE singleton FOR SHARE")
+            .fetch_one(&mut *tx)
+            .await?;
+    sqlx::query("SET CONSTRAINTS ALL DEFERRED").execute(&mut *tx).await?;
     let mut counts = serde_json::Map::new();
     for (table, columns) in TABLES {
-        let Some(rows) = by_table.get(table) else {
+        let Some((temporary, writer, count)) = tables.get_mut(table) else {
             continue;
         };
-        // Idempotent import: existing rows (same PK or unique key) are kept.
+        writer.flush().await.map_err(|error| ApiError::Internal(error.into()))?;
+        let file = tokio::fs::File::from_std(
+            temporary.reopen().map_err(|error| ApiError::Internal(error.into()))?,
+        );
+        let mut reader = BufReader::new(file);
         let sql = format!(
-            "INSERT INTO {table} ({columns}) \
-             SELECT {columns} FROM jsonb_populate_record(NULL::{table}, $1::jsonb) \
-             ON CONFLICT DO NOTHING"
+            "INSERT INTO {table} ({columns}) SELECT {columns}
+             FROM jsonb_populate_record(NULL::{table}, $1::jsonb) ON CONFLICT DO NOTHING"
         );
         let mut inserted = 0u64;
-        for row in rows {
-            // Safe: table/column names come from the TABLES constant, not input.
-            let result = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
+        while let Some(line) = read_record(&mut reader).await? {
+            let value: Value = serde_json::from_str(&line)
+                .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+            let mut row = value["row"].clone();
+            if let Some(object) = row.as_object_mut() {
+                if *table == "atomic_units" {
+                    object.entry("content_revision").or_insert(json!(0));
+                    object.entry("embedding_attempts").or_insert(json!(0));
+                }
+                if ["atomic_units", "document_segments", "entities", "images"].contains(table)
+                    && (model.is_none()
+                        || object.get("embedding_model").and_then(Value::as_str) != model.as_deref())
+                {
+                    object.insert("embedding".into(), Value::Null);
+                    object.insert("embedding_model".into(), Value::Null);
+                }
+            }
+            inserted += sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
                 .bind(row)
                 .execute(&mut *tx)
-                .await?;
-            inserted += result.rows_affected();
+                .await?
+                .rows_affected();
         }
-        counts.insert(
-            (*table).to_string(),
-            json!({ "in_bundle": rows.len(), "inserted": inserted }),
-        );
+        counts.insert((*table).to_string(), json!({ "in_bundle": count, "inserted": inserted }));
     }
     tx.commit().await?;
     Ok(counts)

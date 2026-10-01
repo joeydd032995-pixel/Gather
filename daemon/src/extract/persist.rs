@@ -243,7 +243,7 @@ pub async fn persist_chunk_units(
             .bind(chunk.source_time)
             .bind(unit.event_time)
             .fetch_optional(&mut *tx)
-                .await?
+            .await?
         };
         let (unit_id, is_new) = match inserted {
             Some((id,)) => {
@@ -563,18 +563,139 @@ pub async fn embed_new_units(
         return Ok(0);
     }
     let texts: Vec<String> = new_units.iter().map(|(_, s)| s.clone()).collect();
+    let ids: Vec<Uuid> = new_units.iter().map(|(id, _)| *id).collect();
+    let revisions: std::collections::HashMap<Uuid, i64> = sqlx::query_as(
+        "SELECT id, content_revision FROM atomic_units WHERE id = ANY($1)",
+    )
+    .bind(&ids)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| error.to_string())?
+    .into_iter()
+    .collect();
     let embeddings = ollama.embed(&texts).await?;
+    let Some(mut tx) = embedding_write_transaction(pool, &ollama.embed_model).await? else {
+        return Ok(0);
+    };
     let mut updated = 0usize;
-    for ((id, _), embedding) in new_units.iter().zip(embeddings) {
-        sqlx::query("UPDATE atomic_units SET embedding = $2 WHERE id = $1")
-            .bind(id)
-            .bind(Vector::from(embedding))
-            .execute(pool)
-            .await
-            .map_err(|e| e.to_string())?;
+    for ((id, statement), embedding) in new_units.iter().zip(embeddings) {
+        sqlx::query(
+            "UPDATE atomic_units SET embedding = $2, embedding_model = $4,
+                    embedding_attempts = 0, embedding_retry_at = NULL
+             WHERE id = $1 AND statement = $3 AND content_revision = $5
+               AND embedding IS NULL AND status = 'active'
+               AND (SELECT model FROM embedding_state WHERE singleton) = $4",
+        )
+        .bind(id)
+        .bind(Vector::from(embedding))
+        .bind(statement)
+        .bind(&ollama.embed_model)
+        .bind(revisions.get(id).copied().unwrap_or(-1))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
         updated += 1;
     }
+    tx.commit().await.map_err(|error| error.to_string())?;
     Ok(updated)
+}
+
+/// Retry old ingestion, temporary model failures, and corrections in bounded batches.
+pub async fn embed_pending_units(
+    pool: &PgPool,
+    ollama: &OllamaClient,
+    batch: i64,
+) -> Result<usize, String> {
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, statement FROM atomic_units
+         WHERE embedding IS NULL AND status = 'active'
+           AND (embedding_retry_at IS NULL OR embedding_retry_at <= now())
+         ORDER BY embedding_retry_at NULLS FIRST, created_at, id LIMIT $1",
+    )
+    .bind(batch)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| error.to_string())?;
+    match embed_new_units(pool, ollama, &rows).await {
+        Ok(count) => Ok(count),
+        Err(error) => {
+            for (id, statement) in &rows {
+                sqlx::query(
+                    "UPDATE atomic_units
+                     SET embedding_attempts = least(embedding_attempts + 1, 10),
+                         embedding_retry_at = now() + make_interval(
+                             secs => least(3600, 5 * power(2, embedding_attempts)::integer))
+                     WHERE id = $1 AND statement = $2 AND embedding IS NULL",
+                )
+                .bind(id)
+                .bind(statement)
+                .execute(pool)
+                .await
+                .map_err(|error| error.to_string())?;
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Changing the configured local model invalidates all incompatible vectors in
+/// one transaction, before serving searches or starting background workers.
+pub async fn ensure_embedding_model(pool: &PgPool, model: &str) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let current: Option<String> =
+        sqlx::query_scalar("SELECT model FROM embedding_state WHERE singleton FOR UPDATE")
+            .fetch_one(&mut *tx)
+            .await?;
+    if current.as_deref() != Some(model) {
+        sqlx::query(
+            "UPDATE atomic_units SET embedding = NULL, embedding_model = NULL,
+             clustered_at = NULL, topic_cluster_id = NULL, contradiction_scanned_at = NULL,
+             embedding_retry_at = NULL, embedding_attempts = 0",
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE document_segments SET embedding = NULL, embedding_model = NULL")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE entities SET embedding = NULL, embedding_model = NULL")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "UPDATE images SET embedding = NULL, embedding_model = NULL,
+             captioned_at = NULL, topic_cluster_id = NULL",
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM cluster_members WHERE member_kind IN ('unit', 'image')")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "UPDATE embedding_state SET model = $1, generation = generation + 1 WHERE singleton",
+        )
+        .bind(model)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Writers lock model identity before derived rows, so a model change and an
+/// in-flight request cannot repopulate each other's vector space.
+pub async fn embedding_write_transaction<'a>(
+    pool: &'a PgPool,
+    model: &str,
+) -> Result<Option<Transaction<'a, Postgres>>, String> {
+    let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
+    let current: Option<String> =
+        sqlx::query_scalar("SELECT model FROM embedding_state WHERE singleton FOR SHARE")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|error| error.to_string())?;
+    if current.as_deref() != Some(model) {
+        return Ok(None);
+    }
+    Ok(Some(tx))
 }
 
 pub async fn embed_pending_segments(
@@ -594,16 +715,26 @@ pub async fn embed_pending_segments(
     }
     let texts: Vec<String> = rows.iter().map(|(_, c)| c.clone()).collect();
     let embeddings = ollama.embed(&texts).await?;
+    let Some(mut tx) = embedding_write_transaction(pool, &ollama.embed_model).await? else {
+        return Ok(0);
+    };
     let mut updated = 0usize;
-    for ((id, _), embedding) in rows.iter().zip(embeddings) {
-        sqlx::query("UPDATE document_segments SET embedding = $2 WHERE id = $1")
-            .bind(id)
-            .bind(Vector::from(embedding))
-            .execute(pool)
-            .await
-            .map_err(|e| e.to_string())?;
+    for ((id, statement), embedding) in rows.iter().zip(embeddings) {
+        sqlx::query(
+            "UPDATE document_segments SET embedding = $2, embedding_model = $4
+             WHERE id = $1 AND content = $3 AND embedding IS NULL
+               AND (SELECT model FROM embedding_state WHERE singleton) = $4",
+        )
+        .bind(id)
+        .bind(Vector::from(embedding))
+        .bind(statement)
+        .bind(&ollama.embed_model)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
         updated += 1;
     }
+    tx.commit().await.map_err(|error| error.to_string())?;
     Ok(updated)
 }
 

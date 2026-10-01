@@ -259,6 +259,38 @@ pub fn run() {
         .manage(Arc::clone(&runtime))
         .manage(PendingUpdate::default())
         .setup(|app| {
+            // Acquire the OS-held lock before the supervisor can adopt services.
+            // The lock is released on a crash; the file itself is never deleted.
+            let data = data_dir(app.handle())?;
+            std::fs::create_dir_all(&data)?;
+            let lock = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(data.join("desktop.lock"))?;
+            match lock.try_lock() {
+                Ok(()) => {
+                    app.manage(lock);
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    std::fs::write(data.join("focus.request"), [])?;
+                    app.handle().exit(0);
+                    return Ok(());
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+            }
+            let handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                if std::fs::remove_file(data.join("focus.request")).is_ok() {
+                    if let Some(window) = handle.get_webview_window("main") {
+                        let _ = window.unminimize();
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            });
             if updates::supported(app.handle()) {
                 app.handle()
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
