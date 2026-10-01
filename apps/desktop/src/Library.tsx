@@ -371,6 +371,7 @@ function FileDetail({ id, refreshKey }: { id: string; refreshKey: number }) {
 }
 
 interface LibraryProps {
+  uploadVersion: number;
   /** The open file. Kept by the parent so it survives switching views, and
    * so the graph and uploads can open a file here. */
   selected: string | null;
@@ -378,7 +379,7 @@ interface LibraryProps {
   onAddFiles: () => void;
 }
 
-export default function Library({ selected, onSelect, onAddFiles }: LibraryProps) {
+export default function Library({ selected, onSelect, onAddFiles, uploadVersion }: LibraryProps) {
   const [files, setFiles] = useState<ArtifactSummary[] | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -389,21 +390,28 @@ export default function Library({ selected, onSelect, onAddFiles }: LibraryProps
   const [filter, setFilter] = useState<KindFilter>("all");
   const searchInput = useRef<HTMLInputElement>(null);
 
+  const listRequest = useRef(0);
+  const loadedCount = useRef(PAGE);
   const loadFiles = useCallback(async (count: number) => {
+    const request = ++listRequest.current;
+    loadedCount.current = count;
     try {
       const page = await listArtifacts(count + 1, 0);
+      if (request !== listRequest.current) return;
       setHasMore(page.length > count);
       setFiles(page.slice(0, count));
       setError(null);
     } catch (e) {
-      setError(errorText(e));
+      if (request === listRequest.current) setError(errorText(e));
     }
   }, []);
 
   const shown = files?.length ?? 0;
   useEffect(() => {
-    loadFiles(PAGE);
-  }, [loadFiles]);
+    void loadFiles(loadedCount.current);
+    setRefreshKey((key) => key + 1);
+    return () => { listRequest.current += 1; };
+  }, [loadFiles, uploadVersion]);
 
   // Open the newest file when nothing is selected yet, so the right-hand
   // pane is never an empty frame.

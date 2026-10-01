@@ -185,31 +185,66 @@ pub async fn persist_chunk_units(
             }
         }
 
-        let inserted: Option<(Uuid,)> = sqlx::query_as(
-            r#"
-            INSERT INTO atomic_units
-                (kind, statement, statement_hash, subject_entity_id, confidence,
-                 extraction_method, extraction_model, valid_from, attrs,
-                 asserted_at, observed_at)
-            VALUES ($1::unit_kind, $2, $3, $4, $5, $6::extraction_method, $7, $8, $9, $10, $11)
-            ON CONFLICT (statement_hash) DO NOTHING
-            RETURNING id
-            "#,
+        // Per-proposition serialization replaces global uniqueness. Reuse a
+        // live episode or this anchor's original episode, and preserve an
+        // explicit rejection until the user restores it.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(&statement_hash)
+            .execute(&mut *tx)
+            .await?;
+        let (message_id, segment_id, image_id) = anchor_columns(chunk.anchor);
+        let existing: Option<(Uuid,)> = sqlx::query_as(
+            "SELECT u.id FROM atomic_units u WHERE u.statement_hash = $1
+             AND (u.status = 'active'
+                  OR EXISTS (SELECT 1 FROM atomic_unit_provenance p
+                             WHERE p.atomic_unit_id = u.id
+                               AND p.message_id IS NOT DISTINCT FROM $2
+                               AND p.document_segment_id IS NOT DISTINCT FROM $3
+                               AND p.image_id IS NOT DISTINCT FROM $4)
+                  OR (SELECT f.action FROM unit_feedback f
+                      WHERE f.target_kind = 'unit' AND f.target_id = u.id
+                        AND f.action IN ('reject', 'confirm')
+                      ORDER BY f.created_at DESC, f.id DESC LIMIT 1) = 'reject')
+             ORDER BY EXISTS (SELECT 1 FROM atomic_unit_provenance p
+                              WHERE p.atomic_unit_id = u.id
+                                AND p.message_id IS NOT DISTINCT FROM $2
+                                AND p.document_segment_id IS NOT DISTINCT FROM $3
+                                AND p.image_id IS NOT DISTINCT FROM $4) DESC,
+                      u.created_at DESC, u.id DESC LIMIT 1",
         )
-        .bind(unit.kind)
-        .bind(&unit.statement)
         .bind(&statement_hash)
-        .bind(subject_entity_id)
-        .bind(confidence)
-        .bind(method)
-        .bind(model)
-        .bind(valid_from)
-        .bind(&attrs)
-        .bind(chunk.source_time)
-        .bind(unit.event_time)
+        .bind(message_id)
+        .bind(segment_id)
+        .bind(image_id)
         .fetch_optional(&mut *tx)
         .await?;
-
+        let inserted: Option<(Uuid,)> = if existing.is_some() {
+            None
+        } else {
+            sqlx::query_as(
+                r#"
+                INSERT INTO atomic_units
+                    (kind, statement, statement_hash, subject_entity_id, confidence,
+                     extraction_method, extraction_model, valid_from, attrs,
+                     asserted_at, observed_at)
+                VALUES ($1::unit_kind, $2, $3, $4, $5, $6::extraction_method, $7, $8, $9, $10, $11)
+                RETURNING id
+                "#,
+            )
+            .bind(unit.kind)
+            .bind(&unit.statement)
+            .bind(&statement_hash)
+            .bind(subject_entity_id)
+            .bind(confidence)
+            .bind(method)
+            .bind(model)
+            .bind(valid_from)
+            .bind(&attrs)
+            .bind(chunk.source_time)
+            .bind(unit.event_time)
+            .fetch_optional(&mut *tx)
+                .await?
+        };
         let (unit_id, is_new) = match inserted {
             Some((id,)) => {
                 outcome.units_created += 1;
@@ -223,11 +258,7 @@ pub async fn persist_chunk_units(
             }
             None => {
                 // Re-assertion of a known statement: reuse the unit, add provenance.
-                let (id,): (Uuid,) =
-                    sqlx::query_as("SELECT id FROM atomic_units WHERE statement_hash = $1")
-                        .bind(&statement_hash)
-                        .fetch_one(&mut *tx)
-                        .await?;
+                let (id,) = existing.expect("existing episode checked above");
                 if matches!(claim, Claim::Reread { .. }) {
                     // Already backed by this very chunk: a second provenance
                     // row would count one source twice.

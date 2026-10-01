@@ -402,7 +402,7 @@ export default function App() {
               />
             )}
             {tab === "library" && (
-              <Library selected={libraryFile} onSelect={setLibraryFile} onAddFiles={addFiles} />
+              <Library selected={libraryFile} onSelect={setLibraryFile} onAddFiles={addFiles} uploadVersion={uploads.version} />
             )}
             {tab === "projects" && (
               <Projects

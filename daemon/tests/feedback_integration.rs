@@ -235,3 +235,40 @@ async fn reject_on_missing_unit_is_404() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn correction_clears_stale_structure_and_keeps_full_history() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let id = seed_unit(&state, &format!("My budget is $50 {}", Uuid::new_v4())).await;
+    sqlx::query("UPDATE atomic_units SET attrs = $2 WHERE id = $1")
+        .bind(id)
+        .bind(json!({ "value": 50, "unit": "USD" }))
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    let corrected = format!("An unstructured correction {}", Uuid::new_v4());
+    routes::feedback::edit_unit_core(&state.pool, id, &corrected, None)
+        .await
+        .unwrap();
+    let (attrs, subject, revision): (Value, Option<Uuid>, i64) = sqlx::query_as(
+        "SELECT attrs, subject_entity_id, content_revision FROM atomic_units WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(attrs, json!({}));
+    assert!(subject.is_none());
+    assert!(revision > 0);
+    let before: Value = sqlx::query_scalar(
+        "SELECT before_state FROM atomic_unit_revisions WHERE atomic_unit_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(before["attrs"]["value"], json!(50));
+    assert!(before.get("statement").is_some());
+}

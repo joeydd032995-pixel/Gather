@@ -82,7 +82,11 @@ const TABLES: &[(&str, &str)] = &[
         "id, kind, statement, statement_hash, subject_entity_id, confidence, \
          extraction_method, extraction_model, embedding, valid_from, valid_to, \
          status, superseded_by_unit_id, attrs, created_at, updated_at, \
-         contradiction_scanned_at, topic_cluster_id, clustered_at, asserted_at, observed_at",
+         contradiction_scanned_at, topic_cluster_id, clustered_at, asserted_at, observed_at, content_revision",
+    ),
+    (
+        "atomic_unit_revisions",
+        "id, atomic_unit_id, revision, before_state, relationships, created_at",
     ),
     (
         "atomic_unit_provenance",
@@ -266,6 +270,12 @@ pub(crate) async fn import_bundle_core(
             .get("row")
             .cloned()
             .ok_or_else(|| ApiError::BadRequest(format!("line {} missing 'row'", lineno + 1)))?;
+        let mut row = row;
+        if *table == "atomic_units" {
+            if let Some(row) = row.as_object_mut() {
+                row.entry("content_revision").or_insert(json!(0));
+            }
+        }
         by_table.entry(table).or_default().push(row);
     }
 

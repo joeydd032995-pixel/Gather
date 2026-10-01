@@ -877,13 +877,12 @@ async fn withdrawal_during_extraction_cannot_create_claims() {
     .await
     .unwrap();
     assert!(result.is_none());
-    let count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM atomic_unit_provenance WHERE artifact_id = $1",
-    )
-    .bind(artifact_id)
-    .fetch_one(&state.pool)
-    .await
-    .unwrap();
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM atomic_unit_provenance WHERE artifact_id = $1")
+            .bind(artifact_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
     assert_eq!(count, 0);
 
     // Simple browser requests must be stopped before the mutation handler.

@@ -963,6 +963,7 @@ pub async fn with_examples(
 /// changed, or more has been read from its files since.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Fingerprint {
+    semantic_revision: i64,
     updated_at: DateTime<Utc>,
     units: i64,
     segments: i64,
@@ -976,7 +977,7 @@ struct Store {
     loaded: Option<Arc<Loaded>>,
     /// When the fingerprints were last read, for how many projects, and at
     /// which count of project writes.
-    checked: Option<(Instant, usize, u64)>,
+    checked: Option<(Instant, usize, u64, i64)>,
     /// The last graph pairs: for which projects, and the pairs, worked out
     /// from `loaded` (cleared whenever it is replaced).
     pairs: Option<(u64, usize, Arc<Vec<Pair>>)>,
@@ -997,8 +998,11 @@ pub fn touch() {
 pub async fn load(pool: &PgPool, max: usize) -> Result<Arc<Loaded>, ApiError> {
     let mut store = STORE.lock().await;
     let writes = WRITES.load(Ordering::Relaxed);
-    if let (Some(loaded), Some((at, n, w))) = (&store.loaded, store.checked) {
-        if at.elapsed() < RECHECK && n == max && w == writes {
+    let revision: i64 = sqlx::query_scalar("SELECT last_value FROM gather_semantic_revision")
+        .fetch_one(pool)
+        .await?;
+    if let (Some(loaded), Some((at, n, w, r))) = (&store.loaded, store.checked) {
+        if at.elapsed() < RECHECK && n == max && w == writes && r == revision {
             return Ok(loaded.clone());
         }
     }
@@ -1034,6 +1038,7 @@ pub async fn load(pool: &PgPool, max: usize) -> Result<Arc<Loaded>, ApiError> {
                 r.get("id"),
                 r.get("name"),
                 Fingerprint {
+                    semantic_revision: revision,
                     updated_at: r.get("updated_at"),
                     units: r.get("units"),
                     segments: r.get("segments"),
@@ -1083,7 +1088,7 @@ pub async fn load(pool: &PgPool, max: usize) -> Result<Arc<Loaded>, ApiError> {
     if changed {
         prune_names();
     }
-    store.checked = Some((Instant::now(), max, writes));
+    store.checked = Some((Instant::now(), max, writes, revision));
     Ok(store.loaded.clone().expect("set above"))
 }
 
