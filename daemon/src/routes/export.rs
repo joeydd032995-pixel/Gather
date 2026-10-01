@@ -171,7 +171,10 @@ pub(crate) struct BundleLimit {
 
 impl Default for BundleLimit {
     fn default() -> Self {
-        Self { bytes: 0, limit: MAX_BUNDLE_BYTES }
+        Self {
+            bytes: 0,
+            limit: MAX_BUNDLE_BYTES,
+        }
     }
 }
 
@@ -180,10 +183,14 @@ pub(crate) async fn write_bundle_chunk(
     limit: &mut BundleLimit,
     chunk: &[u8],
 ) -> Result<(), ApiError> {
-    let total = limit.bytes.checked_add(chunk.len() as u64)
+    let total = limit
+        .bytes
+        .checked_add(chunk.len() as u64)
         .filter(|total| *total <= limit.limit)
         .ok_or_else(|| ApiError::PayloadTooLarge("bundle exceeds its size limit".into()))?;
-    file.write_all(chunk).await.map_err(|error| ApiError::Internal(error.into()))?;
+    file.write_all(chunk)
+        .await
+        .map_err(|error| ApiError::Internal(error.into()))?;
     limit.bytes = total;
     Ok(())
 }
@@ -475,7 +482,9 @@ mod tests {
         let temporary = private_bundle_file().unwrap();
         let mut file = tokio::fs::File::from_std(temporary.reopen().unwrap());
         let mut limit = BundleLimit { bytes: 0, limit: 4 };
-        write_bundle_chunk(&mut file, &mut limit, b"abc").await.unwrap();
+        write_bundle_chunk(&mut file, &mut limit, b"abc")
+            .await
+            .unwrap();
         assert!(matches!(
             write_bundle_chunk(&mut file, &mut limit, b"de").await,
             Err(ApiError::PayloadTooLarge(_))

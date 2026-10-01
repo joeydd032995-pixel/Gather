@@ -86,19 +86,22 @@ async fn recurring_claim_has_a_new_episode_without_reversing_rejection() {
     let result = persist(&state, &first, Claim::Fresh { llm_model: None }).await;
     assert_eq!(result.units_created, 1);
     let old = result.new_units[0].0;
-    let ended = Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap();
+    let ended = Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap();
     let middle_text = text.replace("$50", "$75");
-    let middle = chunk(&state, &middle_text, 2).await;
+    let middle = chunk(&state, &middle_text, 3).await;
     let middle_result = persist(&state, &middle, Claim::Fresh { llm_model: None }).await;
     let middle_unit = middle_result.new_units[0].0;
-    let second = chunk(&state, &text, 3).await;
+    let second = chunk(&state, &text, 5).await;
     let result = persist(&state, &second, Claim::Fresh { llm_model: None }).await;
     assert_eq!(result.units_created, 1);
     assert_ne!(old, result.new_units[0].0);
     let new = result.new_units[0].0;
     // Extraction gets ahead of scanning: all three assertions already exist.
+    // Dates are more than the configured 30-day succession threshold apart.
     for _ in 0..200 {
-        gather_daemon::scan::run_one_scan(&state.pool, &state.config, None).await.unwrap();
+        gather_daemon::scan::run_one_scan(&state.pool, &state.config, None)
+            .await
+            .unwrap();
         let pending: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM atomic_units WHERE id = ANY($1) AND status <> 'superseded'",
         )
@@ -140,7 +143,7 @@ async fn recurring_claim_has_a_new_episode_without_reversing_rejection() {
     routes::feedback::reject_unit_core(&state.pool, new, None)
         .await
         .unwrap();
-    let third = chunk(&state, &text, 4).await;
+    let third = chunk(&state, &text, 7).await;
     let result = persist(&state, &third, Claim::Fresh { llm_model: None }).await;
     assert_eq!(result.units_created, 0);
     let status: String = sqlx::query_scalar("SELECT status::text FROM atomic_units WHERE id = $1")
@@ -386,22 +389,23 @@ async fn local_embedding_retry_revision_guard_and_model_change() {
     };
     let mut vector = vec![0.0f32; 768];
     vector[0] = 1.0;
-    sqlx::query(
-        "UPDATE document_segments SET embedding = $2, embedding_model = $3 WHERE id = $1",
-    )
-    .bind(segment)
-    .bind(pgvector::Vector::from(vector.clone()))
-    .bind(&client.embed_model)
-    .execute(&state.pool)
-    .await
-    .unwrap();
+    sqlx::query("UPDATE document_segments SET embedding = $2, embedding_model = $3 WHERE id = $1")
+        .bind(segment)
+        .bind(pgvector::Vector::from(vector.clone()))
+        .bind(&client.embed_model)
+        .execute(&state.pool)
+        .await
+        .unwrap();
     let response = routes::build_router(state.clone())
         .oneshot(
             Request::post("/api/v1/search/semantic")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(json!({
-                    "embedding": vector, "scope": "document_segments"
-                }).to_string()))
+                .body(Body::from(
+                    json!({
+                        "embedding": vector, "scope": "document_segments"
+                    })
+                    .to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -479,19 +483,33 @@ async fn restore_cannot_reactivate_a_claim_after_its_only_source_was_withdrawn()
     let result = persist(&state, &chunk, Claim::Fresh { llm_model: None }).await;
     let unit = result.new_units[0].0;
     gather_daemon::safety::service::retract_artifact(
-        &state.pool, chunk.artifact_id, None, false, None,
-    ).await.unwrap();
-    assert!(routes::feedback::restore_unit_core(&state.pool, unit, None).await.is_err());
+        &state.pool,
+        chunk.artifact_id,
+        None,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(routes::feedback::restore_unit_core(&state.pool, unit, None)
+        .await
+        .is_err());
     let status: String = sqlx::query_scalar("SELECT status::text FROM atomic_units WHERE id = $1")
-        .bind(unit).fetch_one(&state.pool).await.unwrap();
+        .bind(unit)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
     assert_eq!(status, "retracted");
     let response = routes::build_router(state.clone())
         .oneshot(
             Request::post("/api/v1/search/semantic")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(json!({
-                    "text": text, "scope": "document_segments"
-                }).to_string()))
+                .body(Body::from(
+                    json!({
+                        "text": text, "scope": "document_segments"
+                    })
+                    .to_string(),
+                ))
                 .unwrap(),
         )
         .await

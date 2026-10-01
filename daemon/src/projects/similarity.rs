@@ -1010,11 +1010,12 @@ pub async fn load(pool: &PgPool, max: usize) -> Result<Arc<Loaded>, ApiError> {
     )
     .execute(pool)
     .await?;
-    let revision: Arc<[i64]> =
-        sqlx::query_scalar("SELECT revision FROM gather_semantic_revisions ORDER BY revision DESC LIMIT 257")
-            .fetch_all(pool)
-            .await?
-            .into();
+    let revision: Arc<[i64]> = sqlx::query_scalar(
+        "SELECT revision FROM gather_semantic_revisions ORDER BY revision DESC LIMIT 257",
+    )
+    .fetch_all(pool)
+    .await?
+    .into();
     if let (Some(loaded), Some((at, n, w, r))) = (&store.loaded, &store.checked) {
         if at.elapsed() < RECHECK && *n == max && *w == writes && r == &revision {
             return Ok(loaded.clone());
