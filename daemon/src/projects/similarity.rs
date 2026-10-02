@@ -1045,7 +1045,7 @@ pub async fn load(pool: &PgPool, max: usize) -> Result<Arc<Loaded>, ApiError> {
 
     let stale: Vec<Uuid> = current
         .iter()
-        .filter(|(id, _, fp)| store.entries.get(id).map_or(true, |(old, _)| old != fp))
+        .filter(|(id, _, fp)| store.entries.get(id).is_none_or(|(old, _)| old != fp))
         .map(|(id, _, _)| *id)
         .collect();
     let mut fresh = HashMap::new();
