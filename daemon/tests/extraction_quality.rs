@@ -10,7 +10,7 @@
 //! needs no database and no Ollama.
 
 use gather_daemon::extract::rules::{extract_units, ExtractedUnit};
-use gather_daemon::extract::worth::{chunk_is_prose, unit_worth_keeping};
+use gather_daemon::extract::worth::{readable, unit_worth_keeping};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -53,10 +53,10 @@ fn normalize_subject(s: &Option<String>) -> Option<String> {
 /// What the always-on path would store for `text`: the rule extractor's
 /// output after the quality gate, exactly as the extraction worker applies it.
 fn stored_units(text: &str) -> Vec<ExtractedUnit> {
-    if !chunk_is_prose(text) {
+    let Some(text) = readable(text) else {
         return Vec::new();
-    }
-    extract_units(text)
+    };
+    extract_units(&text)
         .into_iter()
         .filter(unit_worth_keeping)
         .collect()

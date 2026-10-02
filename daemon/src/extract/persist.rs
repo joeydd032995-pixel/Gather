@@ -71,6 +71,29 @@ pub fn normalize_statement(statement: &str) -> String {
 /// not limited.
 pub const OPTIONAL_REVIEW_OPEN_CAP: i64 = 25;
 
+/// Close the optional review items past [`OPTIONAL_REVIEW_OPEN_CAP`], keeping
+/// the most informative (then the oldest). The units themselves stay live:
+/// optional items are a request for a second look, not a hold. Run each pass,
+/// so a tray that grew past the cap (an earlier version, or two chunks racing)
+/// settles back to it.
+pub async fn trim_optional_review(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE review_queue
+            SET state = 'dismissed',
+                signals = signals || '{\"dismissed_by\": \"optional-cap\"}'::jsonb
+          WHERE id IN (
+                SELECT id FROM review_queue
+                 WHERE target_kind = 'unit' AND state = 'open'
+                   AND reason IN ('low-confidence', 'modality-uncertain')
+                 ORDER BY info_gain DESC, created_at ASC, id ASC
+                OFFSET $1)",
+    )
+    .bind(OPTIONAL_REVIEW_OPEN_CAP)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Persist all units for one chunk and stamp its `units_extracted_at`
 /// marker atomically. Returns None if another pass already claimed the chunk.
 pub async fn persist_chunk_units(

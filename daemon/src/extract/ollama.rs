@@ -371,6 +371,14 @@ const VALID_KINDS: &[(&str, &str)] = &[
     ("event", "event"),
 ];
 
+/// Whether the sentence that runs on from `end` in `chunk` is a question.
+fn ends_in_question(chunk: &str, end: usize) -> bool {
+    chunk[end..]
+        .chars()
+        .find(|c| matches!(c, '.' | '!' | '?' | '\n'))
+        == Some('?')
+}
+
 pub(crate) fn parse_llm_units(parsed: &Value, chunk: &str) -> Vec<ExtractedUnit> {
     let Some(items) = parsed.get("units").and_then(Value::as_array) else {
         return Vec::new();
@@ -405,6 +413,11 @@ pub(crate) fn parse_llm_units(parsed: &Value, chunk: &str) -> Vec<ExtractedUnit>
         let Some(start) = chunk.find(evidence) else {
             continue;
         };
+        // A question states nothing, even when a model rewords it as a
+        // statement ("Is the budget $75?" -> "The budget is $75").
+        if evidence.ends_with('?') || ends_in_question(chunk, start + evidence.len()) {
+            continue;
+        }
         let confidence = item
             .get("confidence")
             .and_then(Value::as_f64)
@@ -558,5 +571,23 @@ mod tests {
             &chunk[units[0].char_start..units[0].char_end],
             "decided on Hetzner"
         );
+    }
+
+    #[test]
+    fn a_question_is_not_kept_even_when_the_model_rewords_it() {
+        let chunk = "Is the budget $75 per month? The budget is $90 per month.";
+        let parsed = serde_json::json!({
+            "units": [
+                { "kind": "fact", "statement": "The budget is $75 per month",
+                  "subject": "budget", "objects": [],
+                  "evidence_span": "Is the budget $75 per month", "confidence": 0.9 },
+                { "kind": "fact", "statement": "The budget is $90 per month",
+                  "subject": "budget", "objects": [],
+                  "evidence_span": "The budget is $90 per month", "confidence": 0.9 }
+            ]
+        });
+        let units = parse_llm_units(&parsed, chunk);
+        assert_eq!(units.len(), 1, "{units:?}");
+        assert!(units[0].statement.contains("$90"));
     }
 }

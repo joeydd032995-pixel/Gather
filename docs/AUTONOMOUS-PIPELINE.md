@@ -57,12 +57,17 @@ gate drops what is clearly not a statement about the world:
   counts as content, so `The budget is $40,000` stays.
 - **Vacuous sentences** whose object is a fragment (`I have no idea what to do next`,
   `We decided to think about it later`).
-- **Whole chunks that are code or data**: a chunk that is mostly symbols or bare numbers is
-  stamped as read without producing units.
+- **Code and data inside a chunk**: fenced code, code-like lines, table rows and rows of bare
+  figures are blanked out (byte for byte, so offsets still point into the file) and the prose
+  around them is read as usual. A chunk with no prose left is stamped as read without producing
+  units. A stated figure is not a "row of figures": `Budget is $40,000` stays.
 
 The same gate decides what becomes a graph **entity**. A name is the name inside the phrase:
 `dark mode in every editor` is about `dark mode`, and `Hetzner CX22 for the backup target` is
-about `Hetzner CX22`, so one thing is not several nodes. Numbers, expressions, pronouns, moods
+about `Hetzner CX22`, so one thing is not several nodes. A preposition followed by a capital is
+part of the name (`Ruby on Rails`, `Research in Motion`). A statement whose subject can't be a
+node (`the project`, `the team`) is still kept, just without a subject entity. A question is
+never kept, including when a model rewords it as a statement. Numbers, expressions, pronouns, moods
 (`sure`, `tired`) and sentence fragments never become entities, so they can't turn up as
 "possible match" items either. The gate keeps what it is unsure about: it never rejects a
 statement for being short or plain, only for being arithmetic, code, data, a fragment or filler.
@@ -110,7 +115,9 @@ You never have to visit it. Items in it are already live.
 **Optional items are capped.** Low-confidence and "stated or not?" units are optional: they are
 kept either way. The tray holds at most 25 of them open at once; past that they are admitted
 without being queued, and as you answer some, newer ones can take their place. Decisions that
-need a person (merges, contradictions, withdrawals) are never limited. A model that gives no
+need a person (merges, contradictions, withdrawals) are never limited. A tray that is already
+longer (from an earlier version) is trimmed on the next extraction pass: the most informative
+items stay, the rest are closed (their units stay live). A model that gives no
 confidence figure is no longer treated as unsure (it counts as 0.7, not 0.5).
 
 ## The feedback loop (`unit_feedback`)

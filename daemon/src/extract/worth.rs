@@ -104,6 +104,8 @@ struct Patterns {
     math: [Regex; 5],
     code: [Regex; 6],
     url: Regex,
+    /// snake_case_identifier: a name from code, not a word.
+    identifier: Regex,
 }
 
 fn patterns() -> &'static Patterns {
@@ -139,6 +141,7 @@ fn patterns() -> &'static Patterns {
             Regex::new(r"\b0x[0-9a-fA-F]{2,}\b|\b[a-z]+_[a-z0-9_]+_[a-z0-9_]+\b").unwrap(),
         ],
         url: Regex::new(r"\S*(?:://|www\.)\S*").unwrap(),
+        identifier: Regex::new(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+){2,}\b").unwrap(),
     })
 }
 
@@ -167,6 +170,17 @@ fn numeric_share(text: &str) -> f32 {
         .map(|t| t.chars().count())
         .sum();
     numeric as f32 / total as f32
+}
+
+/// Several bare numbers making up most of the text: a table row or a dump of
+/// figures. One or two figures in a sentence are not.
+fn is_row_of_figures(text: &str) -> bool {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    let numeric = tokens
+        .iter()
+        .filter(|t| !t.chars().any(char::is_alphabetic) && t.chars().any(|c| c.is_ascii_digit()))
+        .count();
+    numeric >= 3 && (numeric * 2 >= tokens.len() || numeric_share(text) >= 0.4)
 }
 
 fn has_figure(text: &str) -> bool {
@@ -198,11 +212,12 @@ pub fn statement_worth_keeping(statement: &str) -> bool {
     if non_space(s) < 8 {
         return false;
     }
-    if looks_like_math(s) || looks_like_code(s) {
+    if looks_like_math(s) || looks_like_code(s) || patterns().identifier.is_match(s) {
         return false;
     }
-    // A row of figures: mostly digits, however it is punctuated.
-    if numeric_share(s) >= 0.4 {
+    // A row of figures: several bare numbers making up most of the text. One
+    // stated figure ("Budget is $40,000") is a fact, however long it is.
+    if is_row_of_figures(s) {
         return false;
     }
     if s.matches('|').count() >= 2 || s.matches('\t').count() >= 2 {
@@ -274,16 +289,22 @@ pub fn entity_head(phrase: &str) -> Option<String> {
         return Some("Me".to_string());
     }
     let words: Vec<&str> = first_clause.split_whitespace().collect();
+    // A word like "in" or "for" ends the name, unless a capitalized word
+    // follows: "Ruby on Rails" and "Research in Motion" are names, while
+    // "dark mode in every editor" and "Hetzner CX22 for the backup target"
+    // are a name and a description of it.
     let cut = words
         .iter()
         .enumerate()
         .skip(1)
-        .find(|(_, w)| {
+        .find(|&(i, w)| {
             CLAUSE_WORDS.contains(
                 &w.trim_matches(|c: char| !c.is_alphanumeric())
                     .to_lowercase()
                     .as_str(),
-            )
+            ) && !words
+                .get(i + 1)
+                .is_some_and(|next| next.starts_with(char::is_uppercase))
         })
         .map_or(words.len(), |(i, _)| i);
     let head = words[..cut].join(" ");
@@ -295,11 +316,8 @@ pub fn unit_worth_keeping(unit: &ExtractedUnit) -> bool {
     if !statement_worth_keeping(&unit.statement) {
         return false;
     }
-    if let Some(subject) = unit.subject.as_deref() {
-        if entity_head(subject).is_none() {
-            return false;
-        }
-    }
+    // A subject that can't be a graph node ("the project", "the team") is no
+    // reason to lose the statement: the unit is kept without a subject entity.
     // For these sentence shapes the object *is* the point ("I use X",
     // "we decided on X", "X means Y"). When it is a fragment there is nothing
     // left to keep.
@@ -317,6 +335,67 @@ pub fn unit_worth_keeping(unit: &ExtractedUnit) -> bool {
         return false;
     }
     true
+}
+
+/// Whether one line of a chunk is code, markup or data rather than prose.
+fn line_is_code(line: &str) -> bool {
+    let t = line.trim();
+    if t.is_empty() {
+        return false;
+    }
+    if looks_like_code(t) || t.matches('|').count() >= 2 || t.matches('\t').count() >= 2 {
+        return true;
+    }
+    if is_row_of_figures(t) {
+        return true;
+    }
+    let total = non_space(t);
+    let symbols = t
+        .chars()
+        .filter(|c| {
+            matches!(
+                c,
+                '{' | '}' | '[' | ']' | '(' | ')' | '<' | '>' | ';' | '=' | '|' | '\\'
+            )
+        })
+        .count();
+    total >= 10 && symbols as f32 / total as f32 > 0.15
+}
+
+/// `text` with its code, tables and rows of figures blanked out, byte for
+/// byte: the result is as long as the original and the prose is where it was,
+/// so offsets into it still point into the original.
+pub fn mask_code(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_fence = false;
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\n', '\r']);
+        let trimmed = body.trim();
+        let fence = trimmed.starts_with("```") || trimmed.starts_with("~~~");
+        let mask = if fence {
+            in_fence = !in_fence;
+            true
+        } else {
+            in_fence || line_is_code(body)
+        };
+        if mask {
+            out.extend(std::iter::repeat_n(' ', body.len()));
+            out.push_str(&line[body.len()..]);
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+/// The part of a chunk worth reading for statements: the chunk with its code
+/// and data blanked out (see [`mask_code`]), or None when no prose is left.
+pub fn readable(text: &str) -> Option<String> {
+    let masked = mask_code(text);
+    if masked.trim().is_empty() || !chunk_is_prose(&masked) {
+        return None;
+    }
+    Some(masked)
 }
 
 /// Whether a stretch of text is prose worth reading for statements, as opposed
@@ -392,6 +471,7 @@ mod tests {
             "<div class=\"price\">75</div>",
             "result = compute_total(items, tax_rate)",
             "user_account_balance is 100 | 200 | 300",
+            "user_account_balance is 100",
             "12 | 4.5 | 77 | 0.31 | 9",
         ] {
             assert!(!statement_worth_keeping(s), "should reject: {s}");
@@ -411,6 +491,11 @@ mod tests {
             "I work at Anthropic on developer tools",
             "The deadline moved to 2026-03-01 because of the audit",
             "I have a dog",
+            "I use Rust",
+            "I have diabetes",
+            "Budget is $40,000",
+            "The budget is $1,000,000",
+            "Our rent is $1,200 per month",
         ] {
             assert!(statement_worth_keeping(s), "should keep: {s}");
         }
@@ -494,6 +579,17 @@ mod tests {
             Some("Anthropic")
         );
         assert_eq!(head("PostgreSQL").as_deref(), Some("PostgreSQL"));
+        // A preposition followed by a capital is part of the name.
+        assert_eq!(head("Ruby on Rails").as_deref(), Some("Ruby on Rails"));
+        assert_eq!(
+            head("Research in Motion").as_deref(),
+            Some("Research in Motion")
+        );
+        assert_eq!(head("Bank of America").as_deref(), Some("Bank of America"));
+        assert_eq!(
+            head("Ruby on Rails for the backend").as_deref(),
+            Some("Ruby on Rails")
+        );
         assert_eq!(head("Acme, Inc.").as_deref(), Some("Acme"));
         assert_eq!(head("Me").as_deref(), Some("Me"));
         // Nothing left that is a name.
@@ -530,12 +626,25 @@ mod tests {
             &["to think about it later"],
             "decision",
         )));
-        // A subject that isn't a name.
+        // Arithmetic is rejected on its statement.
         assert!(!unit_worth_keeping(&unit(
             "2+1 costs 3 dollars in the example",
             Some("2+1"),
             &[],
             "numeric",
+        )));
+        // A subject that can't be a graph node doesn't cost the statement.
+        assert!(unit_worth_keeping(&unit(
+            "The project costs $5 per month",
+            Some("project"),
+            &[],
+            "numeric",
+        )));
+        assert!(unit_worth_keeping(&unit(
+            "The team meets every Friday morning",
+            Some("the team"),
+            &[],
+            "llm",
         )));
         // No objects to check: kept on the statement.
         assert!(unit_worth_keeping(&unit(
@@ -559,5 +668,36 @@ mod tests {
         assert!(chunk_is_prose(prose));
         // Too short to judge.
         assert!(chunk_is_prose("I use PostgreSQL."));
+    }
+
+    #[test]
+    fn prose_next_to_code_is_still_read() {
+        let chunk =
+            "I use PostgreSQL for storage.\n\n```sql\nSELECT id, name FROM t WHERE x = 3;\n```\n\
+                     We decided on Hetzner CX22 for the backup target.\n\
+                     | name | cost |\n| a | 12 |\n12 4.5 77 0.31 9\n";
+        let masked = mask_code(chunk);
+        assert_eq!(masked.len(), chunk.len(), "same length, so offsets line up");
+        assert!(masked.contains("I use PostgreSQL for storage."));
+        assert!(masked.contains("We decided on Hetzner CX22"));
+        assert!(!masked.contains("SELECT"));
+        assert!(!masked.contains("| a |"));
+        assert!(!masked.contains("0.31"));
+        let readable = readable(chunk).expect("there is prose in it");
+        assert_eq!(readable, masked);
+        // The prose sits at the same offsets in both.
+        let at = chunk.find("We decided").unwrap();
+        assert_eq!(&readable[at..at + 10], "We decided");
+        // Multi-byte text keeps its length too.
+        let accented = "Café résumé is fine.\n```\ncafé = 1;\n```\n";
+        assert_eq!(mask_code(accented).len(), accented.len());
+    }
+
+    #[test]
+    fn a_chunk_that_is_all_code_or_data_has_nothing_to_read() {
+        assert!(readable("```\nfn main() { let x = 1; }\n```\n").is_none());
+        assert!(readable("12 4.5 77 0.31 9 15 22 1.5\n8 40 31 7 12 4.5 77 0.31\n").is_none());
+        assert!(readable("   \n\n").is_none());
+        assert!(readable("I use PostgreSQL.").is_some());
     }
 }

@@ -136,7 +136,9 @@ async fn only_statements_worth_keeping_are_stored_and_the_tray_stays_small() {
          I use Dark{m} mode in every editor.\n\n\
          2 + 1 is 3 is equal to = 3. The page is 3 + 4 = 7. x = 4 so y = 5.\n\n\
          I have no idea what to do next. I am happy.\n\n\
-         What is 2+2? Is the budget $75 per month?\n"
+         What is 2+2? Is the budget $75 per month?\n\n\
+         ```sql\nSELECT id, name FROM t WHERE x = 3;\n```\n\n\
+         I use Rust{m}.\n"
     );
     let artifact = upload_markdown(&state, &format!("worth-{m}.md"), &text).await;
     drain(&state, artifact).await;
@@ -145,9 +147,11 @@ async fn only_statements_worth_keeping_are_stored_and_the_tray_stays_small() {
         statements(&state, artifact).await,
         vec![
             format!("I use Dark{m} mode in every editor"),
+            format!("I use Rust{m}"),
             format!("We decided on Hetzner{m} for the backup target"),
         ],
-        "arithmetic, filler, fragments and questions are not stored"
+        "arithmetic, code, filler, fragments and questions are not stored; \
+         prose beside a code block is"
     );
 
     // Entities are the names inside the phrases, not the phrases.
@@ -160,7 +164,14 @@ async fn only_statements_worth_keeping_are_stored_and_the_tray_stays_small() {
         .map(|r| r.get::<String, _>("name"))
         .collect();
     names.sort();
-    assert_eq!(names, vec![format!("Dark{m} mode"), format!("Hetzner{m}")]);
+    assert_eq!(
+        names,
+        vec![
+            format!("Dark{m} mode"),
+            format!("Hetzner{m}"),
+            format!("Rust{m}")
+        ]
+    );
     let (junk,): (i64,) = sqlx::query_as(
         "SELECT count(*) FROM entities
          WHERE name IN ('2+1', '3', 'x', 'y', 'page') OR name ILIKE '%no idea what%'
@@ -233,6 +244,62 @@ async fn only_statements_worth_keeping_are_stored_and_the_tray_stays_small() {
 
     sqlx::query("DELETE FROM review_queue WHERE target_id = ANY($1)")
         .bind(&filler_ids)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+    // ---- A tray already past the cap (an earlier version, or a race) is
+    // trimmed on the next pass, keeping the most informative items.
+    let mut trimmed_ids = Vec::new();
+    for i in 0..(OPTIONAL_REVIEW_OPEN_CAP + 5) {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO review_queue (target_kind, target_id, reason, info_gain)
+             VALUES ('unit', $1, 'low-confidence', $2)",
+        )
+        .bind(id)
+        .bind(1000.0f32 + i as f32)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        trimmed_ids.push(id);
+    }
+    extract::run_one_pass(&state.pool, &state.config, None)
+        .await
+        .expect("extraction pass");
+    let open_mine: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM review_queue WHERE target_id = ANY($1) AND state = 'open'",
+    )
+    .bind(&trimmed_ids)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        open_mine, OPTIONAL_REVIEW_OPEN_CAP,
+        "the cap holds on existing items"
+    );
+    let lowest_still_open: f32 = sqlx::query_scalar(
+        "SELECT min(info_gain) FROM review_queue WHERE target_id = ANY($1) AND state = 'open'",
+    )
+    .bind(&trimmed_ids)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert!(
+        lowest_still_open >= 1005.0,
+        "the five least informative were closed, not the most: {lowest_still_open}"
+    );
+    let (open_total,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM review_queue
+         WHERE target_kind = 'unit' AND state = 'open'
+           AND reason IN ('low-confidence', 'modality-uncertain')",
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert!(open_total <= OPTIONAL_REVIEW_OPEN_CAP, "{open_total}");
+    sqlx::query("DELETE FROM review_queue WHERE target_id = ANY($1)")
+        .bind(&trimmed_ids)
         .execute(&state.pool)
         .await
         .unwrap();

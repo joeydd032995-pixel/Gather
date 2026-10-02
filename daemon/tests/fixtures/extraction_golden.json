@@ -146,10 +146,35 @@
       ]
     },
     {
+      "name": "prose-next-to-code",
+      "input": "I use PostgreSQL for storage.\n\n```sql\nSELECT id, name FROM t WHERE x = 3;\n```\nWe decided on Hetzner CX22 for the backup target.\n| name | cost |\n| a | 12 |\n",
+      "expected": [
+        { "kind": "fact", "statement": "I use PostgreSQL for storage", "subject": "Me" },
+        { "kind": "decision", "statement": "We decided on Hetzner CX22 for the backup target", "subject": "Me" }
+      ]
+    },
+    {
+      "name": "single-nouns-and-names",
+      "input": "I use Rust. I have diabetes. I use Ruby on Rails for the backend.",
+      "expected": [
+        { "kind": "fact", "statement": "I use Rust", "subject": "Me" },
+        { "kind": "fact", "statement": "I have diabetes", "subject": "Me" },
+        { "kind": "fact", "statement": "I use Ruby on Rails for the backend", "subject": "Me" }
+      ]
+    },
+    {
       "name": "terse-figure-is-kept",
       "input": "The budget is $40,000.",
       "expected": [
         { "kind": "claim", "statement": "The budget is $40,000", "subject": "budget" }
+      ]
+    },
+    {
+      "name": "figures-with-separators-are-kept",
+      "input": "Budget is $40,000. The budget is $1,000,000.",
+      "expected": [
+        { "kind": "claim", "statement": "Budget is $40,000", "subject": "Budget" },
+        { "kind": "claim", "statement": "The budget is $1,000,000", "subject": "budget" }
       ]
     }
   ]

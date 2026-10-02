@@ -235,6 +235,13 @@ pub async fn run_one_pass(
     config: &Config,
     ollama: Option<&OllamaClient>,
 ) -> anyhow::Result<PassStats> {
+    // The tray keeps a bounded number of optional items: trim any beyond that,
+    // including a longer queue left by an earlier version.
+    match persist::trim_optional_review(pool).await {
+        Ok(n) if n > 0 => tracing::info!(items = n, "review: trimmed optional items past the cap"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "review: could not trim optional items"),
+    }
     // Each queue on its own: one failing never keeps the others from moving.
     let pdfs_processed = process_pending_pdfs(pool, config)
         .await
@@ -674,26 +681,27 @@ async fn process_unit_chunks(
     let live = LiveThresholds::load(pool, config).await?;
     let mut stats = ChunkStats::default();
     for chunk in &chunks {
-        // Code, data tables and figure dumps aren't read for statements: they
-        // match sentence shapes without saying anything. The chunk is still
-        // stamped as read (with no units), so it isn't looked at again.
-        let prose = worth::chunk_is_prose(&chunk.text);
-        let mut units: Vec<(rules::ExtractedUnit, &'static str, Option<String>)> = if prose {
-            rules::extract_units(&chunk.text)
+        // Code, data tables and rows of figures aren't read for statements:
+        // they match sentence shapes without saying anything. They are blanked
+        // out (same length, so offsets still point into the chunk) and the
+        // prose around them is read as usual. A chunk with no prose is still
+        // stamped as read, so it isn't looked at again.
+        let readable = worth::readable(&chunk.text);
+        let mut units: Vec<(rules::ExtractedUnit, &'static str, Option<String>)> = match &readable {
+            Some(text) => rules::extract_units(text)
                 .into_iter()
                 .map(|u| (u, "rule_based", None))
-                .collect()
-        } else {
-            Vec::new()
+                .collect(),
+            None => Vec::new(),
         };
         let mut llm_model = None;
 
-        if let Some((client, chat_model)) = ollama
-            .filter(|_| prose)
-            .and_then(|c| c.model.as_deref().map(|m| (c, m)))
-        {
+        if let (Some(text), Some((client, chat_model))) = (
+            readable.as_deref(),
+            ollama.and_then(|c| c.model.as_deref().map(|m| (c, m))),
+        ) {
             let asked = std::time::Instant::now();
-            let answer = client.extract(&chunk.text).await;
+            let answer = client.extract(text).await;
             pace(asked.elapsed(), config.extraction_ai_duty_percent).await;
             match answer {
                 Ok(llm_units) => {
