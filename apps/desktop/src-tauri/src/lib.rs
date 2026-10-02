@@ -19,6 +19,19 @@ use tauri::{AppHandle, Manager, RunEvent, State};
 use runtime::{Paths, Runtime, Status};
 use updates::{InstallError, PendingUpdate, UpdateCheck, UpdateSettings};
 
+#[cfg(windows)]
+fn allow_primary_foreground(pid: u32) {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn AllowSetForegroundWindow(process_id: u32) -> i32;
+    }
+    // The launcher can transfer its foreground permission to the primary.
+    // Failure is harmless: normal window restoration still runs.
+    unsafe {
+        AllowSetForegroundWindow(pid);
+    }
+}
+
 struct DesktopInstanceLock {
     _file: std::fs::File,
 }
@@ -276,9 +289,26 @@ pub fn run() {
                 .open(data.join("desktop.lock"))?;
             match lock.try_lock() {
                 Ok(()) => {
+                    use std::io::{Seek, Write};
+
+                    let mut lock = lock;
+                    lock.set_len(0)?;
+                    lock.rewind()?;
+                    write!(lock, "{}", std::process::id())?;
+                    lock.sync_data()?;
                     app.manage(DesktopInstanceLock { _file: lock });
                 }
                 Err(std::fs::TryLockError::WouldBlock) => {
+                    // A secondary window must not steal focus back while exiting.
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.hide();
+                    }
+                    #[cfg(windows)]
+                    if let Ok(pid) = std::fs::read_to_string(data.join("desktop.lock")) {
+                        if let Ok(pid) = pid.trim().parse::<u32>() {
+                            allow_primary_foreground(pid);
+                        }
+                    }
                     std::fs::write(data.join("focus.request"), [])?;
                     app.handle().exit(0);
                     return Ok(());
@@ -296,7 +326,7 @@ pub fn run() {
                         let _ = window.unminimize();
                         let _ = window.show();
                         let _ = window.set_focus();
-                        if let Some(probe) = &probe {
+                        if let Some(probe) = probe.as_mut() {
                             probe.focused(&window);
                         }
                     }

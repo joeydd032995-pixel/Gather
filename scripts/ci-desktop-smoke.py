@@ -114,6 +114,8 @@ try:
     initial = start(exe)
     lock_identity = (data / "desktop.lock").stat().st_ino
     for attempt in range(3):
+        REPORT.with_suffix(".minimize").touch()
+        wait_for(lambda: report("ready", primary.pid), "window minimized before second launch")
         REPORT.unlink(missing_ok=True)
         secondary = subprocess.Popen([str(exe)], env=ENV,
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

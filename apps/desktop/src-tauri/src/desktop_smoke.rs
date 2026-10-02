@@ -45,8 +45,7 @@ impl Probe {
                     if window.is_focused().unwrap_or(false)
                         && !window.is_minimized().unwrap_or(true)
                     {
-                        self.write("focused", &window);
-                        self.focused_reported = true;
+                        self.focused_reported = self.write("focused", &window);
                     }
                 }
             }
@@ -64,24 +63,31 @@ impl Probe {
         }
     }
 
-    pub fn focused(&self, window: &tauri::WebviewWindow) {
+    pub fn focused(&mut self, window: &tauri::WebviewWindow) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
-            if window.is_focused().unwrap_or(false) && !window.is_minimized().unwrap_or(true) {
-                break;
+            if self.write("focused", window) {
+                self.focused_reported = true;
+                return;
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        self.write("focused", window);
+        self.write("focus-timeout", window);
+        self.focused_reported = true;
     }
 
-    fn write(&self, phase: &str, window: &tauri::WebviewWindow) {
+    fn write(&self, phase: &str, window: &tauri::WebviewWindow) -> bool {
+        let focused = window.is_focused().unwrap_or(false);
+        let minimized = window.is_minimized().unwrap_or(true);
+        if phase == "focused" && (!focused || minimized) {
+            return false;
+        }
         let state = serde_json::json!({
             "phase": phase,
             "pid": std::process::id(),
             "data_dir": self.data,
-            "focused": window.is_focused().unwrap_or(false),
-            "minimized": window.is_minimized().unwrap_or(true),
+            "focused": focused,
+            "minimized": minimized,
         });
         let result = (|| -> Result<(), Box<dyn std::error::Error>> {
             if let Some(parent) = self.report.parent() {
@@ -94,6 +100,8 @@ impl Probe {
         })();
         if let Err(error) = result {
             eprintln!("desktop smoke report failed: {error}");
+            return false;
         }
+        true
     }
 }
