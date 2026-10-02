@@ -17,6 +17,7 @@ pub mod persist;
 pub mod reread;
 pub mod rules;
 pub mod segment;
+pub mod worth;
 
 use std::time::Duration;
 
@@ -673,14 +674,23 @@ async fn process_unit_chunks(
     let live = LiveThresholds::load(pool, config).await?;
     let mut stats = ChunkStats::default();
     for chunk in &chunks {
-        let mut units: Vec<(rules::ExtractedUnit, &'static str, Option<String>)> =
+        // Code, data tables and figure dumps aren't read for statements: they
+        // match sentence shapes without saying anything. The chunk is still
+        // stamped as read (with no units), so it isn't looked at again.
+        let prose = worth::chunk_is_prose(&chunk.text);
+        let mut units: Vec<(rules::ExtractedUnit, &'static str, Option<String>)> = if prose {
             rules::extract_units(&chunk.text)
                 .into_iter()
                 .map(|u| (u, "rule_based", None))
-                .collect();
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut llm_model = None;
 
-        if let Some((client, chat_model)) = ollama.and_then(|c| c.model.as_deref().map(|m| (c, m)))
+        if let Some((client, chat_model)) = ollama
+            .filter(|_| prose)
+            .and_then(|c| c.model.as_deref().map(|m| (c, m)))
         {
             let asked = std::time::Instant::now();
             let answer = client.extract(&chunk.text).await;

@@ -124,6 +124,10 @@ pub fn extract_units(text: &str) -> Vec<ExtractedUnit> {
         if sentence.len() < 10 || sentence.len() > 400 {
             continue;
         }
+        // A question states nothing ("What is 2+2?").
+        if sentence.ends_with('?') {
+            continue;
+        }
         let statement = tidy(sentence.trim_end_matches(['.', '!', '?']));
         let span = (start, end);
 

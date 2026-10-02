@@ -409,7 +409,8 @@ pub(crate) fn parse_llm_units(parsed: &Value, chunk: &str) -> Vec<ExtractedUnit>
             .get("confidence")
             .and_then(Value::as_f64)
             .map(|c| c as f32)
-            .unwrap_or(0.5)
+            // A model that gives no figure isn't saying it is unsure.
+            .unwrap_or(0.7)
             .clamp(0.0, 1.0)
             * 0.9; // LLM units never outrank rule-based hits
         let objects = item

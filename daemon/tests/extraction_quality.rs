@@ -9,7 +9,8 @@
 //! can't silently regress. It calls the pure extract_units() function, so it
 //! needs no database and no Ollama.
 
-use gather_daemon::extract::rules::extract_units;
+use gather_daemon::extract::rules::{extract_units, ExtractedUnit};
+use gather_daemon::extract::worth::{chunk_is_prose, unit_worth_keeping};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -49,6 +50,18 @@ fn normalize_subject(s: &Option<String>) -> Option<String> {
     s.as_ref().map(|v| normalize(v))
 }
 
+/// What the always-on path would store for `text`: the rule extractor's
+/// output after the quality gate, exactly as the extraction worker applies it.
+fn stored_units(text: &str) -> Vec<ExtractedUnit> {
+    if !chunk_is_prose(text) {
+        return Vec::new();
+    }
+    extract_units(text)
+        .into_iter()
+        .filter(unit_worth_keeping)
+        .collect()
+}
+
 fn load_golden() -> Golden {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -69,7 +82,7 @@ fn rule_extractor_meets_precision_gate() {
     let mut failures: Vec<String> = Vec::new();
 
     for case in &golden.cases {
-        let produced = extract_units(&case.input);
+        let produced = stored_units(&case.input);
 
         // Match on (kind, normalized statement); each expected consumed once.
         let mut remaining: Vec<ExpectedUnit> = case.expected.clone();

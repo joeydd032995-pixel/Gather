@@ -208,9 +208,17 @@ pub async fn run_pass(
     };
     let stored = stored_model(model);
     for chunk in &chunks {
-        let asked = std::time::Instant::now();
-        let answer = client.extract(&chunk.text).await;
-        super::pace(asked.elapsed(), config.extraction_ai_duty_percent).await;
+        // Code and data tables aren't read for statements (see worth.rs): the
+        // chunk is counted as read, with nothing to store, and the model is
+        // spared the call.
+        let answer = if super::worth::chunk_is_prose(&chunk.text) {
+            let asked = std::time::Instant::now();
+            let answer = client.extract(&chunk.text).await;
+            super::pace(asked.elapsed(), config.extraction_ai_duty_percent).await;
+            answer
+        } else {
+            Ok(Vec::new())
+        };
         let units = match answer {
             Ok(found) => found
                 .into_iter()
