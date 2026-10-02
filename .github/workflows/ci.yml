@@ -30,6 +30,8 @@ jobs:
       - name: rustfmt
         working-directory: daemon
         run: cargo fmt --check
+      - name: desktop versions and release tag agree
+        run: python3 scripts/check-release-version.py
       - name: smoke controller syntax
         run: python3 -m py_compile scripts/ci-desktop-smoke.py
       - name: desktop rustfmt
@@ -510,11 +512,15 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - name: tag matches the app version
+      - name: desktop versions and release tag agree
+        run: python3 scripts/check-release-version.py
+      - name: use curated release notes when available
+        id: release-notes
         run: |
-          app=$(python3 -c "import json; print(json.load(open('apps/desktop/src-tauri/tauri.conf.json'))['version'])")
-          [ "v$app" = "$GITHUB_REF_NAME" ] || {
-            echo "tag $GITHUB_REF_NAME does not match tauri.conf.json version $app (see docs/RELEASING.md)"; exit 1; }
+          notes="docs/releases/$GITHUB_REF_NAME.md"
+          if [ -f "$notes" ]; then
+            echo "path=$notes" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
@@ -537,4 +543,5 @@ jobs:
       - uses: softprops/action-gh-release@v3
         with:
           files: release/*
+          body_path: ${{ steps.release-notes.outputs.path }}
           generate_release_notes: true
