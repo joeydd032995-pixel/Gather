@@ -86,14 +86,18 @@ async fn drain_extraction(state: &AppState) {
         let (busy,): (i64,) = sqlx::query_as(
             r#"
             SELECT
-              (SELECT count(*) FROM documents
-               WHERE extraction_status IN ('pending','processing'))
-            + (SELECT count(*) FROM images
-               WHERE ocr_status IN ('pending','processing'))
-            + (SELECT count(*) FROM messages WHERE units_extracted_at IS NULL)
-            + (SELECT count(*) FROM document_segments WHERE units_extracted_at IS NULL)
-            + (SELECT count(*) FROM images
-               WHERE units_extracted_at IS NULL AND ocr_status = 'completed'
+              (SELECT count(*) FROM documents d JOIN artifacts a ON a.id = d.artifact_id
+               WHERE extraction_status IN ('pending','processing') AND a.retracted_at IS NULL)
+            + (SELECT count(*) FROM images i JOIN artifacts a ON a.id = i.artifact_id
+               WHERE ocr_status IN ('pending','processing') AND a.retracted_at IS NULL)
+            + (SELECT count(*) FROM messages m JOIN conversations c ON c.id = m.conversation_id
+               JOIN artifacts a ON a.id = c.artifact_id
+               WHERE units_extracted_at IS NULL AND a.retracted_at IS NULL)
+            + (SELECT count(*) FROM document_segments s JOIN documents d ON d.id = s.document_id
+               JOIN artifacts a ON a.id = d.artifact_id
+               WHERE units_extracted_at IS NULL AND a.retracted_at IS NULL)
+            + (SELECT count(*) FROM images i JOIN artifacts a ON a.id = i.artifact_id
+               WHERE a.retracted_at IS NULL AND units_extracted_at IS NULL AND ocr_status = 'completed'
                  AND ocr_text IS NOT NULL AND length(trim(ocr_text)) > 0)
             "#,
         )
@@ -808,4 +812,101 @@ async fn a_perplexity_markdown_export_arrives_as_a_conversation() {
         .unwrap();
     let again = body_json(res).await;
     assert_eq!(again["files"][0]["status"], "deduplicated");
+}
+
+#[tokio::test]
+async fn withdrawal_during_extraction_cannot_create_claims() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let app = routes::build_router(state.clone());
+    let marker = Uuid::new_v4().simple().to_string();
+    let text = format!("I use Withdrawn{marker} for storage.");
+    let export = json!({
+        "platform": "generic",
+        "data": {
+            "schema": "gather-generic-v1",
+            "conversations": [{
+                "id": format!("withdrawal-{marker}"),
+                "messages": [{"role": "user", "content": text}]
+            }]
+        }
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/ingest/chat-export")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(export.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let (message_id, artifact_id): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT m.id, c.artifact_id FROM messages m
+         JOIN conversations c ON c.id = m.conversation_id WHERE m.content = $1",
+    )
+    .bind(&text)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+
+    // This chunk represents work already taken before withdrawal/model latency.
+    let chunk = extract::persist::Chunk {
+        anchor: extract::persist::ChunkAnchor::Message(message_id),
+        artifact_id,
+        text: text.clone(),
+        source_time: None,
+        user_authored: true,
+        ocr_confidence: None,
+    };
+    sqlx::query("UPDATE artifacts SET retracted_at = now() WHERE id = $1")
+        .bind(artifact_id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    let units: Vec<_> = extract::rules::extract_units(&text)
+        .into_iter()
+        .map(|unit| (unit, "rule_based", None))
+        .collect();
+    let result = extract::persist::persist_chunk_units(
+        &state.pool,
+        &chunk,
+        &extract::persist::Claim::Fresh { llm_model: None },
+        &units,
+        0.0,
+        0.0,
+    )
+    .await
+    .unwrap();
+    assert!(result.is_none());
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM atomic_unit_provenance WHERE artifact_id = $1")
+            .bind(artifact_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
+
+    // Simple browser requests must be stopped before the mutation handler.
+    for origin in ["https://untrusted.example", "null"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/ingest/chat-export")
+                    .header(header::ORIGIN, origin)
+                    .header(header::CONTENT_TYPE, "text/plain")
+                    .body(Body::from(export.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+    sqlx::query("DELETE FROM artifacts WHERE id = $1")
+        .bind(artifact_id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
 }

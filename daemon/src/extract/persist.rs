@@ -1,4 +1,4 @@
-//! Persistence for extracted units: dedup on normalized statement hash,
+//! Persistence for extracted units: dedup within a live or anchored episode,
 //! provenance anchoring, entity resolution, relationship edges, temporal
 //! validity, and optional embedding backfill. One transaction per chunk —
 //! a crash mid-pass never leaves a chunk half-persisted or double-stamped.
@@ -6,7 +6,7 @@
 use chrono::{DateTime, Utc};
 use pgvector::Vector;
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use super::ollama::OllamaClient;
@@ -77,6 +77,22 @@ pub async fn persist_chunk_units(
     drop_below: f32,
 ) -> Result<Option<PersistOutcome>, ApiError> {
     let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('gather.scan.write'))")
+        .execute(&mut *tx)
+        .await?;
+
+    // Serialize with source withdrawal before touching chunk or derived rows.
+    // The model call happens before this transaction, so check liveness again.
+    let live: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM artifacts WHERE id = $1 AND retracted_at IS NULL FOR UPDATE",
+    )
+    .bind(chunk.artifact_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if live.is_none() {
+        tx.rollback().await?;
+        return Ok(None);
+    }
 
     // Claim: stamp the marker iff still unstamped (or, for a re-read, still
     // not read by this model or job); concurrent workers skip.
@@ -172,31 +188,82 @@ pub async fn persist_chunk_units(
             }
         }
 
-        let inserted: Option<(Uuid,)> = sqlx::query_as(
-            r#"
-            INSERT INTO atomic_units
-                (kind, statement, statement_hash, subject_entity_id, confidence,
-                 extraction_method, extraction_model, valid_from, attrs,
-                 asserted_at, observed_at)
-            VALUES ($1::unit_kind, $2, $3, $4, $5, $6::extraction_method, $7, $8, $9, $10, $11)
-            ON CONFLICT (statement_hash) DO NOTHING
-            RETURNING id
-            "#,
+        // Per-proposition serialization replaces global uniqueness. Reuse a
+        // still-open episode unless another state intervened, or this anchor's
+        // original episode. Preserve explicit rejection until restored.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(&statement_hash)
+            .execute(&mut *tx)
+            .await?;
+        let (message_id, segment_id, image_id) = anchor_columns(chunk.anchor);
+        let episodes: Vec<(Uuid, bool, bool)> = sqlx::query_as(
+            "SELECT u.id,
+                    EXISTS (SELECT 1 FROM atomic_unit_provenance p
+                            WHERE p.atomic_unit_id = u.id
+                              AND p.message_id IS NOT DISTINCT FROM $2
+                              AND p.document_segment_id IS NOT DISTINCT FROM $3
+                              AND p.image_id IS NOT DISTINCT FROM $4) AS backed,
+                    coalesce((SELECT f.action FROM unit_feedback f
+                      WHERE f.target_kind = 'unit' AND f.target_id = u.id
+                        AND f.action IN ('reject', 'confirm')
+                      ORDER BY f.created_at DESC, f.id DESC LIMIT 1) = 'reject', false) AS rejected FROM atomic_units u WHERE u.statement_hash = $1
+             AND (u.status IN ('active', 'disputed')
+                  OR EXISTS (SELECT 1 FROM atomic_unit_provenance p
+                             WHERE p.atomic_unit_id = u.id
+                               AND p.message_id IS NOT DISTINCT FROM $2
+                               AND p.document_segment_id IS NOT DISTINCT FROM $3
+                               AND p.image_id IS NOT DISTINCT FROM $4)
+                  OR (SELECT f.action FROM unit_feedback f
+                      WHERE f.target_kind = 'unit' AND f.target_id = u.id
+                        AND f.action IN ('reject', 'confirm')
+                      ORDER BY f.created_at DESC, f.id DESC LIMIT 1) = 'reject')
+             ORDER BY EXISTS (SELECT 1 FROM atomic_unit_provenance p
+                              WHERE p.atomic_unit_id = u.id
+                                AND p.message_id IS NOT DISTINCT FROM $2
+                                AND p.document_segment_id IS NOT DISTINCT FROM $3
+                                AND p.image_id IS NOT DISTINCT FROM $4) DESC,
+                      u.created_at DESC, u.id DESC",
         )
-        .bind(unit.kind)
-        .bind(&unit.statement)
         .bind(&statement_hash)
-        .bind(subject_entity_id)
-        .bind(confidence)
-        .bind(method)
-        .bind(model)
-        .bind(valid_from)
-        .bind(&attrs)
-        .bind(chunk.source_time)
-        .bind(unit.event_time)
-        .fetch_optional(&mut *tx)
+        .bind(message_id)
+        .bind(segment_id)
+        .bind(image_id)
+        .fetch_all(&mut *tx)
         .await?;
-
+        let mut existing = None;
+        for (id, backed, rejected) in episodes {
+            if backed || rejected || !intervening_state(&mut tx, id, valid_from).await? {
+                existing = Some((id,));
+                break;
+            }
+        }
+        let inserted: Option<(Uuid,)> = if existing.is_some() {
+            None
+        } else {
+            sqlx::query_as(
+                r#"
+                INSERT INTO atomic_units
+                    (kind, statement, statement_hash, subject_entity_id, confidence,
+                     extraction_method, extraction_model, valid_from, attrs,
+                     asserted_at, observed_at)
+                VALUES ($1::unit_kind, $2, $3, $4, $5, $6::extraction_method, $7, $8, $9, $10, $11)
+                RETURNING id
+                "#,
+            )
+            .bind(unit.kind)
+            .bind(&unit.statement)
+            .bind(&statement_hash)
+            .bind(subject_entity_id)
+            .bind(confidence)
+            .bind(method)
+            .bind(model)
+            .bind(valid_from)
+            .bind(&attrs)
+            .bind(chunk.source_time)
+            .bind(unit.event_time)
+            .fetch_optional(&mut *tx)
+            .await?
+        };
         let (unit_id, is_new) = match inserted {
             Some((id,)) => {
                 outcome.units_created += 1;
@@ -210,11 +277,7 @@ pub async fn persist_chunk_units(
             }
             None => {
                 // Re-assertion of a known statement: reuse the unit, add provenance.
-                let (id,): (Uuid,) =
-                    sqlx::query_as("SELECT id FROM atomic_units WHERE statement_hash = $1")
-                        .bind(&statement_hash)
-                        .fetch_one(&mut *tx)
-                        .await?;
+                let (id,) = existing.expect("existing episode checked above");
                 if matches!(claim, Claim::Reread { .. }) {
                     // Already backed by this very chunk: a second provenance
                     // row would count one source twice.
@@ -519,18 +582,230 @@ pub async fn embed_new_units(
         return Ok(0);
     }
     let texts: Vec<String> = new_units.iter().map(|(_, s)| s.clone()).collect();
-    let embeddings = ollama.embed(&texts).await?;
-    let mut updated = 0usize;
-    for ((id, _), embedding) in new_units.iter().zip(embeddings) {
-        sqlx::query("UPDATE atomic_units SET embedding = $2 WHERE id = $1")
-            .bind(id)
-            .bind(Vector::from(embedding))
-            .execute(pool)
+    let ids: Vec<Uuid> = new_units.iter().map(|(id, _)| *id).collect();
+    let revisions: std::collections::HashMap<Uuid, i64> =
+        sqlx::query_as("SELECT id, content_revision FROM atomic_units WHERE id = ANY($1)")
+            .bind(&ids)
+            .fetch_all(pool)
             .await
-            .map_err(|e| e.to_string())?;
-        updated += 1;
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .collect();
+    let embeddings = ollama.embed(&texts).await?;
+    let Some(mut tx) = embedding_write_transaction(pool, &ollama.embed_model).await? else {
+        return Ok(0);
+    };
+    let mut updated = 0usize;
+    for ((id, statement), embedding) in new_units.iter().zip(embeddings) {
+        let result = sqlx::query(
+            "UPDATE atomic_units SET embedding = $2, embedding_model = $4,
+                    embedding_attempts = 0, embedding_retry_at = NULL
+             WHERE id = $1 AND statement = $3 AND content_revision = $5
+               AND embedding IS NULL AND status = 'active'
+               AND (SELECT model FROM embedding_state WHERE singleton) = $4",
+        )
+        .bind(id)
+        .bind(Vector::from(embedding))
+        .bind(statement)
+        .bind(&ollama.embed_model)
+        .bind(revisions.get(id).copied().unwrap_or(-1))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+        updated += result.rows_affected() as usize;
     }
+    tx.commit().await.map_err(|error| error.to_string())?;
     Ok(updated)
+}
+
+/// Retry old ingestion, temporary model failures, and corrections in bounded batches.
+pub async fn embed_pending_units(
+    pool: &PgPool,
+    ollama: &OllamaClient,
+    batch: i64,
+) -> Result<usize, String> {
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, statement FROM atomic_units
+         WHERE embedding IS NULL AND status = 'active'
+           AND (embedding_retry_at IS NULL OR embedding_retry_at <= now())
+         ORDER BY embedding_retry_at NULLS FIRST, created_at, id LIMIT $1",
+    )
+    .bind(batch)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| error.to_string())?;
+    match embed_new_units(pool, ollama, &rows).await {
+        Ok(count) => Ok(count),
+        Err(error) => {
+            for (id, statement) in &rows {
+                sqlx::query(
+                    "UPDATE atomic_units
+                     SET embedding_attempts = least(embedding_attempts + 1, 10),
+                         embedding_retry_at = now() + make_interval(
+                             secs => least(3600, 5 * power(2, embedding_attempts)::integer))
+                     WHERE id = $1 AND statement = $2 AND embedding IS NULL",
+                )
+                .bind(id)
+                .bind(statement)
+                .execute(pool)
+                .await
+                .map_err(|error| error.to_string())?;
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Repeated statements can corroborate one open episode across dates. A
+/// structurally conflicting assertion between those dates starts a new episode,
+/// even when the scanner has not yet closed the old one.
+async fn intervening_state(
+    tx: &mut Transaction<'_, Postgres>,
+    episode: Uuid,
+    asserted: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<bool, sqlx::Error> {
+    use crate::scan::score::{score_pair, UnitFacts};
+
+    let row = sqlx::query(
+        "SELECT id, statement, attrs, subject_entity_id, valid_from, valid_to
+         FROM atomic_units WHERE id = $1",
+    )
+    .bind(episode)
+    .fetch_one(&mut **tx)
+    .await?;
+    let start: Option<chrono::DateTime<chrono::Utc>> = row.get("valid_from");
+    let (Some(start), Some(asserted)) = (start, asserted) else {
+        return Ok(false);
+    };
+    if start == asserted {
+        return Ok(false);
+    }
+    let rows = sqlx::query(
+        "SELECT id, statement, attrs, subject_entity_id, valid_from, valid_to
+         FROM atomic_units WHERE subject_entity_id = $1 AND id <> $2
+           AND status IN ('active', 'disputed', 'superseded')
+           AND valid_from BETWEEN LEAST($3::timestamptz, $4::timestamptz)
+             AND GREATEST($3::timestamptz, $4::timestamptz)
+         ORDER BY valid_from, id LIMIT 101",
+    )
+    .bind(row.get::<Option<Uuid>, _>("subject_entity_id"))
+    .bind(episode)
+    .bind(start)
+    .bind(asserted)
+    .fetch_all(&mut **tx)
+    .await?;
+    // Bounded work: uncertainty creates another episode, never merges history.
+    if rows.len() > 100 {
+        return Ok(true);
+    }
+    let facts = |row: &sqlx::postgres::PgRow| UnitFacts {
+        id: row.get("id"),
+        statement: row.get("statement"),
+        attrs: row.get("attrs"),
+        subject_entity_id: row.get("subject_entity_id"),
+        valid_from: row.get("valid_from"),
+        valid_to: row.get("valid_to"),
+        assignments: vec![],
+    };
+    let mut previous = facts(&row);
+    previous.assignments = episode_assignments(tx, episode).await?;
+    for row in rows {
+        let mut candidate = facts(&row);
+        candidate.assignments = episode_assignments(tx, candidate.id).await?;
+        if score_pair(&previous, &candidate, None).is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+async fn episode_assignments(
+    tx: &mut Transaction<'_, Postgres>,
+    unit: Uuid,
+) -> Result<Vec<(Uuid, String, Uuid)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT source_entity_id, relation_type, target_entity_id FROM relationships
+         WHERE atomic_unit_id = $1 AND status IN ('active', 'superseded')",
+    )
+    .bind(unit)
+    .fetch_all(&mut **tx)
+    .await
+}
+
+/// Initialize the local embedding identity and clear incompatible vectors in
+/// one transaction, before serving searches or starting background workers.
+pub async fn ensure_embedding_model(pool: &PgPool, model: &str) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('gather.scan.write'))")
+        .execute(&mut *tx)
+        .await?;
+    let current: Option<String> =
+        sqlx::query_scalar("SELECT model FROM embedding_state WHERE singleton FOR UPDATE")
+            .fetch_one(&mut *tx)
+            .await?;
+    if current.as_deref() != Some(model) {
+        sqlx::query(
+            "UPDATE atomic_units SET embedding = NULL, embedding_model = NULL,
+             clustered_at = NULL, topic_cluster_id = NULL, contradiction_scanned_at = NULL,
+             embedding_retry_at = NULL, embedding_attempts = 0",
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE document_segments SET embedding = NULL, embedding_model = NULL")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE entities SET embedding = NULL, embedding_model = NULL")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "UPDATE images SET embedding = NULL, embedding_model = NULL,
+             captioned_at = NULL, topic_cluster_id = NULL",
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "DELETE FROM cluster_members m USING clusters c WHERE m.cluster_id = c.id
+             AND (m.member_kind = 'unit' OR (m.member_kind = 'image' AND c.kind = 'photo_topic'))",
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE embedding_state SET model = $1, generation = generation + 1 WHERE singleton",
+        )
+        .bind(model)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Writers lock model identity before derived rows, so a model change and an
+/// in-flight request cannot repopulate each other's vector space.
+pub async fn embedding_write_transaction<'a>(
+    pool: &'a PgPool,
+    model: &str,
+) -> Result<Option<Transaction<'a, Postgres>>, String> {
+    let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
+    // Also supports library users/tests that construct a client without main.
+    // Once set, only the explicit startup model-change path may replace it.
+    sqlx::query(
+        "UPDATE embedding_state SET model = $1, generation = generation + 1
+         WHERE singleton AND model IS NULL",
+    )
+    .bind(model)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| error.to_string())?;
+    let current: Option<String> =
+        sqlx::query_scalar("SELECT model FROM embedding_state WHERE singleton FOR SHARE")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|error| error.to_string())?;
+    if current.as_deref() != Some(model) {
+        return Ok(None);
+    }
+    Ok(Some(tx))
 }
 
 pub async fn embed_pending_segments(
@@ -539,7 +814,10 @@ pub async fn embed_pending_segments(
     batch: i64,
 ) -> Result<usize, String> {
     let rows: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT id, content FROM document_segments WHERE embedding IS NULL ORDER BY id LIMIT $1",
+        "SELECT s.id, s.content FROM document_segments s
+         JOIN documents d ON d.id = s.document_id
+         JOIN artifacts a ON a.id = d.artifact_id
+         WHERE s.embedding IS NULL AND a.retracted_at IS NULL ORDER BY s.id LIMIT $1",
     )
     .bind(batch)
     .fetch_all(pool)
@@ -550,16 +828,26 @@ pub async fn embed_pending_segments(
     }
     let texts: Vec<String> = rows.iter().map(|(_, c)| c.clone()).collect();
     let embeddings = ollama.embed(&texts).await?;
+    let Some(mut tx) = embedding_write_transaction(pool, &ollama.embed_model).await? else {
+        return Ok(0);
+    };
     let mut updated = 0usize;
-    for ((id, _), embedding) in rows.iter().zip(embeddings) {
-        sqlx::query("UPDATE document_segments SET embedding = $2 WHERE id = $1")
-            .bind(id)
-            .bind(Vector::from(embedding))
-            .execute(pool)
-            .await
-            .map_err(|e| e.to_string())?;
-        updated += 1;
+    for ((id, statement), embedding) in rows.iter().zip(embeddings) {
+        let result = sqlx::query(
+            "UPDATE document_segments SET embedding = $2, embedding_model = $4
+             WHERE id = $1 AND content = $3 AND embedding IS NULL
+               AND (SELECT model FROM embedding_state WHERE singleton) = $4",
+        )
+        .bind(id)
+        .bind(Vector::from(embedding))
+        .bind(statement)
+        .bind(&ollama.embed_model)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+        updated += result.rows_affected() as usize;
     }
+    tx.commit().await.map_err(|error| error.to_string())?;
     Ok(updated)
 }
 

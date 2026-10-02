@@ -84,6 +84,9 @@ async fn unit_status(
 /// label. Shared by the REST handler and the review tray.
 pub async fn reject_unit_core(pool: &PgPool, id: Uuid, note: Option<&str>) -> Result<(), ApiError> {
     let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('gather.scan.write'))")
+        .execute(&mut *tx)
+        .await?;
     unit_status(&mut tx, id).await?;
     sqlx::query("UPDATE atomic_units SET status = 'retracted' WHERE id = $1")
         .bind(id)
@@ -170,6 +173,9 @@ pub async fn restore_unit_core(
     note: Option<&str>,
 ) -> Result<(), ApiError> {
     let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('gather.scan.write'))")
+        .execute(&mut *tx)
+        .await?;
     let status = unit_status(&mut tx, id).await?;
     // Restore is the inverse of reject, nothing else. A unit superseded by a
     // contradiction resolution carries superseded_by_unit_id / valid_to that
@@ -178,6 +184,20 @@ pub async fn restore_unit_core(
         return Err(ApiError::BadRequest(format!(
             "only a retracted unit can be restored; unit {id} is '{status}'"
         )));
+    }
+    let unsupported: bool = sqlx::query_scalar(
+        "SELECT (SELECT has_source_history FROM atomic_units WHERE id = $1)
+         AND NOT EXISTS (SELECT 1 FROM atomic_unit_provenance p
+                         JOIN artifacts a ON a.id = p.artifact_id
+                         WHERE p.atomic_unit_id = $1 AND a.retracted_at IS NULL)",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if unsupported {
+        return Err(ApiError::BadRequest(
+            "this claim cannot be restored because its sources were withdrawn".into(),
+        ));
     }
     // Rescan: conclusions withdrawn with the reject are re-derived afresh.
     sqlx::query(
@@ -247,6 +267,9 @@ pub async fn edit_unit_core(
     let hash = hex::encode(Sha256::digest(normalize_statement(&statement)));
 
     let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('gather.scan.write'))")
+        .execute(&mut *tx)
+        .await?;
     // Lock the row and capture the pre-edit statement so the correction is
     // reversible: the feedback row keeps both before and after.
     let before: Option<(String, String)> =
@@ -259,7 +282,7 @@ pub async fn edit_unit_core(
     };
 
     let clash: Option<(Uuid,)> =
-        sqlx::query_as("SELECT id FROM atomic_units WHERE statement_hash = $1 AND id <> $2")
+        sqlx::query_as("SELECT id FROM atomic_units WHERE statement_hash = $1 AND id <> $2 AND status = 'active' LIMIT 1")
             .bind(&hash)
             .bind(id)
             .fetch_optional(&mut *tx)
@@ -270,6 +293,52 @@ pub async fn edit_unit_core(
         ));
     }
 
+    sqlx::query(
+        "INSERT INTO atomic_unit_revisions
+            (atomic_unit_id, revision, before_state, relationships)
+         SELECT u.id, u.content_revision, to_jsonb(u),
+                coalesce((SELECT jsonb_agg(to_jsonb(r)) FROM relationships r
+                          WHERE r.atomic_unit_id = u.id), '[]'::jsonb)
+         FROM atomic_units u WHERE u.id = $1 ON CONFLICT DO NOTHING",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    // Withdraw conclusions derived from the previous content before replacing it.
+    let event = crate::safety::store::record(
+        &mut tx,
+        &crate::safety::service::user_decision(
+            "user.edit_unit",
+            format!("user-edit:{id}:{}", Uuid::new_v4()),
+            vec![id],
+            crate::safety::EvidenceClass::UserConfirmed,
+            "You corrected this claim; conclusions based on its old content were withdrawn.".into(),
+        ),
+    )
+    .await?;
+    let mut report = crate::safety::service::RetractionReport::default();
+    crate::safety::service::retract_unit_dependents(
+        &mut tx,
+        &[id],
+        "a claim it relied on was corrected",
+        event,
+        &mut report,
+    )
+    .await?;
+    // The revision trigger saves old edges; delete them after updating the row.
+    // Unstructured corrections carry no inherited subject or numeric attributes.
+    let parsed = crate::extract::rules::extract_units(&statement);
+    let parsed = parsed.first().filter(|unit| {
+        parsed.len() == 1 && normalize_statement(&unit.statement) == normalize_statement(&statement)
+    });
+    let attrs = parsed
+        .map(|unit| unit.attrs.clone())
+        .unwrap_or_else(|| json!({}));
+    let subject = match parsed.and_then(|unit| unit.subject.as_deref()) {
+        Some(name) => Some(crate::extract::persist::resolve_or_create_entity(&mut tx, name).await?),
+        None => None,
+    };
+
     // Changing the text invalidates derived state: the old embedding no longer
     // matches (search would rank the new text by the old vector) and the
     // contradiction scanner must re-examine the unit (it only picks up rows
@@ -277,15 +346,56 @@ pub async fn edit_unit_core(
     sqlx::query(
         "UPDATE atomic_units \
          SET statement = $2, statement_hash = $3, extraction_method = 'manual', \
-             embedding = NULL, contradiction_scanned_at = NULL, \
-             clustered_at = NULL, topic_cluster_id = NULL \
+             embedding = NULL, embedding_model = NULL, embedding_retry_at = NULL, \
+             embedding_attempts = 0, contradiction_scanned_at = NULL, \
+             clustered_at = NULL, topic_cluster_id = NULL, \
+             attrs = $4, subject_entity_id = $5, extraction_model = NULL, \
+             kind = coalesce($6::unit_kind, 'fact'::unit_kind), \
+             valid_from = CASE WHEN observed_at IS NOT NULL THEN $7 ELSE coalesce($7, valid_from) END, \
+             observed_at = $7 \
          WHERE id = $1",
     )
     .bind(id)
     .bind(&statement)
     .bind(&hash)
+    .bind(&attrs)
+    .bind(subject)
+    .bind(parsed.map(|unit| unit.kind))
+    .bind(parsed.and_then(|unit| unit.event_time))
     .execute(&mut *tx)
     .await?;
+    sqlx::query("DELETE FROM relationships WHERE atomic_unit_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    if status == "active" && crate::safety::modality::classify(&statement).asserts_positive_fact() {
+        if let (Some(source), Some(parsed)) = (subject, parsed) {
+            for (object, relation) in &parsed.objects {
+                let target =
+                    crate::extract::persist::resolve_or_create_entity(&mut tx, object).await?;
+                if source != target {
+                    sqlx::query(
+                        "INSERT INTO relationships
+                            (source_entity_id, target_entity_id, relation_type,
+                             atomic_unit_id, confidence)
+                         VALUES ($1, $2, $3, $4,
+                                 (SELECT confidence FROM atomic_units WHERE id = $4))
+                         ON CONFLICT DO NOTHING",
+                    )
+                    .bind(source)
+                    .bind(target)
+                    .bind(relation)
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+        }
+    }
+    sqlx::query("DELETE FROM cluster_members WHERE member_kind = 'unit' AND member_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     record_feedback(
         &mut tx,
         id,

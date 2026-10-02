@@ -963,6 +963,7 @@ pub async fn with_examples(
 /// changed, or more has been read from its files since.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Fingerprint {
+    semantic_revision: Arc<[i64]>,
     updated_at: DateTime<Utc>,
     units: i64,
     segments: i64,
@@ -976,7 +977,7 @@ struct Store {
     loaded: Option<Arc<Loaded>>,
     /// When the fingerprints were last read, for how many projects, and at
     /// which count of project writes.
-    checked: Option<(Instant, usize, u64)>,
+    checked: Option<(Instant, usize, u64, Arc<[i64]>)>,
     /// The last graph pairs: for which projects, and the pairs, worked out
     /// from `loaded` (cleared whenever it is replaced).
     pairs: Option<(u64, usize, Arc<Vec<Pair>>)>,
@@ -997,8 +998,26 @@ pub fn touch() {
 pub async fn load(pool: &PgPool, max: usize) -> Result<Arc<Loaded>, ApiError> {
     let mut store = STORE.lock().await;
     let writes = WRITES.load(Ordering::Relaxed);
-    if let (Some(loaded), Some((at, n, w))) = (&store.loaded, store.checked) {
-        if at.elapsed() < RECHECK && n == max && w == writes {
+    // Compaction never locks a semantic writer's uncommitted revision. Its
+    // new marker commits with deletion, so another daemon's cache sees it too.
+    sqlx::query(
+        "WITH removed AS (
+             DELETE FROM gather_semantic_revisions
+             WHERE revision < (SELECT max(revision) - 256 FROM gather_semantic_revisions)
+             RETURNING revision)
+         INSERT INTO gather_semantic_revisions (revision)
+         SELECT nextval('gather_semantic_revision') WHERE EXISTS (SELECT 1 FROM removed)",
+    )
+    .execute(pool)
+    .await?;
+    let revision: Arc<[i64]> = sqlx::query_scalar(
+        "SELECT revision FROM gather_semantic_revisions ORDER BY revision DESC LIMIT 257",
+    )
+    .fetch_all(pool)
+    .await?
+    .into();
+    if let (Some(loaded), Some((at, n, w, r))) = (&store.loaded, &store.checked) {
+        if at.elapsed() < RECHECK && *n == max && *w == writes && r == &revision {
             return Ok(loaded.clone());
         }
     }
@@ -1034,6 +1053,7 @@ pub async fn load(pool: &PgPool, max: usize) -> Result<Arc<Loaded>, ApiError> {
                 r.get("id"),
                 r.get("name"),
                 Fingerprint {
+                    semantic_revision: revision.clone(),
                     updated_at: r.get("updated_at"),
                     units: r.get("units"),
                     segments: r.get("segments"),
@@ -1083,7 +1103,7 @@ pub async fn load(pool: &PgPool, max: usize) -> Result<Arc<Loaded>, ApiError> {
     if changed {
         prune_names();
     }
-    store.checked = Some((Instant::now(), max, writes));
+    store.checked = Some((Instant::now(), max, writes, revision));
     Ok(store.loaded.clone().expect("set above"))
 }
 
@@ -1158,6 +1178,7 @@ async fn compute(pool: &PgPool, ids: &[Uuid]) -> Result<HashMap<Uuid, Signature>
              SELECT DISTINCT i.project_id, pv.atomic_unit_id \
                FROM project_items i \
                JOIN atomic_unit_provenance pv ON pv.artifact_id = i.artifact_id \
+               JOIN artifacts a ON a.id = i.artifact_id AND a.retracted_at IS NULL \
               WHERE i.project_id = ANY($1)) \
          SELECT DISTINCT x.project_id, e.id, e.name FROM ( \
              SELECT un.project_id, u.subject_entity_id AS entity_id \
@@ -1168,7 +1189,9 @@ async fn compute(pool: &PgPool, ids: &[Uuid]) -> Result<HashMap<Uuid, Signature>
                FROM units un \
                JOIN relationships r ON r.atomic_unit_id = un.atomic_unit_id \
               CROSS JOIN LATERAL (VALUES (r.source_entity_id), (r.target_entity_id)) y(entity_id) \
-              WHERE r.status = 'active') x \
+              WHERE r.status = 'active' \
+                AND EXISTS (SELECT 1 FROM atomic_units u WHERE u.id = r.atomic_unit_id \
+                            AND u.status IN ('active', 'disputed'))) x \
          JOIN entities e ON e.id = x.entity_id AND e.merged_into_entity_id IS NULL",
     )
     .bind(ids)
@@ -1192,6 +1215,7 @@ async fn compute(pool: &PgPool, ids: &[Uuid]) -> Result<HashMap<Uuid, Signature>
                     row_number() OVER (PARTITION BY i.project_id ORDER BY s.id) AS n \
                FROM project_items i \
                JOIN documents d ON d.artifact_id = i.artifact_id \
+           JOIN artifacts a ON a.id = d.artifact_id AND a.retracted_at IS NULL \
                JOIN document_segments s ON s.document_id = d.id \
               WHERE i.project_id = ANY($1)), \
          counts AS ( \
@@ -1231,6 +1255,7 @@ async fn compute(pool: &PgPool, ids: &[Uuid]) -> Result<HashMap<Uuid, Signature>
         "SELECT i.project_id, avg(s.embedding) AS centroid \
            FROM project_items i \
            JOIN documents d ON d.artifact_id = i.artifact_id \
+           JOIN artifacts a ON a.id = d.artifact_id AND a.retracted_at IS NULL \
            JOIN document_segments s ON s.document_id = d.id \
           WHERE i.project_id = ANY($1) AND s.embedding IS NOT NULL \
           GROUP BY 1",

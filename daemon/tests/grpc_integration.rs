@@ -457,14 +457,15 @@ async fn semantic_search_embeds_query_server_side() {
     let unit_id: Uuid = sqlx::query_scalar(
         r#"
         INSERT INTO atomic_units (kind, statement, statement_hash, confidence,
-                                  extraction_method, status, embedding)
-        VALUES ('fact', $1, $2, 0.9, 'manual', 'active', $3)
+                                  extraction_method, status, embedding, embedding_model)
+        VALUES ('fact', $1, $2, 0.9, 'manual', 'active', $3, $4)
         RETURNING id
         "#,
     )
     .bind(format!("The {token} reactor runs at 42 percent efficiency"))
     .bind(format!("{:0>64}", Uuid::new_v4().simple()))
     .bind(pgvector::Vector::from(vector))
+    .bind(&state.ollama.as_ref().unwrap().embed_model)
     .fetch_one(&state.pool)
     .await
     .expect("seed embedded unit");

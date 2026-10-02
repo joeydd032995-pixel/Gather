@@ -92,10 +92,10 @@ try {
         exit 1
     }
 
-    $snapshotJson = restic snapshots --latest 1 --json | ConvertFrom-Json
+    $snapshotJson = restic snapshots --tag gather-bundle --latest 1 --json | ConvertFrom-Json
     $snapshotId = if ($snapshotJson) { $snapshotJson[0].short_id } else { "unknown" }
 
-    restic forget --keep-daily $keepDaily --keep-weekly $keepWeekly --keep-monthly $keepMonthly --prune
+    restic forget --tag gather-bundle --group-by host,tags --keep-daily $keepDaily --keep-weekly $keepWeekly --keep-monthly $keepMonthly --prune
     if ($LASTEXITCODE -ne 0) {
         Write-Log "backup: WARNING - snapshot $snapshotId taken but retention pruning failed"
         exit 1

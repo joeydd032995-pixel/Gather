@@ -26,6 +26,7 @@ use score::{score_pair, UnitFacts};
 
 /// A unit as the scanner sees it: the scorer's facts plus time and model.
 struct Scanned {
+    revision: i64,
     facts: UnitFacts,
     time: TimeScope,
     model: Option<String>,
@@ -163,11 +164,13 @@ pub async fn run_one_scan(
         let claimed: Option<(Uuid,)> = sqlx::query_as(
             r#"
             SELECT id FROM atomic_units
-            WHERE id = $1 AND contradiction_scanned_at IS NULL AND status = 'active'
+            WHERE id = $1 AND content_revision = $2
+              AND contradiction_scanned_at IS NULL AND status = 'active'
             FOR UPDATE SKIP LOCKED
             "#,
         )
         .bind(unit.facts.id)
+        .bind(unit.revision)
         .fetch_optional(&mut *tx)
         .await?;
         if claimed.is_none() {
@@ -175,6 +178,17 @@ pub async fn run_one_scan(
         }
         let mut outcomes = Outcomes::default();
         for (other, conflict) in &conflicts {
+            let current: Option<Uuid> = sqlx::query_scalar(
+                "SELECT id FROM atomic_units WHERE id = $1 AND content_revision = $2
+                 AND status = 'active' FOR UPDATE",
+            )
+            .bind(other.facts.id)
+            .bind(other.revision)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if current.is_none() {
+                continue;
+            }
             if record_conflict(&mut tx, &unit, other, conflict, &policy, &mut outcomes).await? {
                 stats.contradictions_found += 1;
                 metrics::counter!(
@@ -201,6 +215,7 @@ pub async fn run_one_scan(
 
 fn scanned_from(row: &sqlx::postgres::PgRow) -> Scanned {
     Scanned {
+        revision: row.get("content_revision"),
         facts: UnitFacts {
             id: row.get("id"),
             statement: row.get("statement"),
@@ -224,7 +239,7 @@ fn scanned_from(row: &sqlx::postgres::PgRow) -> Scanned {
 async fn load_unit(pool: &PgPool, id: Uuid) -> anyhow::Result<Option<Scanned>> {
     let Some(row) = sqlx::query(
         r#"
-        SELECT id, statement, attrs, subject_entity_id, valid_from, valid_to,
+        SELECT id, content_revision, statement, attrs, subject_entity_id, valid_from, valid_to,
                asserted_at, observed_at, created_at,
                coalesce(extraction_model, extraction_method::text) AS model
         FROM atomic_units WHERE id = $1 AND status = 'active'
@@ -278,7 +293,7 @@ async fn load_candidates(
         rows.extend(
             sqlx::query(
                 r#"
-                SELECT c.id, c.statement, c.attrs, c.subject_entity_id,
+                SELECT c.id, c.content_revision, c.statement, c.attrs, c.subject_entity_id,
                        c.valid_from, c.valid_to, c.asserted_at, c.observed_at, c.created_at,
                        coalesce(c.extraction_model, c.extraction_method::text) AS model,
                        CASE WHEN c.embedding IS NOT NULL AND u.embedding IS NOT NULL
@@ -307,7 +322,7 @@ async fn load_candidates(
         rows.extend(
             sqlx::query(
                 r#"
-                SELECT c.id, c.statement, c.attrs, c.subject_entity_id,
+                SELECT c.id, c.content_revision, c.statement, c.attrs, c.subject_entity_id,
                        c.valid_from, c.valid_to, c.asserted_at, c.observed_at, c.created_at,
                        coalesce(c.extraction_model, c.extraction_method::text) AS model,
                        (1 - (c.embedding <=> $2))::float4 AS cosine_sim

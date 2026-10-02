@@ -432,6 +432,10 @@ pub(crate) async fn search_core(
         .unwrap_or_else(|| "atomic_units".to_string());
     let scope = scope.as_str();
     let limit = clamp_limit(req.limit, 20, 100);
+    let mut embedding_model: Option<String> =
+        sqlx::query_scalar("SELECT model FROM embedding_state WHERE singleton")
+            .fetch_one(&state.pool)
+            .await?;
 
     if req.embedding.is_none() && scope != "messages" {
         if let (Some(text), Some(client)) = (
@@ -441,6 +445,7 @@ pub(crate) async fn search_core(
             match client.embed(&[text.to_string()]).await {
                 Ok(mut vectors) if vectors.first().map(Vec::len) == Some(768) => {
                     req.embedding = vectors.pop();
+                    embedding_model = Some(client.embed_model.clone());
                 }
                 Ok(_) => {
                     tracing::warn!("embed model returned non-768-dim vector; full-text fallback")
@@ -464,6 +469,39 @@ pub(crate) async fn search_core(
         }
     }
 
+    if req.embedding.is_some()
+        && req
+            .text
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty())
+    {
+        let available: bool = match scope {
+            "atomic_units" => {
+                sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM atomic_units WHERE embedding IS NOT NULL
+                 AND embedding_model IS NOT DISTINCT FROM $1 AND status = 'active')",
+                )
+                .bind(&embedding_model)
+                .fetch_one(&state.pool)
+                .await?
+            }
+            "document_segments" => {
+                sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM document_segments s
+                 JOIN documents d ON d.id = s.document_id
+                 JOIN artifacts a ON a.id = d.artifact_id AND a.retracted_at IS NULL
+                 WHERE s.embedding IS NOT NULL AND s.embedding_model IS NOT DISTINCT FROM $1)",
+                )
+                .bind(&embedding_model)
+                .fetch_one(&state.pool)
+                .await?
+            }
+            _ => true,
+        };
+        if !available {
+            req.embedding = None;
+        }
+    }
     let hits: Vec<SearchHit> = match (scope, &req.embedding) {
         ("atomic_units", Some(embedding)) => {
             let vec = Vector::from(embedding.clone());
@@ -472,15 +510,18 @@ pub(crate) async fn search_core(
                 SELECT u.id, u.statement AS content,
                        1 - (u.embedding <=> $1) AS score,
                        (SELECT p.artifact_id FROM atomic_unit_provenance p
-                        WHERE p.atomic_unit_id = u.id LIMIT 1) AS artifact_id
+                        JOIN artifacts a ON a.id = p.artifact_id AND a.retracted_at IS NULL
+                        WHERE p.atomic_unit_id = u.id ORDER BY p.created_at DESC LIMIT 1) AS artifact_id
                 FROM atomic_units u
                 WHERE u.embedding IS NOT NULL AND u.status = 'active'
+                  AND u.embedding_model IS NOT DISTINCT FROM $3
                 ORDER BY u.embedding <=> $1
                 LIMIT $2
                 "#,
             )
             .bind(vec)
             .bind(limit)
+            .bind(&embedding_model)
             .fetch_all(&state.pool)
             .await?
             .iter()
@@ -495,13 +536,16 @@ pub(crate) async fn search_core(
                        d.artifact_id
                 FROM document_segments s
                 JOIN documents d ON d.id = s.document_id
+                JOIN artifacts a ON a.id = d.artifact_id AND a.retracted_at IS NULL
                 WHERE s.embedding IS NOT NULL
+                  AND s.embedding_model IS NOT DISTINCT FROM $3
                 ORDER BY s.embedding <=> $1
                 LIMIT $2
                 "#,
             )
             .bind(vec)
             .bind(limit)
+            .bind(&embedding_model)
             .fetch_all(&state.pool)
             .await?
             .iter()
@@ -514,7 +558,8 @@ pub(crate) async fn search_core(
                 SELECT u.id, u.statement AS content,
                        ts_rank(u.statement_tsv, websearch_to_tsquery('english', $1))::float8 AS score,
                        (SELECT p.artifact_id FROM atomic_unit_provenance p
-                        WHERE p.atomic_unit_id = u.id LIMIT 1) AS artifact_id
+                        JOIN artifacts a ON a.id = p.artifact_id AND a.retracted_at IS NULL
+                        WHERE p.atomic_unit_id = u.id ORDER BY p.created_at DESC LIMIT 1) AS artifact_id
                 FROM atomic_units u
                 WHERE u.statement_tsv @@ websearch_to_tsquery('english', $1)
                   AND u.status = 'active'
@@ -538,6 +583,7 @@ pub(crate) async fn search_core(
                        c.artifact_id
                 FROM messages m
                 JOIN conversations c ON c.id = m.conversation_id
+                JOIN artifacts a ON a.id = c.artifact_id AND a.retracted_at IS NULL
                 WHERE m.content_tsv @@ websearch_to_tsquery('english', $1)
                 ORDER BY score DESC
                 LIMIT $2
@@ -559,6 +605,7 @@ pub(crate) async fn search_core(
                        d.artifact_id
                 FROM document_segments s
                 JOIN documents d ON d.id = s.document_id
+                JOIN artifacts a ON a.id = d.artifact_id AND a.retracted_at IS NULL
                 WHERE s.content_tsv @@ websearch_to_tsquery('english', $1)
                 ORDER BY score DESC
                 LIMIT $2

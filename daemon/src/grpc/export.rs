@@ -7,14 +7,15 @@ use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
 
 use super::{pb, status_from};
-use crate::routes::export::{build_bundle, import_bundle_core};
+use crate::routes::export::{
+    bundle_stream, import_bundle_file, private_bundle_file, write_bundle_chunk, BundleLimit,
+};
 use crate::AppState;
+use tokio::io::AsyncWriteExt;
 
 pub struct ExportApi {
     pub state: AppState,
 }
-
-const CHUNK_BYTES: usize = 64 * 1024;
 
 #[tonic::async_trait]
 impl pb::export_service_server::ExportService for ExportApi {
@@ -25,13 +26,12 @@ impl pb::export_service_server::ExportService for ExportApi {
         &self,
         _request: Request<pb::ExportBundleRequest>,
     ) -> Result<Response<Self::ExportBundleStream>, Status> {
-        let bundle = build_bundle(&self.state.pool).await.map_err(status_from)?;
-        let bytes = bundle.into_bytes();
-        let chunks: Vec<Result<pb::BundleChunk, Status>> = bytes
-            .chunks(CHUNK_BYTES)
-            .map(|c| Ok(pb::BundleChunk { data: c.to_vec() }))
-            .collect();
-        Ok(Response::new(Box::pin(tokio_stream::iter(chunks))))
+        let stream = bundle_stream(&self.state.pool).await.map_err(status_from)?;
+        Ok(Response::new(Box::pin(stream.map(|chunk| {
+            chunk
+                .map(|data| pb::BundleChunk { data })
+                .map_err(status_from)
+        }))))
     }
 
     async fn import_bundle(
@@ -39,13 +39,23 @@ impl pb::export_service_server::ExportService for ExportApi {
         request: Request<Streaming<pb::BundleChunk>>,
     ) -> Result<Response<pb::ImportBundleResponse>, Status> {
         let mut stream = request.into_inner();
-        let mut bytes: Vec<u8> = Vec::new();
+        let temporary = private_bundle_file().map_err(status_from)?;
+        let mut file = tokio::fs::File::from_std(
+            temporary
+                .reopen()
+                .map_err(|error| Status::internal(error.to_string()))?,
+        );
+        let mut limit = BundleLimit::default();
         while let Some(chunk) = stream.next().await {
-            bytes.extend_from_slice(&chunk?.data);
+            let chunk = chunk?;
+            write_bundle_chunk(&mut file, &mut limit, &chunk.data)
+                .await
+                .map_err(status_from)?;
         }
-        let body = String::from_utf8(bytes)
-            .map_err(|_| Status::invalid_argument("bundle is not valid UTF-8"))?;
-        let counts = import_bundle_core(&self.state.pool, &body)
+        file.flush()
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+        let counts = import_bundle_file(&self.state.pool, &temporary)
             .await
             .map_err(status_from)?;
 

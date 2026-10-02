@@ -195,9 +195,12 @@ pub async fn backlog(pool: &PgPool) -> Result<Backlog, sqlx::Error> {
             UNION
             SELECT artifact_id FROM images WHERE ocr_status IN ('pending', 'processing')
         )
-        SELECT (SELECT count(*) FROM pending) AS chunks,
+        SELECT (SELECT count(*) FROM pending p JOIN artifacts a ON a.id = p.artifact_id
+                WHERE a.retracted_at IS NULL) AS chunks,
                (SELECT count(*) FROM (SELECT artifact_id FROM pending
-                                      UNION SELECT artifact_id FROM unopened) f) AS files,
+                                      UNION SELECT artifact_id FROM unopened) f
+                                      JOIN artifacts a ON a.id = f.artifact_id
+                                      WHERE a.retracted_at IS NULL) AS files,
                (SELECT count(*) FROM document_segments WHERE units_extract_error IS NOT NULL)
              + (SELECT count(*) FROM messages WHERE units_extract_error IS NOT NULL)
              + (SELECT count(*) FROM images WHERE units_extract_error IS NOT NULL) AS failed
@@ -272,6 +275,11 @@ pub async fn run_one_pass(
     };
 
     if let Some(client) = ollama {
+        match persist::embed_pending_units(pool, client, config.extraction_batch).await {
+            Ok(n) if n > 0 => tracing::debug!(units = n, "embedded pending claims"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "claim embedding failed; will retry"),
+        }
         match persist::embed_pending_segments(pool, client, config.extraction_batch).await {
             Ok(n) if n > 0 => tracing::debug!(segments = n, "embedded document segments"),
             Ok(_) => {}
@@ -300,6 +308,7 @@ async fn process_pending_pdfs(pool: &PgPool, config: &Config) -> anyhow::Result<
         WHERE id IN (
             SELECT d.id FROM documents d
             WHERE d.extraction_status = 'pending'
+              AND EXISTS (SELECT 1 FROM artifacts a WHERE a.id = d.artifact_id AND a.retracted_at IS NULL)
             ORDER BY d.id LIMIT $1
             FOR UPDATE SKIP LOCKED
         )
@@ -417,6 +426,7 @@ async fn process_pending_images(pool: &PgPool, config: &Config) -> anyhow::Resul
         WHERE id IN (
             SELECT i.id FROM images i
             WHERE i.ocr_status = 'pending'
+              AND EXISTS (SELECT 1 FROM artifacts a WHERE a.id = i.artifact_id AND a.retracted_at IS NULL)
             ORDER BY i.id LIMIT $1
             FOR UPDATE SKIP LOCKED
         )
@@ -580,12 +590,12 @@ pub(crate) async fn load_chunks(
     for row in run!(format!(
         r#"
         SELECT m.id, m.content, m.role,
-               COALESCE(m.created_at, a.source_created_at, a.ingested_at) AS source_time,
+               COALESCE(m.created_at, a.source_created_at) AS source_time,
                c.artifact_id
         FROM messages m
         JOIN conversations c ON c.id = m.conversation_id
         JOIN artifacts a ON a.id = c.artifact_id
-        WHERE {}
+        WHERE a.retracted_at IS NULL AND {}
         ORDER BY a.ingested_at, m.conversation_id, m.id LIMIT $1
         "#,
         queue.filter("m", "content")
@@ -603,12 +613,12 @@ pub(crate) async fn load_chunks(
     for row in run!(format!(
         r#"
         SELECT s.id, s.content,
-               COALESCE(a.source_created_at, a.ingested_at) AS source_time,
+               a.source_created_at AS source_time,
                d.artifact_id
         FROM document_segments s
         JOIN documents d ON d.id = s.document_id
         JOIN artifacts a ON a.id = d.artifact_id
-        WHERE {}
+        WHERE a.retracted_at IS NULL AND {}
         -- A file at a time, oldest first, so each finishes before the next
         -- starts instead of every file waiting for the end of the queue.
         ORDER BY a.ingested_at, s.document_id, s.seq LIMIT $1
@@ -628,11 +638,11 @@ pub(crate) async fn load_chunks(
     for row in run!(format!(
         r#"
         SELECT i.id, i.ocr_text, i.ocr_confidence,
-               COALESCE(i.taken_at, a.source_created_at, a.ingested_at) AS source_time,
+               COALESCE(i.taken_at, a.source_created_at) AS source_time,
                i.artifact_id
         FROM images i
         JOIN artifacts a ON a.id = i.artifact_id
-        WHERE {}
+        WHERE a.retracted_at IS NULL AND {}
           AND i.ocr_status = 'completed'
           AND i.ocr_text IS NOT NULL AND length(trim(i.ocr_text)) > 0
         ORDER BY i.id LIMIT $1

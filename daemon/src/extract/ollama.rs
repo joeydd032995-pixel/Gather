@@ -174,6 +174,13 @@ impl OllamaClient {
                 texts.len()
             ));
         }
+        if parsed
+            .embeddings
+            .iter()
+            .any(|vector| vector.len() != 768 || vector.iter().any(|value| !value.is_finite()))
+        {
+            return Err("embedding model must return 768 finite numbers per input".into());
+        }
         Ok(parsed.embeddings)
     }
 

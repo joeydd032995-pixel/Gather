@@ -4,6 +4,7 @@
 //! daemon (`runtime`), and the opt-in update check (`updates`).
 
 mod ai;
+mod desktop_smoke;
 mod folders;
 mod imports;
 mod memory;
@@ -17,6 +18,23 @@ use tauri::{AppHandle, Manager, RunEvent, State};
 
 use runtime::{Paths, Runtime, Status};
 use updates::{InstallError, PendingUpdate, UpdateCheck, UpdateSettings};
+
+#[cfg(windows)]
+fn allow_primary_foreground(pid: u32) {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn AllowSetForegroundWindow(process_id: u32) -> i32;
+    }
+    // The launcher can transfer its foreground permission to the primary.
+    // Failure is harmless: normal window restoration still runs.
+    unsafe {
+        AllowSetForegroundWindow(pid);
+    }
+}
+
+struct DesktopInstanceLock {
+    _file: std::fs::File,
+}
 
 /// Read a file the user explicitly selected via the native dialog so the
 /// webview can upload it to the local daemon. Scope: only invoked with paths
@@ -259,6 +277,61 @@ pub fn run() {
         .manage(Arc::clone(&runtime))
         .manage(PendingUpdate::default())
         .setup(|app| {
+            // Acquire the OS-held lock before the supervisor can adopt services.
+            // The lock is released on a crash; the file itself is never deleted.
+            let data = data_dir(app.handle())?;
+            std::fs::create_dir_all(&data)?;
+            let lock = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(data.join("desktop.lock"))?;
+            match lock.try_lock() {
+                Ok(()) => {
+                    // A separate PID file remains readable on Windows, where
+                    // the exclusive byte-range lock prevents reading its file.
+                    std::fs::write(
+                        data.join("desktop-owner.pid"),
+                        std::process::id().to_string(),
+                    )?;
+                    app.manage(DesktopInstanceLock { _file: lock });
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    // A secondary window must not steal focus back while exiting.
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.hide();
+                    }
+                    #[cfg(windows)]
+                    if let Ok(pid) = std::fs::read_to_string(data.join("desktop-owner.pid")) {
+                        if let Ok(pid) = pid.trim().parse::<u32>() {
+                            allow_primary_foreground(pid);
+                        }
+                    }
+                    std::fs::write(data.join("focus.request"), [])?;
+                    app.handle().exit(0);
+                    return Ok(());
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+            }
+            let handle = app.handle().clone();
+            let mut probe = desktop_smoke::Probe::from_env(&data);
+            std::thread::spawn(move || loop {
+                if let Some(probe) = probe.as_mut() {
+                    probe.tick(&handle);
+                }
+                if std::fs::remove_file(data.join("focus.request")).is_ok() {
+                    if let Some(window) = handle.get_webview_window("main") {
+                        let _ = window.unminimize();
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                        if let Some(probe) = probe.as_mut() {
+                            probe.focused(&window);
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            });
             if updates::supported(app.handle()) {
                 app.handle()
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
@@ -293,9 +366,18 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building gather-desktop");
 
-    app.run(move |_, event| {
-        if let RunEvent::Exit = event {
-            runtime.stop();
+    app.run(move |_app, event| match event {
+        RunEvent::Exit => runtime.stop(),
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen { .. } => {
+            // Finder/Dock reopen an existing app through Launch Services rather
+            // than launching a process that can write focus.request.
+            if let Some(window) = _app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
         }
+        _ => {}
     });
 }
