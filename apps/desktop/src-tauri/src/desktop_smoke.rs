@@ -42,7 +42,9 @@ impl Probe {
         if self.ready {
             if !self.focused_reported {
                 if let Some(window) = app.get_webview_window("main") {
-                    if window.is_focused().unwrap_or(false) && !window.is_minimized().unwrap_or(true) {
+                    if window.is_focused().unwrap_or(false)
+                        && !window.is_minimized().unwrap_or(true)
+                    {
                         self.write("focused", &window);
                         self.focused_reported = true;
                     }
