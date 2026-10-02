@@ -16,6 +16,9 @@ pub struct Probe {
 
 impl Probe {
     pub fn from_env(data: &Path) -> Option<Self> {
+        if !std::env::var("GITHUB_ACTIONS").is_ok_and(|value| value == "true") {
+            return None;
+        }
         let report = std::env::var_os("GATHER_DESKTOP_SMOKE_REPORT")?;
         Some(Self {
             report: PathBuf::from(report),

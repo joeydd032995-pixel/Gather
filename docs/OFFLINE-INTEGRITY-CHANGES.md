@@ -65,6 +65,13 @@ service shutdown, instance-lock reacquisition, and adoption/shutdown after an
 application crash. Linux uses Xvfb with Openbox; Windows and macOS use their
 native runner desktop sessions. No cloud service is required by the app.
 
-The probe is inactive unless `GATHER_DESKTOP_SMOKE_REPORT` is explicitly set.
+The probe is inactive outside GitHub Actions and unless
+`GATHER_DESKTOP_SMOKE_REPORT` is explicitly set.
 The installer/controller script refuses to run outside GitHub Actions. It does
 not replace or mock the runtime, native window APIs, OS lock, or bundled services.
+
+A Chromium browser regression drives the real frontend through file uploads
+with controlled local API responses. It verifies refresh of the selected detail,
+preserved selection and pagination depth, ignored stale list successes/errors,
+and absence of non-loopback frontend requests. These UI fixtures complement the
+real PostgreSQL ingestion/integrity tests and native packaged-app smoke checks.
