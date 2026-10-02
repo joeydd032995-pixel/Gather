@@ -7,7 +7,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::error::ApiError;
-use crate::library::{self, ArtifactContent, GraphOverview};
+use crate::library::{self, ArtifactContent, ArtifactDigest, GraphOverview};
 use crate::AppState;
 
 #[derive(Deserialize)]
@@ -27,6 +27,14 @@ pub async fn artifact_content(
     Ok(Json(
         library::artifact_content(&state.pool, id, limit, offset).await?,
     ))
+}
+
+/// GET /api/v1/artifacts/{id}/digest
+pub async fn artifact_digest(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ArtifactDigest>, ApiError> {
+    Ok(Json(library::artifact_digest(&state.pool, id).await?))
 }
 
 #[derive(Deserialize)]

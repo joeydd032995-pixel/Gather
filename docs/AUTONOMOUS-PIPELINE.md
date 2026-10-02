@@ -74,6 +74,27 @@ statement for being short or plain, only for being arithmetic, code, data, a fra
 
 Skipped candidates are counted in `gather_extraction_units_total{status="skipped_low_value"}`.
 
+### What a document is about (`daemon/src/extract/digest.rs`)
+
+Atomic units answer "which sentences have a certain shape?". A **digest** answers "what is this
+document *for*?", which is where depth comes from. Once a document's text is read, the extraction
+worker builds one (`GET /artifacts/{id}/digest`, shown as **Summary** at the top of a file in the
+Library):
+
+- **Key sentences**: every sentence is scored by how central its words are to the document, with
+  a lift for decision, plan, deadline and risk language and for the opening of a section. A few
+  are picked in reading order, and a sentence that repeats one already chosen is skipped. Every
+  key point is a sentence from the file; nothing is invented. Code, tables, equations and
+  questions are never candidates.
+- **Topics** (recurring phrases such as `backup target`) and the **outline** (headings).
+- **With a local AI model on**, the model rewords the key sentences into a short summary,
+  takeaways and open questions. It sees only the outline and key sentences (so a small model with
+  a short context copes), and anything it writes that shares too few words with them is dropped,
+  so it can't add what the document never said. The digest is labelled with how it was written.
+
+A document with too little prose to summarize gets an empty digest, once, rather than being
+looked at on every pass.
+
 ### Admitting extracted units
 
 Each new unit's confidence is its extractor's base score (0.6 for the rule extractor), adjusted
@@ -194,6 +215,7 @@ These run offline in CI and fail the build on regressions:
 
 | Eval | Guards |
 |---|---|
+| `tests/digest_integration.rs` | A document gets a digest whose key sentences include its decision and deadline and leave out pleasantries; a model-reworded digest keeps what the text supports and drops what it invented |
 | `tests/extraction_quality.rs` | What the extractor *stores* (rules plus the quality gate) has precision ≥ 90% on a labelled golden corpus that includes arithmetic, code, table rows, questions, filler and fragments (currently 100%). Subjects must match, and producing nothing for junk is required |
 | `tests/decision_policy.rs` | The merge gate never auto-merges without agreement or a near-certain signal. Admission defaults never drop data |
 | `tests/clustering.rs` | Real name similarity groups duplicates and keeps distinct names apart |

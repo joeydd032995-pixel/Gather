@@ -18,6 +18,8 @@ use crate::config::Config;
 /// Most tokens the model may write for one section's items: room for a dozen
 /// units with their evidence, and no more.
 const MAX_EXTRACT_TOKENS: u32 = 768;
+/// Most tokens for a document digest (a short summary and a few takeaways).
+const MAX_DIGEST_TOKENS: u32 = 450;
 /// Most tokens for a contradiction judgement (a verdict and a sentence).
 const MAX_JUDGE_TOKENS: u32 = 200;
 
@@ -67,6 +69,20 @@ Respond with JSON only: {\"units\": [{\"kind\": \"fact|claim|decision|preference
 \"evidence_span\": \"verbatim quote from the text\", \"confidence\": 0.0}]}. \
 Statements must be self-contained and dated where possible. \
 evidence_span MUST be copied verbatim from the input. No commentary.";
+
+const DIGEST_SYSTEM_PROMPT: &str = "You summarize a document for its owner, using ONLY the \
+text provided. Respond with JSON only: {\"summary\": \"two or three plain sentences saying what \
+the document is and what it concludes\", \"takeaways\": [\"a decision, conclusion, deadline or \
+action, in one sentence\"], \"open_questions\": [\"something the document leaves unresolved\"]}. \
+At most 5 takeaways and 3 open questions. Do not add facts that are not in the text. No commentary.";
+
+/// A model's reading of a document: reworded, not yet checked against it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelDigest {
+    pub summary: String,
+    pub takeaways: Vec<String>,
+    pub open_questions: Vec<String>,
+}
 
 impl OllamaClient {
     /// Build from config. Returns Ok(None) when Ollama is not configured.
@@ -285,6 +301,47 @@ impl OllamaClient {
         Ok(parse_llm_units(&parsed, chunk))
     }
 
+    /// Reword a document's key sentences into a summary, takeaways and open
+    /// questions. The caller checks the answer against the text.
+    pub async fn digest(&self, material: &str) -> Result<ModelDigest, String> {
+        let body = Self::capped(
+            self.body(
+                json!({
+                    "model": self.chat_model()?,
+                    "stream": false,
+                    "format": "json",
+                    "messages": [
+                        { "role": "system", "content": DIGEST_SYSTEM_PROMPT },
+                        { "role": "user", "content": material },
+                    ],
+                }),
+                true,
+            ),
+            MAX_DIGEST_TOKENS,
+        );
+        let _turn = self.turn().await;
+        let response = self
+            .http
+            .post(format!("{}/api/chat", self.base))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("ollama chat request: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("ollama chat status: {e}"))?;
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| format!("ollama chat decode: {e}"))?;
+        let content = body
+            .pointer("/message/content")
+            .and_then(Value::as_str)
+            .ok_or("ollama chat response missing message.content")?;
+        let parsed: Value = serde_json::from_str(content)
+            .map_err(|e| format!("model returned non-JSON content: {e}"))?;
+        parse_model_digest(&parsed)
+    }
+
     /// Contradiction judge (write-up §6.2): asks the local model whether two
     /// statements conflict. Used by the scanner only on pairs a structural
     /// rule already flagged, so call volume stays small.
@@ -360,6 +417,43 @@ pub(crate) fn parse_judgement(parsed: &Value) -> Result<Judgement, String> {
         contradicts,
         confidence,
         why,
+    })
+}
+
+/// Read a model's digest answer, keeping what is well-formed and a sensible
+/// size: a summary of 20-900 characters, up to 5 takeaways and 3 open
+/// questions of 10-300 characters each.
+pub(crate) fn parse_model_digest(parsed: &Value) -> Result<ModelDigest, String> {
+    let text = |v: &Value, min: usize, max: usize| -> Option<String> {
+        let t = v.as_str()?.split_whitespace().collect::<Vec<_>>().join(" ");
+        (min..=max).contains(&t.chars().count()).then_some(t)
+    };
+    let list = |key: &str, limit: usize| -> Vec<String> {
+        parsed
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|v| text(v, 10, 300))
+                    .take(limit)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let summary = parsed
+        .get("summary")
+        .and_then(|v| text(v, 20, 900))
+        .unwrap_or_default();
+    let takeaways = list("takeaways", 5);
+    let open_questions = list("open_questions", 3);
+    if summary.is_empty() && takeaways.is_empty() && open_questions.is_empty() {
+        return Err("model digest had nothing usable".to_string());
+    }
+    Ok(ModelDigest {
+        summary,
+        takeaways,
+        open_questions,
     })
 }
 
@@ -589,5 +683,35 @@ mod tests {
         let units = parse_llm_units(&parsed, chunk);
         assert_eq!(units.len(), 1, "{units:?}");
         assert!(units[0].statement.contains("$90"));
+    }
+
+    #[test]
+    fn a_model_digest_keeps_only_what_is_well_formed() {
+        let parsed = serde_json::json!({
+            "summary": "A plan to move the nightly backups to Hetzner before the March deadline.",
+            "takeaways": [
+                "The team chose Hetzner CX22 because the monthly cost is lower.",
+                "too short",
+                42,
+                "The migration must finish before 2026-03-01 or the old contract renews."
+            ],
+            "open_questions": ["Will the first full backup fit inside the nightly window?"]
+        });
+        let digest = parse_model_digest(&parsed).unwrap();
+        assert!(digest.summary.starts_with("A plan to move"));
+        assert_eq!(
+            digest.takeaways.len(),
+            2,
+            "short and non-text items are dropped"
+        );
+        assert_eq!(digest.open_questions.len(), 1);
+        // Too many items are cut to the limits.
+        let many = serde_json::json!({
+            "takeaways": (0..9).map(|i| format!("Takeaway number {i} is long enough")).collect::<Vec<_>>()
+        });
+        assert_eq!(parse_model_digest(&many).unwrap().takeaways.len(), 5);
+        // Nothing usable is an error, so the plain digest stands.
+        assert!(parse_model_digest(&serde_json::json!({})).is_err());
+        assert!(parse_model_digest(&serde_json::json!({"summary": "hi"})).is_err());
     }
 }

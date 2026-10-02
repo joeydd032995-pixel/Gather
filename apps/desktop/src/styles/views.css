@@ -486,6 +486,40 @@
 .inspector > .callout {
   margin-bottom: var(--s-4);
 }
+.digest {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+  max-width: 72ch;
+}
+.digest-summary {
+  font-size: var(--t-md);
+  line-height: 1.7;
+  color: var(--text);
+}
+.digest-h {
+  margin: 0 0 var(--s-1);
+  font-size: var(--t-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.digest-list {
+  margin: 0;
+  padding-left: 1.2em;
+  font-size: var(--t-sm);
+  line-height: 1.6;
+  color: var(--text-2);
+}
+.digest-list li + li {
+  margin-top: var(--s-1);
+}
+.digest-topics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
 .passages {
   display: flex;
   flex-direction: column;

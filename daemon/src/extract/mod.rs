@@ -9,6 +9,8 @@
 //! (stale 'processing' rows are reset at loop start), and unit chunks are
 //! stamped atomically with their units in one transaction (persist.rs).
 
+pub mod digest;
+pub mod digest_job;
 pub mod formats;
 pub mod image;
 pub mod ollama;
@@ -38,11 +40,18 @@ pub struct PassStats {
     pub units_created: usize,
     /// Chunks that failed and were set aside with their error.
     pub chunks_failed: usize,
+    /// Documents summarized.
+    pub digests_built: usize,
 }
 
 impl PassStats {
     fn did_work(&self) -> bool {
-        self.pdfs_processed + self.images_processed + self.chunks_processed + self.chunks_failed > 0
+        self.pdfs_processed
+            + self.images_processed
+            + self.chunks_processed
+            + self.chunks_failed
+            + self.digests_built
+            > 0
     }
 }
 
@@ -274,7 +283,16 @@ pub async fn run_one_pass(
         }
         _ => ChunkStats::default(),
     };
+    // Documents whose text is read get a digest: what they are about and the
+    // sentences that say the most.
+    let digests_built = digest_job::run_pass(pool, config, ollama)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, "extraction: summarizing documents failed; will retry");
+            0
+        });
     let stats = PassStats {
+        digests_built,
         pdfs_processed,
         images_processed,
         chunks_processed: chunks.processed + reread.processed,

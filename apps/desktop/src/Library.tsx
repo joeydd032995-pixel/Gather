@@ -6,6 +6,7 @@ import {
   Library as LibraryIcon,
   LoaderCircle,
   Plus,
+  ScrollText,
   Search,
   SearchX,
   Sparkles,
@@ -15,10 +16,12 @@ import {
 import {
   getArtifact,
   getArtifactContent,
+  getArtifactDigest,
   listArtifacts,
   search,
   type ArtifactContent,
   type ArtifactDetail,
+  type ArtifactDigest,
   type ArtifactSummary,
   type SearchHit,
 } from "./api";
@@ -200,6 +203,7 @@ function SearchResultList({
 function FileDetail({ id, refreshKey }: { id: string; refreshKey: number }) {
   const [detail, setDetail] = useState<ArtifactDetail | null>(null);
   const [content, setContent] = useState<ArtifactContent | null>(null);
+  const [digest, setDigest] = useState<ArtifactDigest | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
 
@@ -212,17 +216,21 @@ function FileDetail({ id, refreshKey }: { id: string; refreshKey: number }) {
   useEffect(() => {
     setDetail(null);
     setContent(null);
+    setDigest(null);
     setLoadingMore(false);
   }, [id]);
 
   useEffect(() => {
     let cancelled = false;
     setError(null);
-    Promise.all([getArtifact(id), getArtifactContent(id)])
-      .then(([d, c]) => {
+    // The summary is a bonus: a failure to fetch it never hides the file.
+    const digestRequest = getArtifactDigest(id).catch(() => null);
+    Promise.all([getArtifact(id), getArtifactContent(id), digestRequest])
+      .then(([d, c, g]) => {
         if (cancelled) return;
         setDetail(d);
         setContent(c);
+        setDigest(g);
       })
       .catch((e: unknown) => {
         if (!cancelled) setError(errorText(e));
@@ -303,6 +311,62 @@ function FileDetail({ id, refreshKey }: { id: string; refreshKey: number }) {
         <Callout title="Gather couldn't read the text in this file">
           Details are in daemon.log.
         </Callout>
+      )}
+
+      {digest && (digest.summary || digest.key_points.length > 0) && (
+        <Panel
+          title="Summary"
+          icon={ScrollText}
+          className="doc-panel"
+          actions={
+            <span className="hint">
+              {digest.method.startsWith("llm:")
+                ? `Reworded by ${digest.method.slice(4)}, checked against the text`
+                : "Sentences from the file itself"}
+            </span>
+          }
+        >
+          <div className="panel-pad digest">
+            {digest.summary && <p className="digest-summary">{digest.summary}</p>}
+            {digest.takeaways.length > 0 && (
+              <section>
+                <h3 className="digest-h">Takeaways</h3>
+                <ul className="digest-list">
+                  {digest.takeaways.map((t) => (
+                    <li key={t}>{t}</li>
+                  ))}
+                </ul>
+              </section>
+            )}
+            {digest.key_points.length > 0 && (
+              <section>
+                <h3 className="digest-h">Key sentences</h3>
+                <ul className="digest-list">
+                  {digest.key_points.map((k) => (
+                    <li key={`${k.segment_seq}-${k.text}`}>{k.text}</li>
+                  ))}
+                </ul>
+              </section>
+            )}
+            {digest.open_questions.length > 0 && (
+              <section>
+                <h3 className="digest-h">Left open</h3>
+                <ul className="digest-list">
+                  {digest.open_questions.map((q) => (
+                    <li key={q}>{q}</li>
+                  ))}
+                </ul>
+              </section>
+            )}
+            {digest.topics.length > 0 && (
+              <div className="digest-topics" aria-label="Topics">
+                {digest.topics.map((t) => (
+                  <Badge key={t}>{t}</Badge>
+                ))}
+              </div>
+            )}
+          </div>
+        </Panel>
       )}
 
       <Panel title="What Gather found" icon={Sparkles} className="doc-panel">
