@@ -4,6 +4,7 @@
 //! daemon (`runtime`), and the opt-in update check (`updates`).
 
 mod ai;
+mod desktop_smoke;
 mod folders;
 mod imports;
 mod memory;
@@ -285,12 +286,19 @@ pub fn run() {
                 Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
             }
             let handle = app.handle().clone();
+            let mut probe = desktop_smoke::Probe::from_env(&data);
             std::thread::spawn(move || loop {
+                if let Some(probe) = probe.as_mut() {
+                    probe.tick(&handle);
+                }
                 if std::fs::remove_file(data.join("focus.request")).is_ok() {
                     if let Some(window) = handle.get_webview_window("main") {
                         let _ = window.unminimize();
                         let _ = window.show();
                         let _ = window.set_focus();
+                        if let Some(probe) = &probe {
+                            probe.focused(&window);
+                        }
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(300));

@@ -56,5 +56,15 @@ existing semantic-safety evaluation, restore drill, memory budget, graph smoke
 test and Linux/Windows/macOS desktop builds. Backup retention has a disposable
 local restic regression.
 
-Desktop window focusing and second-launch behavior still need an interactive
-smoke check on each packaged operating system. No cloud service is required.
+CI installs or stages each packaged desktop on its native operating system and
+runs a real GUI lifecycle smoke check. An opt-in CI probe minimizes the actual
+native window and reports native focus/minimize state. The controller launches
+three additional processes and verifies successful secondary exit, primary
+focus/restoration, and unchanged database/daemon PIDs. It also checks graceful
+service shutdown, instance-lock reacquisition, and adoption/shutdown after an
+application crash. Linux uses Xvfb with Openbox; Windows and macOS use their
+native runner desktop sessions. No cloud service is required by the app.
+
+The probe is inactive unless `GATHER_DESKTOP_SMOKE_REPORT` is explicitly set.
+The installer/controller script refuses to run outside GitHub Actions. It does
+not replace or mock the runtime, native window APIs, OS lock, or bundled services.
