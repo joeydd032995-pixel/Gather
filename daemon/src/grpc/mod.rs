@@ -19,6 +19,8 @@ pub mod query;
 pub mod safety;
 
 /// Generated protobuf/tonic types for `package gather.v1`.
+// async_trait adds redundant must_use annotations to generated boxed futures.
+#[allow(clippy::double_must_use)]
 pub mod pb {
     tonic::include_proto!("gather.v1");
 }
