@@ -63,7 +63,9 @@ three additional processes and verifies successful secondary exit, primary
 focus/restoration, and unchanged database/daemon PIDs. It also checks graceful
 service shutdown, instance-lock reacquisition, and adoption/shutdown after an
 application crash. Linux uses Xvfb with Openbox; Windows and macOS use their
-native runner desktop sessions. No cloud service is required by the app.
+native runner desktop sessions. macOS also exercises Finder/Dock reopening
+through Launch Services, which does not necessarily start a second process.
+No cloud service is required by the app.
 
 The probe is inactive outside GitHub Actions and unless
 `GATHER_DESKTOP_SMOKE_REPORT` is explicitly set.

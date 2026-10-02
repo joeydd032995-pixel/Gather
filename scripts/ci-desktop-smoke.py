@@ -121,10 +121,20 @@ try:
         state = wait_for(lambda: report("focused", primary.pid),
                          "primary window restored and focused", 20)
         assert state["focused"] and not state["minimized"], state
+        wait_for(lambda: not (data / "focus.request").exists(), "focus request consumed", 10)
         assert primary.poll() is None, "Second launch stopped the primary"
         assert healthy() and pids() == initial, "Second launch disrupted shared services"
         assert (data / "desktop.lock").stat().st_ino == lock_identity, "Lock file replaced"
         print("PASS: second launch focuses primary and preserves service PIDs", flush=True)
+    if sys.platform == "darwin":
+        REPORT.unlink(missing_ok=True)
+        REPORT.with_suffix(".minimize").touch()
+        wait_for(lambda: report("ready", primary.pid), "window minimized for Dock/Finder reopen")
+        subprocess.run(["open", str(exe.parents[2])], check=True, timeout=20)
+        state = wait_for(lambda: report("focused", primary.pid), "Launch Services restores focus", 20)
+        assert state["focused"] and not state["minimized"], state
+        assert pids() == initial and primary.poll() is None
+        print("PASS: Finder/Dock reopen restores primary without changing services", flush=True)
     close()
     recovered = start(exe)
     print("PASS: OS instance lock can be acquired after normal exit", flush=True)

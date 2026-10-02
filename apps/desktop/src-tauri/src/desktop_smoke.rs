@@ -12,6 +12,7 @@ pub struct Probe {
     data: PathBuf,
     started: Instant,
     ready: bool,
+    focused_reported: bool,
 }
 
 impl Probe {
@@ -25,6 +26,7 @@ impl Probe {
             data: data.to_path_buf(),
             started: Instant::now(),
             ready: false,
+            focused_reported: false,
         })
     }
 
@@ -33,7 +35,22 @@ impl Probe {
             app.exit(0);
             return;
         }
-        if self.ready || self.started.elapsed() < Duration::from_secs(2) {
+        if std::fs::remove_file(self.report.with_extension("minimize")).is_ok() {
+            self.ready = false;
+            self.focused_reported = false;
+        }
+        if self.ready {
+            if !self.focused_reported {
+                if let Some(window) = app.get_webview_window("main") {
+                    if window.is_focused().unwrap_or(false) && !window.is_minimized().unwrap_or(true) {
+                        self.write("focused", &window);
+                        self.focused_reported = true;
+                    }
+                }
+            }
+            return;
+        }
+        if self.started.elapsed() < Duration::from_secs(2) {
             return;
         }
         if let Some(window) = app.get_webview_window("main") {
