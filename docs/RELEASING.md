@@ -6,11 +6,42 @@ Pushing a `v*` tag builds the installers for Windows, macOS and Linux and publis
 
 ## Cutting a release
 
-1. Bump the version in `apps/desktop/src-tauri/tauri.conf.json`,
-   `apps/desktop/src-tauri/Cargo.toml` and `apps/desktop/package.json`. The release job
-   refuses a tag that doesn't match `tauri.conf.json`, because the updater compares these
-   versions.
-2. Merge to `main`, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+1. Bump the desktop version in `apps/desktop/src-tauri/tauri.conf.json`,
+   `apps/desktop/src-tauri/Cargo.toml`, `apps/desktop/src-tauri/Cargo.lock`,
+   `apps/desktop/package.json` and both root entries in
+   `apps/desktop/package-lock.json`. CI runs `scripts/check-release-version.py`
+   before builds and checks that a release tag matches all these entries.
+   The daemon crate has its own internal version; it is not the desktop release version.
+2. Add user-facing notes at `docs/releases/<tag>.md`. The release workflow uses
+   this file when it exists and appends GitHub's generated changelog.
+3. Merge the release preparation PR to `main` after CI passes. Tag the merged
+   commit and push the tag. Pushing the tag publishes automatically after all CI
+   gates and packaged desktop lifecycle tests succeed.
+
+### Prepared v0.1.9 release
+
+After merging the v0.1.9 preparation PR, run from a clean checkout:
+
+```bash
+git switch main
+git pull --ff-only origin main
+python3 scripts/check-release-version.py
+git tag v0.1.9
+git push origin v0.1.9
+```
+
+Alternatively, use GitHub's **Releases → Draft a new release**, enter a new
+`v0.1.9` tag targeting the merged `main`, and copy
+[the prepared notes](releases/v0.1.9.md). Publishing creates the tag and starts
+CI; installers and checksums appear only after the workflow succeeds.
+Pushing the tag from Git avoids publishing the release page before its assets
+are ready.
+
+Watch the tag's `ci` run in **Actions**. Verify that the release contains the
+Windows, macOS and Linux installers, standalone daemon archives and
+`SHA256SUMS`. `latest.json` is present only when updater signing is configured.
+Do not move or overwrite a published tag; investigate a failed run and rerun
+after resolving its cause.
 
 ## What an installer contains
 
