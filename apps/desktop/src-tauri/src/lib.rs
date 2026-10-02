@@ -289,13 +289,12 @@ pub fn run() {
                 .open(data.join("desktop.lock"))?;
             match lock.try_lock() {
                 Ok(()) => {
-                    use std::io::{Seek, Write};
-
-                    let mut lock = lock;
-                    lock.set_len(0)?;
-                    lock.rewind()?;
-                    write!(lock, "{}", std::process::id())?;
-                    lock.sync_data()?;
+                    // A separate PID file remains readable on Windows, where
+                    // the exclusive byte-range lock prevents reading its file.
+                    std::fs::write(
+                        data.join("desktop-owner.pid"),
+                        std::process::id().to_string(),
+                    )?;
                     app.manage(DesktopInstanceLock { _file: lock });
                 }
                 Err(std::fs::TryLockError::WouldBlock) => {
@@ -304,7 +303,7 @@ pub fn run() {
                         let _ = window.hide();
                     }
                     #[cfg(windows)]
-                    if let Ok(pid) = std::fs::read_to_string(data.join("desktop.lock")) {
+                    if let Ok(pid) = std::fs::read_to_string(data.join("desktop-owner.pid")) {
                         if let Ok(pid) = pid.trim().parse::<u32>() {
                             allow_primary_foreground(pid);
                         }
