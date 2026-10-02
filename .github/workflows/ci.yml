@@ -290,6 +290,9 @@ jobs:
       - name: release build
         working-directory: daemon
         run: cargo build --release --locked
+      - name: exercise the normally ignored 5000-project similarity workload
+        working-directory: daemon
+        run: cargo test --release --locked --lib projects::similarity::tests::scale -- --ignored --exact --nocapture
       - name: smoke-test binary starts and refuses non-loopback bind
         working-directory: daemon
         run: |

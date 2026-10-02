@@ -77,3 +77,7 @@ with controlled local API responses. It verifies refresh of the selected detail,
 preserved selection and pagination depth, ignored stale list successes/errors,
 and absence of non-loopback frontend requests. These UI fixtures complement the
 real PostgreSQL ingestion/integrity tests and native packaged-app smoke checks.
+
+The release-daemon job explicitly runs the normally ignored 5,000-project
+similarity workload. Its timing/signature-size output is diagnostic on shared
+CI runners, alongside the existing graph and memory gates.
