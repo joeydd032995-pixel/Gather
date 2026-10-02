@@ -608,7 +608,20 @@ export async function getArtifactDigest(id: string): Promise<ArtifactDigest | nu
     headers: authHeaders(),
   });
   if (res.status === 404) return null;
-  return jsonOrThrow<ArtifactDigest>(res);
+  // Read defensively: whatever shape arrives, the file view must not break.
+  const raw = await jsonOrThrow<Partial<ArtifactDigest>>(res);
+  return {
+    artifact_id: raw.artifact_id ?? id,
+    method: raw.method ?? "extractive",
+    summary: typeof raw.summary === "string" ? raw.summary : "",
+    key_points: Array.isArray(raw.key_points) ? raw.key_points : [],
+    topics: Array.isArray(raw.topics) ? raw.topics : [],
+    outline: Array.isArray(raw.outline) ? raw.outline : [],
+    takeaways: Array.isArray(raw.takeaways) ? raw.takeaways : [],
+    open_questions: Array.isArray(raw.open_questions) ? raw.open_questions : [],
+    stats: raw.stats ?? { words: 0, sentences: 0, sections: 0 },
+    created_at: raw.created_at ?? "",
+  };
 }
 
 export type SearchScope = "document_segments" | "atomic_units" | "messages";
