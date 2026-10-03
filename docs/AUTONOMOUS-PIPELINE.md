@@ -45,6 +45,56 @@ The decision policy is a set of pure functions that map scores to one of three b
 | **Hold** | Apply, and park in the review tray for optional attention |
 | **Drop** | Don't act (for admission: retract; for a merge candidate: don't even surface it) |
 
+### What is worth keeping at all (`daemon/src/extract/worth.rs`)
+
+The extractors match sentence *shapes* ("X is 75", "I use Y", "X means Y"), and a shape is not
+meaning. Before a unit gets a confidence it has to be worth storing. A deterministic, offline
+gate drops what is clearly not a statement about the world:
+
+- **Arithmetic and equations** (`2+1 is 3 is equal to = 3`, `x = 4`), **code and markup**,
+  **table rows and dumps of figures**, and **questions**.
+- **Filler** with too few words of its own (`I am happy`, `It is what it is`). A stated figure
+  counts as content, so `The budget is $40,000` stays.
+- **Vacuous sentences** whose object is a fragment (`I have no idea what to do next`,
+  `We decided to think about it later`).
+- **Code and data inside a chunk**: fenced code, code-like lines, table rows and rows of bare
+  figures are blanked out (byte for byte, so offsets still point into the file) and the prose
+  around them is read as usual. A chunk with no prose left is stamped as read without producing
+  units. A stated figure is not a "row of figures": `Budget is $40,000` stays.
+
+The same gate decides what becomes a graph **entity**. A name is the name inside the phrase:
+`dark mode in every editor` is about `dark mode`, and `Hetzner CX22 for the backup target` is
+about `Hetzner CX22`, so one thing is not several nodes. A preposition followed by a capital is
+part of the name (`Ruby on Rails`, `Research in Motion`). A statement whose subject can't be a
+node (`the project`, `the team`) is still kept, just without a subject entity. A question is
+never kept, including when a model rewords it as a statement. Numbers, expressions, pronouns, moods
+(`sure`, `tired`) and sentence fragments never become entities, so they can't turn up as
+"possible match" items either. The gate keeps what it is unsure about: it never rejects a
+statement for being short or plain, only for being arithmetic, code, data, a fragment or filler.
+
+Skipped candidates are counted in `gather_extraction_units_total{status="skipped_low_value"}`.
+
+### What a document is about (`daemon/src/extract/digest.rs`)
+
+Atomic units answer "which sentences have a certain shape?". A **digest** answers "what is this
+document *for*?", which is where depth comes from. Once a document's text is read, the extraction
+worker builds one (`GET /artifacts/{id}/digest`, shown as **Summary** at the top of a file in the
+Library):
+
+- **Key sentences**: every sentence is scored by how central its words are to the document, with
+  a lift for decision, plan, deadline and risk language and for the opening of a section. A few
+  are picked in reading order, and a sentence that repeats one already chosen is skipped. Every
+  key point is a sentence from the file; nothing is invented. Code, tables, equations and
+  questions are never candidates.
+- **Topics** (recurring phrases such as `backup target`) and the **outline** (headings).
+- **With a local AI model on**, the model rewords the key sentences into a short summary,
+  takeaways and open questions. It sees only the outline and key sentences (so a small model with
+  a short context copes), and anything it writes that shares too few words with them is dropped,
+  so it can't add what the document never said. The digest is labelled with how it was written.
+
+A document with too little prose to summarize gets an empty digest, once, rather than being
+looked at on every pass.
+
 ### Admitting extracted units
 
 Each new unit's confidence is its extractor's base score (0.6 for the rule extractor), adjusted
@@ -82,6 +132,14 @@ merge safely. It is ordered by `info_gain`, *most informative first*, so a handf
 settle many cases (see [Active learning](#active-learning-and-auto-tuning)).
 
 You never have to visit it. Items in it are already live.
+
+**Optional items are capped.** Low-confidence and "stated or not?" units are optional: they are
+kept either way. The tray holds at most 25 of them open at once; past that they are admitted
+without being queued, and as you answer some, newer ones can take their place. Decisions that
+need a person (merges, contradictions, withdrawals) are never limited. A tray that is already
+longer (from an earlier version) is trimmed on the next extraction pass: the most informative
+items stay, the rest are closed (their units stay live). A model that gives no
+confidence figure is no longer treated as unsure (it counts as 0.7, not 0.5).
 
 ## The feedback loop (`unit_feedback`)
 
@@ -157,7 +215,8 @@ These run offline in CI and fail the build on regressions:
 
 | Eval | Guards |
 |---|---|
-| `tests/extraction_quality.rs` | Rule extractor precision ≥ 70% on a labelled golden corpus (baseline 83.3%). Subjects must match, and producing nothing fails |
+| `tests/digest_integration.rs` | A document gets a digest whose key sentences include its decision and deadline and leave out pleasantries; a model-reworded digest keeps what the text supports and drops what it invented |
+| `tests/extraction_quality.rs` | What the extractor *stores* (rules plus the quality gate) has precision ≥ 90% on a labelled golden corpus that includes arithmetic, code, table rows, questions, filler and fragments (currently 100%). Subjects must match, and producing nothing for junk is required |
 | `tests/decision_policy.rs` | The merge gate never auto-merges without agreement or a near-certain signal. Admission defaults never drop data |
 | `tests/clustering.rs` | Real name similarity groups duplicates and keeps distinct names apart |
 | `tests/photo_pipeline.rs` | Re-encoded and resized copies of a scene hash within the duplicate distance, different scenes hash far apart, a mixed library groups exactly by scene, and albums split on time gaps and travel |

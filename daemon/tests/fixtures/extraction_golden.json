@@ -14,9 +14,13 @@
     "full sentence as the extractor renders it (tidied, trailing . ! ? stripped).",
     "A unit matches a label on (kind, statement, subject): subject is part of the",
     "key because persistence resolves it into subject_entity_id and hangs graph",
-    "edges off it. Matching normalizes case/whitespace so wording just has to agree."
+    "edges off it. Matching normalizes case/whitespace so wording just has to agree.",
+    "The eval measures what is STORED: the extractor's output after the quality gate",
+    "(extract/worth.rs). The junk-* cases (arithmetic, code, table rows, questions,",
+    "filler, fragments) fit a sentence shape without saying anything, and must produce",
+    "nothing."
   ],
-  "threshold_precision": 0.70,
+  "threshold_precision": 0.90,
   "cases": [
     {
       "name": "decision-clean",
@@ -102,6 +106,75 @@
         { "kind": "fact", "statement": "I work at Anthropic on developer tools", "subject": "Me" },
         { "kind": "event", "statement": "On 2025-12-01 we launched the beta", "subject": null },
         { "kind": "claim", "statement": "Our latency budget is 150 ms", "subject": "latency budget" }
+      ]
+    },
+    {
+      "name": "junk-arithmetic",
+      "input": "2 + 1 is 3 is equal to = 3. The page is 3 + 4 = 7. x = 4 so y = 5.",
+      "expected": []
+    },
+    {
+      "name": "junk-code",
+      "input": "const total = items.map(i => i.price);\nfn main() { println!(\"price is 75\"); }\nuser_account_balance is 100",
+      "expected": []
+    },
+    {
+      "name": "junk-table-row",
+      "input": "Total is 42 | 17 | 8 | 3.5 | 12\nQ1 | 12 | 44 | 0.5 | 9",
+      "expected": []
+    },
+    {
+      "name": "junk-question",
+      "input": "What is 2+2? Is the budget $75 per month?",
+      "expected": []
+    },
+    {
+      "name": "junk-filler-first-person",
+      "input": "I am happy. I have no idea what to do next. I am sure that it will work out somehow.",
+      "expected": []
+    },
+    {
+      "name": "junk-fragment-object",
+      "input": "I use the thing that I bought at the store yesterday afternoon.",
+      "expected": []
+    },
+    {
+      "name": "kept-among-junk",
+      "input": "x = 4 so y = 5. We decided on Hetzner CX22 for the backup target. What is 2+2?",
+      "expected": [
+        { "kind": "decision", "statement": "We decided on Hetzner CX22 for the backup target", "subject": "Me" }
+      ]
+    },
+    {
+      "name": "prose-next-to-code",
+      "input": "I use PostgreSQL for storage.\n\n```sql\nSELECT id, name FROM t WHERE x = 3;\n```\nWe decided on Hetzner CX22 for the backup target.\n| name | cost |\n| a | 12 |\n",
+      "expected": [
+        { "kind": "fact", "statement": "I use PostgreSQL for storage", "subject": "Me" },
+        { "kind": "decision", "statement": "We decided on Hetzner CX22 for the backup target", "subject": "Me" }
+      ]
+    },
+    {
+      "name": "single-nouns-and-names",
+      "input": "I use Rust. I have diabetes. I use Ruby on Rails for the backend.",
+      "expected": [
+        { "kind": "fact", "statement": "I use Rust", "subject": "Me" },
+        { "kind": "fact", "statement": "I have diabetes", "subject": "Me" },
+        { "kind": "fact", "statement": "I use Ruby on Rails for the backend", "subject": "Me" }
+      ]
+    },
+    {
+      "name": "terse-figure-is-kept",
+      "input": "The budget is $40,000.",
+      "expected": [
+        { "kind": "claim", "statement": "The budget is $40,000", "subject": "budget" }
+      ]
+    },
+    {
+      "name": "figures-with-separators-are-kept",
+      "input": "Budget is $40,000. The budget is $1,000,000.",
+      "expected": [
+        { "kind": "claim", "statement": "Budget is $40,000", "subject": "Budget" },
+        { "kind": "claim", "statement": "The budget is $1,000,000", "subject": "budget" }
       ]
     }
   ]

@@ -66,6 +66,34 @@ pub fn normalize_statement(statement: &str) -> String {
         .to_string()
 }
 
+/// Most optional review items (low confidence, unclear tense) the tray holds
+/// open at once. Decisions that need a person (merges, contradictions) are
+/// not limited.
+pub const OPTIONAL_REVIEW_OPEN_CAP: i64 = 25;
+
+/// Close the optional review items past [`OPTIONAL_REVIEW_OPEN_CAP`], keeping
+/// the most informative (then the oldest). The units themselves stay live:
+/// optional items are a request for a second look, not a hold. Run each pass,
+/// so a tray that grew past the cap (an earlier version, or two chunks racing)
+/// settles back to it.
+pub async fn trim_optional_review(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE review_queue
+            SET state = 'dismissed',
+                signals = signals || '{\"dismissed_by\": \"optional-cap\"}'::jsonb
+          WHERE id IN (
+                SELECT id FROM review_queue
+                 WHERE target_kind = 'unit' AND state = 'open'
+                   AND reason IN ('low-confidence', 'modality-uncertain')
+                 ORDER BY info_gain DESC, created_at ASC, id ASC
+                OFFSET $1)",
+    )
+    .bind(OPTIONAL_REVIEW_OPEN_CAP)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Persist all units for one chunk and stamp its `units_extracted_at`
 /// marker atomically. Returns None if another pass already claimed the chunk.
 pub async fn persist_chunk_units(
@@ -152,8 +180,21 @@ pub async fn persist_chunk_units(
     };
 
     for (unit, method, model) in units {
-        let subject_entity_id = match &unit.subject {
-            Some(name) => Some(resolve_or_create_entity(&mut tx, name).await?),
+        // Not every shape that matches is worth keeping: arithmetic, code,
+        // fragments and filler are left out, and so are the entities they
+        // would have created.
+        if !super::worth::unit_worth_keeping(unit) {
+            metrics::counter!(
+                "gather_extraction_units_total",
+                "method" => *method, "status" => "skipped_low_value"
+            )
+            .increment(1);
+            continue;
+        }
+        // Entities are named by the name inside the phrase ("dark mode", not
+        // "dark mode in every editor"), so one thing isn't several nodes.
+        let subject_entity_id = match unit.subject.as_deref().and_then(super::worth::entity_head) {
+            Some(name) => Some(resolve_or_create_entity(&mut tx, &name).await?),
             None => None,
         };
 
@@ -337,23 +378,38 @@ pub async fn persist_chunk_units(
                     } else {
                         "low-confidence"
                     };
-                    sqlx::query(
-                        r#"
-                        INSERT INTO review_queue (target_kind, target_id, reason, signals)
-                        VALUES ('unit', $1, $3,
-                                jsonb_build_object('confidence', $2::float4,
-                                                   'modality', $4::text,
-                                                   'negated', $5::bool))
-                        ON CONFLICT DO NOTHING
-                        "#,
+                    // These are optional: the unit is kept either way. The tray
+                    // is for decisions, so it never holds more than
+                    // OPTIONAL_REVIEW_OPEN_CAP of them at once; as some are
+                    // answered, newer ones can take their place.
+                    let open: i64 = sqlx::query_scalar(
+                        "SELECT count(*) FROM review_queue
+                         WHERE target_kind = 'unit' AND state = 'open'
+                           AND reason IN ('low-confidence', 'modality-uncertain')",
                     )
-                    .bind(unit_id)
-                    .bind(confidence)
-                    .bind(reason)
-                    .bind(reading.modality.as_str())
-                    .bind(reading.negated)
-                    .execute(&mut *tx)
+                    .fetch_one(&mut *tx)
                     .await?;
+                    if open >= OPTIONAL_REVIEW_OPEN_CAP {
+                        metrics::counter!("gather_review_optional_skipped_total").increment(1);
+                    } else {
+                        sqlx::query(
+                            r#"
+                            INSERT INTO review_queue (target_kind, target_id, reason, signals)
+                            VALUES ('unit', $1, $3,
+                                    jsonb_build_object('confidence', $2::float4,
+                                                       'modality', $4::text,
+                                                       'negated', $5::bool))
+                            ON CONFLICT DO NOTHING
+                            "#,
+                        )
+                        .bind(unit_id)
+                        .bind(confidence)
+                        .bind(reason)
+                        .bind(reading.modality.as_str())
+                        .bind(reading.negated)
+                        .execute(&mut *tx)
+                        .await?;
+                    }
                 }
                 Band::Drop => {
                     sqlx::query("UPDATE atomic_units SET status = 'retracted' WHERE id = $1")
@@ -420,7 +476,12 @@ pub async fn persist_chunk_units(
         if is_new && admit_band != Band::Drop && reading.asserts_positive_fact() {
             if let Some(source_entity) = subject_entity_id {
                 for (object_name, relation) in &unit.objects {
-                    let target_entity = resolve_or_create_entity(&mut tx, object_name).await?;
+                    // An object that isn't a name (a number, a clause) is part
+                    // of the statement, not a node in the graph.
+                    let Some(object_name) = super::worth::entity_head(object_name) else {
+                        continue;
+                    };
+                    let target_entity = resolve_or_create_entity(&mut tx, &object_name).await?;
                     if target_entity == source_entity {
                         continue; // schema forbids self-loops
                     }

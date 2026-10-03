@@ -335,6 +335,28 @@ text. Query: `limit` (default 50, max 200), `offset`.
 
 `source` is `document`, `conversation`, `image` or `none`.
 
+### `GET /artifacts/{id}/digest`
+
+What a document is about and the few sentences that say the most. Built by the extraction worker
+once a document's text has been read; `404` until then, for files that aren't documents, and for
+retracted files. REST only.
+
+```json
+{ "artifact_id": "…", "method": "extractive",
+  "summary": "We decided on Hetzner CX22 for the backup target … The migration must finish …",
+  "key_points": [ { "text": "We decided on Hetzner CX22 for the backup target because …", "score": 0.76, "segment_seq": 0 } ],
+  "topics": [ "backup target", "nightly backup", "migration" ],
+  "outline": [ { "level": 1, "text": "Backup migration plan" } ],
+  "takeaways": [], "open_questions": [],
+  "stats": { "words": 140, "sentences": 11, "sections": 1 }, "created_at": "…" }
+```
+
+`key_points` are sentences from the file itself, in reading order, with `score` relative to the
+best one. With a local AI model on, `method` is `llm:<model>`: `summary`, `takeaways` and
+`open_questions` are the model's wording, and any of them that shares too few words with the
+file's own key sentences is dropped. A file with too little prose to summarize (a short note,
+code, a table) has empty `key_points` and `summary`.
+
 ### `GET /atomic-units`
 
 Query: `kind` (`fact`, `claim`, `decision`, `preference`, `event`), `status` (`active`,

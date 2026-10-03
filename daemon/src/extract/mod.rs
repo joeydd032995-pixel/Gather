@@ -9,6 +9,8 @@
 //! (stale 'processing' rows are reset at loop start), and unit chunks are
 //! stamped atomically with their units in one transaction (persist.rs).
 
+pub mod digest;
+pub mod digest_job;
 pub mod formats;
 pub mod image;
 pub mod ollama;
@@ -17,6 +19,7 @@ pub mod persist;
 pub mod reread;
 pub mod rules;
 pub mod segment;
+pub mod worth;
 
 use std::time::Duration;
 
@@ -37,11 +40,18 @@ pub struct PassStats {
     pub units_created: usize,
     /// Chunks that failed and were set aside with their error.
     pub chunks_failed: usize,
+    /// Documents summarized.
+    pub digests_built: usize,
 }
 
 impl PassStats {
     fn did_work(&self) -> bool {
-        self.pdfs_processed + self.images_processed + self.chunks_processed + self.chunks_failed > 0
+        self.pdfs_processed
+            + self.images_processed
+            + self.chunks_processed
+            + self.chunks_failed
+            + self.digests_built
+            > 0
     }
 }
 
@@ -234,6 +244,13 @@ pub async fn run_one_pass(
     config: &Config,
     ollama: Option<&OllamaClient>,
 ) -> anyhow::Result<PassStats> {
+    // The tray keeps a bounded number of optional items: trim any beyond that,
+    // including a longer queue left by an earlier version.
+    match persist::trim_optional_review(pool).await {
+        Ok(n) if n > 0 => tracing::info!(items = n, "review: trimmed optional items past the cap"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "review: could not trim optional items"),
+    }
     // Each queue on its own: one failing never keeps the others from moving.
     let pdfs_processed = process_pending_pdfs(pool, config)
         .await
@@ -266,7 +283,16 @@ pub async fn run_one_pass(
         }
         _ => ChunkStats::default(),
     };
+    // Documents whose text is read get a digest: what they are about and the
+    // sentences that say the most.
+    let digests_built = digest_job::run_pass(pool, config, ollama)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, "extraction: summarizing documents failed; will retry");
+            0
+        });
     let stats = PassStats {
+        digests_built,
         pdfs_processed,
         images_processed,
         chunks_processed: chunks.processed + reread.processed,
@@ -673,17 +699,27 @@ async fn process_unit_chunks(
     let live = LiveThresholds::load(pool, config).await?;
     let mut stats = ChunkStats::default();
     for chunk in &chunks {
-        let mut units: Vec<(rules::ExtractedUnit, &'static str, Option<String>)> =
-            rules::extract_units(&chunk.text)
+        // Code, data tables and rows of figures aren't read for statements:
+        // they match sentence shapes without saying anything. They are blanked
+        // out (same length, so offsets still point into the chunk) and the
+        // prose around them is read as usual. A chunk with no prose is still
+        // stamped as read, so it isn't looked at again.
+        let readable = worth::readable(&chunk.text);
+        let mut units: Vec<(rules::ExtractedUnit, &'static str, Option<String>)> = match &readable {
+            Some(text) => rules::extract_units(text)
                 .into_iter()
                 .map(|u| (u, "rule_based", None))
-                .collect();
+                .collect(),
+            None => Vec::new(),
+        };
         let mut llm_model = None;
 
-        if let Some((client, chat_model)) = ollama.and_then(|c| c.model.as_deref().map(|m| (c, m)))
-        {
+        if let (Some(text), Some((client, chat_model))) = (
+            readable.as_deref(),
+            ollama.and_then(|c| c.model.as_deref().map(|m| (c, m))),
+        ) {
             let asked = std::time::Instant::now();
-            let answer = client.extract(&chunk.text).await;
+            let answer = client.extract(text).await;
             pace(asked.elapsed(), config.extraction_ai_duty_percent).await;
             match answer {
                 Ok(llm_units) => {

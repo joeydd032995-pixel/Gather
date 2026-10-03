@@ -4,7 +4,9 @@
 
 use std::collections::HashMap;
 
+use chrono::{DateTime, Utc};
 use serde::Serialize;
+use serde_json::Value;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
@@ -554,4 +556,48 @@ async fn file_mentions(
         });
     }
     Ok((files, mentions))
+}
+
+/// A document's digest: what it is about and the sentences that say the most.
+#[derive(Debug, Serialize)]
+pub struct ArtifactDigest {
+    pub artifact_id: Uuid,
+    /// `extractive`, or `llm:<model>` when a local model reworded it.
+    pub method: String,
+    pub summary: String,
+    pub key_points: Value,
+    pub topics: Value,
+    pub outline: Value,
+    pub takeaways: Value,
+    pub open_questions: Value,
+    pub stats: Value,
+    pub created_at: DateTime<Utc>,
+}
+
+/// The digest of `id`, or NotFound while it is not ready (or the file was
+/// retracted).
+pub async fn artifact_digest(pool: &PgPool, id: Uuid) -> Result<ArtifactDigest, ApiError> {
+    let row = sqlx::query(
+        "SELECT g.artifact_id, g.method, g.summary, g.key_points, g.topics, g.outline,
+                g.takeaways, g.open_questions, g.stats, g.created_at
+           FROM document_digests g
+           JOIN artifacts a ON a.id = g.artifact_id
+          WHERE g.artifact_id = $1 AND a.retracted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| ApiError::NotFound("no digest for this file (yet)".to_string()))?;
+    Ok(ArtifactDigest {
+        artifact_id: row.get("artifact_id"),
+        method: row.get("method"),
+        summary: row.get("summary"),
+        key_points: row.get("key_points"),
+        topics: row.get("topics"),
+        outline: row.get("outline"),
+        takeaways: row.get("takeaways"),
+        open_questions: row.get("open_questions"),
+        stats: row.get("stats"),
+        created_at: row.get("created_at"),
+    })
 }

@@ -65,6 +65,7 @@ pub fn build_router(state: AppState) -> Router {
             get(safety::artifact_conclusions),
         )
         .route("/artifacts/{id}/content", get(library::artifact_content))
+        .route("/artifacts/{id}/digest", get(library::artifact_digest))
         .route("/graph", get(library::graph_overview))
         .route("/atomic-units", get(query::list_atomic_units))
         .route("/entities/{id}/graph", get(query::entity_graph))
