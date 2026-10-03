@@ -250,6 +250,20 @@ pub fn entity_name_worth_keeping(name: &str) -> bool {
     if !n.chars().any(char::is_alphabetic) {
         return false;
     }
+    // A banner or comment lifted from code ("// — Fixture shape —", "# TODO",
+    // "/* helpers */") is not a name: names start and end on a letter or digit
+    // ("C++", ".NET", "@types" are the few that don't).
+    let starts_ok = n.chars().next().is_some_and(|c| {
+        c.is_alphanumeric()
+            || (matches!(c, '.' | '@') && n.chars().nth(1).is_some_and(char::is_alphanumeric))
+    });
+    let ends_ok = n
+        .chars()
+        .next_back()
+        .is_some_and(|c| c.is_alphanumeric() || matches!(c, '+' | '#' | ')' | '.' | '"' | '\''));
+    if !starts_ok || !ends_ok || n.contains(['—', '–', '…']) || n.contains(" -- ") {
+        return false;
+    }
     if n.contains([
         '=', '<', '>', '{', '}', '|', '\\', '^', '×', '÷', '?', '!', ';', ':',
     ]) || n.contains(" + ")
@@ -537,6 +551,8 @@ mod tests {
             "A100",
             "GPT-4",
             "C++",
+            ".NET",
+            "@types/node",
             "Snapshot9f3a1c0d7b2e4a58b6c1d2e3f4a5b6c7",
         ] {
             assert!(entity_name_worth_keeping(good), "should keep: {good}");
@@ -558,6 +574,13 @@ mod tests {
             "Project",
             "x",
             "",
+            "// — Fixture shape —",
+            "// helpers",
+            "/* helpers */",
+            "# TODO fix this",
+            "-- section --",
+            "— Fixture shape",
+            "Fixture shape —",
         ] {
             assert!(!entity_name_worth_keeping(bad), "should reject: {bad:?}");
         }
