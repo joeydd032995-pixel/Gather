@@ -233,7 +233,7 @@ pub fn statement_worth_keeping(statement: &str) -> bool {
 /// Whether `name` could be the name of a thing: short, mostly letters, and not
 /// a pronoun, a number, an expression or a piece of a sentence.
 pub fn entity_name_worth_keeping(name: &str) -> bool {
-    let n = name.trim();
+    let n = strip_wrappers(name);
     if n == "Me" {
         return true;
     }
@@ -248,6 +248,23 @@ pub fn entity_name_worth_keeping(name: &str) -> bool {
     // A name has a letter in it ("A100", "CX22", "v2"); "42", "$75" and
     // "2026-03-01" don't, and neither does an expression.
     if !n.chars().any(char::is_alphabetic) {
+        return false;
+    }
+    // A banner or comment lifted from code ("// — Fixture shape —", "# TODO",
+    // "/* helpers */") is not a name: names start and end on a letter or digit
+    // ("C++", ".NET", "@types" are the few that don't).
+    let starts_ok = n.chars().next().is_some_and(|c| {
+        c.is_alphanumeric()
+            || (matches!(c, '.' | '@') && n.chars().nth(1).is_some_and(char::is_alphanumeric))
+    });
+    let ends_ok = n
+        .chars()
+        .next_back()
+        .is_some_and(|c| c.is_alphanumeric() || matches!(c, '+' | '#' | ')' | '.' | '"' | '\''));
+    let dash_token = words
+        .iter()
+        .any(|w| matches!(*w, "—" | "–" | "--" | "-" | "…"));
+    if !starts_ok || !ends_ok || dash_token {
         return false;
     }
     if n.contains([
@@ -281,6 +298,17 @@ pub fn entity_name_worth_keeping(name: &str) -> bool {
     !is_generic_name(n)
 }
 
+/// A name without the prose or Markdown dressing around it: `"PostgreSQL"`,
+/// `**PostgreSQL**` and `PostgreSQL…` are all PostgreSQL.
+fn strip_wrappers(name: &str) -> &str {
+    let lead = |c: char| matches!(c, '"' | '\'' | '“' | '”' | '‘' | '’' | '`' | '*' | '_');
+    let trail = |c: char| lead(c) || matches!(c, '…' | '.');
+    name.trim()
+        .trim_start_matches(lead)
+        .trim_end_matches(trail)
+        .trim()
+}
+
 /// The name inside a phrase: "dark mode in every editor" is about "dark
 /// mode". None when no name can be found (a fragment, a number, a pronoun).
 pub fn entity_head(phrase: &str) -> Option<String> {
@@ -307,7 +335,7 @@ pub fn entity_head(phrase: &str) -> Option<String> {
                 .is_some_and(|next| next.starts_with(char::is_uppercase))
         })
         .map_or(words.len(), |(i, _)| i);
-    let head = words[..cut].join(" ");
+    let head = strip_wrappers(&words[..cut].join(" ")).to_string();
     entity_name_worth_keeping(&head).then_some(head)
 }
 
@@ -537,6 +565,13 @@ mod tests {
             "A100",
             "GPT-4",
             "C++",
+            ".NET",
+            "@types/node",
+            "\"PostgreSQL\"",
+            "**PostgreSQL**",
+            "“PostgreSQL”",
+            "PostgreSQL…",
+            "Canon EF 70–200mm",
             "Snapshot9f3a1c0d7b2e4a58b6c1d2e3f4a5b6c7",
         ] {
             assert!(entity_name_worth_keeping(good), "should keep: {good}");
@@ -558,6 +593,14 @@ mod tests {
             "Project",
             "x",
             "",
+            "// — Fixture shape —",
+            "// helpers",
+            "/* helpers */",
+            "# TODO fix this",
+            "-- section --",
+            "— Fixture shape",
+            "Fixture shape —",
+            "Fixture — shape",
         ] {
             assert!(!entity_name_worth_keeping(bad), "should reject: {bad:?}");
         }
@@ -566,6 +609,16 @@ mod tests {
     #[test]
     fn a_phrase_is_reduced_to_its_name() {
         let head = |p: &str| entity_head(p);
+        assert_eq!(
+            head("\"PostgreSQL\" for storage").as_deref(),
+            Some("PostgreSQL")
+        );
+        assert_eq!(head("**PostgreSQL**").as_deref(), Some("PostgreSQL"));
+        assert_eq!(head("PostgreSQL…").as_deref(), Some("PostgreSQL"));
+        assert_eq!(
+            head("Canon EF 70–200mm").as_deref(),
+            Some("Canon EF 70–200mm")
+        );
         assert_eq!(
             head("dark mode in every editor").as_deref(),
             Some("dark mode")
@@ -699,5 +752,19 @@ mod tests {
         assert!(readable("12 4.5 77 0.31 9 15 22 1.5\n8 40 31 7 12 4.5 77 0.31\n").is_none());
         assert!(readable("   \n\n").is_none());
         assert!(readable("I use PostgreSQL.").is_some());
+    }
+
+    #[test]
+    fn dressed_up_objects_do_not_cost_the_whole_statement() {
+        for text in [
+            "I use \"PostgreSQL\" for storage.",
+            "I use **PostgreSQL** for storage.",
+            "I use PostgreSQL\u{2026}",
+            "I use Canon EF 70\u{2013}200mm for portraits.",
+        ] {
+            let units = crate::extract::rules::extract_units(text);
+            assert_eq!(units.len(), 1, "{text}");
+            assert!(unit_worth_keeping(&units[0]), "should keep: {text}");
+        }
     }
 }
