@@ -238,3 +238,37 @@ async fn worker_auto_merges_duplicates_and_groups_topics() {
         "a later overlapping unit should attach to the existing topic cluster"
     );
 }
+
+/// A pair parked in the tray before names were checked ("Zero" / "Non-zero")
+/// is closed by the next pass rather than left for a person to dismiss.
+#[tokio::test]
+async fn tray_items_about_opposites_are_closed() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let salt = Uuid::new_v4().simple().to_string()[..8].to_string();
+    let a = seed_entity(&state, &format!("zero{salt}")).await;
+    let b = seed_entity(&state, &format!("non-zero{salt}")).await;
+    let item: Uuid = sqlx::query_scalar(
+        "INSERT INTO review_queue (target_kind, target_id, reason, signals) \
+         VALUES ('entity', $1, 'merge-band', $2) RETURNING id",
+    )
+    .bind(pair_key(a, b))
+    .bind(serde_json::json!({ "a": a, "b": b, "score": 0.67 }))
+    .fetch_one(&state.pool)
+    .await
+    .expect("seed tray item");
+
+    run_one_pass(&state.pool, &state.config)
+        .await
+        .expect("cluster pass");
+
+    let tray: String = sqlx::query_scalar("SELECT state FROM review_queue WHERE id = $1")
+        .bind(item)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    assert_eq!(tray, "dismissed", "opposites are not worth a question");
+    assert_eq!(merged_into(&state, a).await, None);
+    assert_eq!(merged_into(&state, b).await, None);
+}

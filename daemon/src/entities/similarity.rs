@@ -13,12 +13,32 @@
 
 use std::collections::HashSet;
 
+use crate::extract::worth::entity_name_worth_keeping;
 use crate::scan::score::{all_tokens, jaccard};
 
 /// Pairs at or above this score are surfaced for review. Chosen so
 /// "postgres"/"postgresql" (0.80 via prefix) and "new york"/"new york city"
 /// (0.67 via tokens) qualify, while "java"/"javascript" (0.40) does not.
 pub const DEFAULT_THRESHOLD: f32 = 0.6;
+
+/// Whether one name is the other with a negating prefix: "Zero" and
+/// "Non-zero", "Failure" and "No failure". Alike on the page, opposite in
+/// meaning, so never worth asking whether they are the same thing.
+fn is_negation_pair(a: &str, b: &str) -> bool {
+    const PREFIXES: [&str; 6] = ["non-", "non ", "not ", "no ", "anti-", "un"];
+    let (na, nb) = (normalize_name(a), normalize_name(b));
+    PREFIXES.iter().any(|p| {
+        na.strip_prefix(p).is_some_and(|rest| rest == nb)
+            || nb.strip_prefix(p).is_some_and(|rest| rest == na)
+    })
+}
+
+/// Whether two entities are worth comparing at all: both must be names (not
+/// code comments, fragments or filler) and not opposites. Applied before any
+/// similarity score, so a pair that fails it is never suggested.
+pub fn names_comparable(a: &str, b: &str) -> bool {
+    entity_name_worth_keeping(a) && entity_name_worth_keeping(b) && !is_negation_pair(a, b)
+}
 
 /// Lowercase, collapse internal whitespace, trim. Applied before every signal
 /// so they all see the same string.
@@ -169,6 +189,35 @@ mod tests {
                     "{a} / {b}: {direct} vs {fast}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn noise_and_opposites_are_not_comparable() {
+        // From a real review tray: none of these pairs is worth a person's time.
+        for (a, b) in [
+            ("// null here", "`null`"),
+            ("* A zero", "Zero"),
+            ("Non-zero", "Zero"),
+            ("Everything else", "Anything else"),
+            ("nothing else", "Anything else"),
+            ("nothing else", "Everything else"),
+            ("Failure", "Repeated failure usually"),
+            ("* A zero", "Non-zero"),
+            ("the installs", "* install"),
+            ("Zero", "where 0 already"),
+            ("Failure", "No failure"),
+        ] {
+            assert!(!names_comparable(a, b), "{a} / {b}");
+        }
+        // Real duplicates still are.
+        for (a, b) in [
+            ("Postgres", "PostgreSQL"),
+            ("New York", "New York City"),
+            ("Acme Holdings", "Acme Holdings."),
+            ("Jane Smith", "J. Smith"),
+        ] {
+            assert!(names_comparable(a, b), "{a} / {b}");
         }
     }
 

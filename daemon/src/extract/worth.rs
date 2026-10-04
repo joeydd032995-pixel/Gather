@@ -83,6 +83,34 @@ const FILLER_NAMES: &[&str] = &[
     "less",
     "many",
     "much",
+    // Code literals and number words: "null", "zero" are values, not things.
+    "null",
+    "nil",
+    "none",
+    "undefined",
+    "true",
+    "false",
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "else",
+    "other",
+    "another",
+];
+
+/// Words that end a fragment rather than a name: "null here", "where 0
+/// already", "repeated failure usually".
+const TRAILING_FILLER: &[&str] = &[
+    "here", "there", "already", "usually", "always", "never", "often", "really", "simply", "still",
+    "again", "anyway", "too", "now", "also", "only", "else",
 ];
 
 /// Words that end the name in a phrase: "dark mode IN every editor",
@@ -276,6 +304,34 @@ pub fn entity_name_worth_keeping(name: &str) -> bool {
     }
     let first = words[0].to_lowercase();
     if FRAGMENT_STARTERS.contains(&first.as_str()) {
+        return false;
+    }
+    // Question words and lowercase articles start fragments ("where 0
+    // already", "the installs"); "The Hague" keeps its capital.
+    if matches!(
+        first.as_str(),
+        "where" | "what" | "who" | "how" | "why" | "when" | "which"
+    ) || (matches!(first.as_str(), "the" | "a" | "an") && words[0] == first)
+    {
+        return false;
+    }
+    // "A zero", "An install": a determiner and a bare noun is a phrase.
+    if words.len() == 2 && matches!(first.as_str(), "a" | "an") {
+        return false;
+    }
+    let last = words[words.len() - 1]
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase();
+    if words.len() >= 2 && TRAILING_FILLER.contains(&last.as_str()) {
+        return false;
+    }
+    // "Everything else", "nothing else": every word is filler.
+    if words.iter().all(|w| {
+        let w = w
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_lowercase();
+        FILLER_NAMES.contains(&w.as_str()) || FUNCTION_WORDS.contains(&w.as_str())
+    }) {
         return false;
     }
     if words.iter().all(|w| {

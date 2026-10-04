@@ -188,6 +188,11 @@ then takes components of the **Auto** edges only:
   match each other) are never auto-merged; a hub gets one `generic-identifier` tray item.
 - A pair you marked as different, or split, is never merged automatically — also not through
   another entity you merged by hand.
+- A pair is only compared when both names are names: not a code comment (`// null here`), a
+  fragment (`where 0 already`, `Repeated failure usually`), filler (`Everything else`) or a
+  code literal (`null`), and neither is the other with a negating prefix (`Zero` and
+  `Non-zero`). Pairs that fail are never suggested, and tray items already parked for such a
+  pair are closed on the next pass.
 - A merge needs at least one source artifact behind its names.
 - Components larger than `GATHER_CLUSTER_MAX_COMPONENT` are parked for review instead of
   merged wholesale.

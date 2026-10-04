@@ -20,7 +20,9 @@ use crate::decide::live::LiveThresholds;
 use crate::decide::{best_score, MergeSignals};
 use crate::entities::merge::unmerge_for_supersession_in;
 use crate::entities::merge_entities_in;
-use crate::entities::similarity::{features_similarity, name_similarity, NameFeatures};
+use crate::entities::similarity::{
+    features_similarity, name_similarity, names_comparable, NameFeatures,
+};
 use crate::safety::certificate::{Decision, InferenceCertificate, Predicate};
 use crate::safety::identity::{
     choose_survivor, plan, EntityRecord, IdentityConfig, IdentityPlan, Link, PairEvidence,
@@ -126,6 +128,9 @@ async fn load_evidence(
     let features: Vec<NameFeatures> = records.iter().map(|r| NameFeatures::new(&r.name)).collect();
     for (i, a) in records.iter().enumerate() {
         for (j, b) in records.iter().enumerate().skip(i + 1) {
+            if !names_comparable(&a.name, &b.name) {
+                continue;
+            }
             let text = features_similarity(&features[i], &features[j]);
             if text >= threshold {
                 out.push(PairEvidence {
@@ -157,7 +162,7 @@ async fn load_evidence(
     .fetch_all(pool)
     .await?;
     for (a, b, c) in cosine {
-        if c < threshold {
+        if c < threshold || !names_comparable(names[&a], names[&b]) {
             continue;
         }
         out.push(PairEvidence {
@@ -319,6 +324,47 @@ async fn detach(
     Ok(())
 }
 
+/// Close tray items that ask about a pair no longer worth asking about
+/// (code-comment fragments, filler, opposites): ones parked before names were
+/// checked would otherwise sit in the tray until someone dismissed each by
+/// hand.
+async fn dismiss_noise_pairs(pool: &PgPool, records: &[EntityRecord]) -> anyhow::Result<u64> {
+    let names: HashMap<String, &str> = records
+        .iter()
+        .map(|r| (r.id.to_string(), r.name.as_str()))
+        .collect();
+    let open: Vec<(Uuid, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT id, signals->>'a', signals->>'b' FROM review_queue \
+         WHERE state = 'open' AND target_kind = 'entity' AND reason = 'merge-band'",
+    )
+    .fetch_all(pool)
+    .await?;
+    let noise: Vec<Uuid> = open
+        .into_iter()
+        .filter_map(|(id, a, b)| {
+            let (a, b) = (names.get(&a?)?, names.get(&b?)?);
+            (!names_comparable(a, b)).then_some(id)
+        })
+        .collect();
+    if noise.is_empty() {
+        return Ok(0);
+    }
+    let done = sqlx::query(
+        "UPDATE review_queue SET state = 'dismissed', \
+                signals = signals || '{\"dismissed_by\": \"name-gate\"}'::jsonb \
+         WHERE id = ANY($1) AND state = 'open'",
+    )
+    .bind(&noise)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    tracing::info!(
+        dismissed = done,
+        "closed tray items about pairs that are not names"
+    );
+    Ok(done)
+}
+
 pub async fn entity_resolution_pass(
     pool: &PgPool,
     config: &Config,
@@ -475,6 +521,8 @@ pub async fn entity_resolution_pass(
         None,
     )
     .await?;
+
+    dismiss_noise_pairs(pool, &records).await?;
 
     // A pair held earlier may have just been merged: close stale tray items.
     if !merged_away.is_empty() {

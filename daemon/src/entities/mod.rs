@@ -140,6 +140,9 @@ pub async fn merge_suggestions(
             let (Some(a), Some(b)) = (find(&entities, a_id), find(&entities, b_id)) else {
                 continue; // outside the capped window
             };
+            if !similarity::names_comparable(&a.name, &b.name) {
+                continue;
+            }
             seen.insert((a_id, b_id));
             scored.push(MergeSuggestion {
                 a,
@@ -164,6 +167,9 @@ pub async fn merge_suggestions(
                 continue;
             }
             if dismissed.contains(&(a.id, b.id)) {
+                continue;
+            }
+            if !similarity::names_comparable(&a.name, &b.name) {
                 continue;
             }
             let score = similarity::name_similarity(&a.name, &b.name);
