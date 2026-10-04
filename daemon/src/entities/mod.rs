@@ -103,53 +103,69 @@ pub async fn merge_suggestions(
     // --- embedding pass (only contributes when embeddings exist) -----------
     let embedded = entities.iter().filter(|(_, has)| *has).count();
     if embedded >= 2 {
-        let rows = sqlx::query(
-            r#"
-            SELECT a.id AS a_id, b.id AS b_id,
-                   (1 - (a.embedding <=> b.embedding))::float4 AS cosine_sim
-            FROM entities a
-            JOIN entities b ON a.id < b.id
-            WHERE a.merged_into_entity_id IS NULL AND b.merged_into_entity_id IS NULL
-              AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL
-              AND (a.embedding <=> b.embedding) <= $1
-              -- Filtered here rather than after LIMIT: dismissed pairs would
-              -- otherwise consume the budget on every request and starve
-              -- lower-ranked live ones, which the text pass cannot recover
-              -- when the names differ.
-              AND NOT EXISTS (
-                  SELECT 1 FROM entity_merge_audit d
-                  WHERE d.action = 'dismiss'
-                    AND ((d.winner_entity_id = a.id AND d.loser_entity_id = b.id)
-                      OR (d.winner_entity_id = b.id AND d.loser_entity_id = a.id))
-              )
-            ORDER BY a.embedding <=> b.embedding
-            LIMIT $2
-            "#,
-        )
-        .bind(max_distance_for(threshold))
-        .bind(limit)
-        .fetch_all(pool)
-        .await?;
+        // The name gate runs in Rust, so page through the closest pairs until
+        // `limit` comparable ones are found: noise ranked above real duplicates
+        // must not use up the budget.
+        const PAGE: i64 = 500;
+        const SCAN_CAP: i64 = 20_000;
+        let mut offset = 0i64;
+        let mut kept = 0i64;
+        loop {
+            let rows = sqlx::query(
+                r#"
+                SELECT a.id AS a_id, b.id AS b_id,
+                       (1 - (a.embedding <=> b.embedding))::float4 AS cosine_sim
+                FROM entities a
+                JOIN entities b ON a.id < b.id
+                WHERE a.merged_into_entity_id IS NULL AND b.merged_into_entity_id IS NULL
+                  AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL
+                  AND (a.embedding <=> b.embedding) <= $1
+                  -- Filtered here rather than after LIMIT: dismissed pairs would
+                  -- otherwise consume the budget on every request and starve
+                  -- lower-ranked live ones, which the text pass cannot recover
+                  -- when the names differ.
+                  AND NOT EXISTS (
+                      SELECT 1 FROM entity_merge_audit d
+                      WHERE d.action = 'dismiss'
+                        AND ((d.winner_entity_id = a.id AND d.loser_entity_id = b.id)
+                          OR (d.winner_entity_id = b.id AND d.loser_entity_id = a.id))
+                  )
+                ORDER BY a.embedding <=> b.embedding, a.id, b.id
+                LIMIT $2 OFFSET $3
+                "#,
+            )
+            .bind(max_distance_for(threshold))
+            .bind(PAGE)
+            .bind(offset)
+            .fetch_all(pool)
+            .await?;
+            let fetched = rows.len() as i64;
 
-        for row in rows {
-            let (a_id, b_id): (Uuid, Uuid) = (row.get("a_id"), row.get("b_id"));
-            let score: f32 = row.get("cosine_sim");
-            if score < threshold || dismissed.contains(&(a_id, b_id)) {
-                continue;
+            for row in rows {
+                let (a_id, b_id): (Uuid, Uuid) = (row.get("a_id"), row.get("b_id"));
+                let score: f32 = row.get("cosine_sim");
+                if score < threshold || dismissed.contains(&(a_id, b_id)) {
+                    continue;
+                }
+                let (Some(a), Some(b)) = (find(&entities, a_id), find(&entities, b_id)) else {
+                    continue; // outside the capped window
+                };
+                if !similarity::names_comparable(&a.name, &b.name) {
+                    continue;
+                }
+                seen.insert((a_id, b_id));
+                kept += 1;
+                scored.push(MergeSuggestion {
+                    a,
+                    b,
+                    score,
+                    method: similarity::pair_method(Some(score)),
+                });
             }
-            let (Some(a), Some(b)) = (find(&entities, a_id), find(&entities, b_id)) else {
-                continue; // outside the capped window
-            };
-            if !similarity::names_comparable(&a.name, &b.name) {
-                continue;
+            offset += fetched;
+            if fetched < PAGE || kept >= limit || offset >= SCAN_CAP {
+                break;
             }
-            seen.insert((a_id, b_id));
-            scored.push(MergeSuggestion {
-                a,
-                b,
-                score,
-                method: similarity::pair_method(Some(score)),
-            });
         }
     }
 

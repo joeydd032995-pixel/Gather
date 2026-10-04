@@ -13,7 +13,7 @@
 
 use std::collections::HashSet;
 
-use crate::extract::worth::entity_name_worth_keeping;
+use crate::extract::worth::{entity_name_worth_keeping, strip_wrappers};
 use crate::scan::score::{all_tokens, jaccard};
 
 /// Pairs at or above this score are surfaced for review. Chosen so
@@ -26,7 +26,10 @@ pub const DEFAULT_THRESHOLD: f32 = 0.6;
 /// meaning, so never worth asking whether they are the same thing.
 fn is_negation_pair(a: &str, b: &str) -> bool {
     const PREFIXES: [&str; 6] = ["non-", "non ", "not ", "no ", "anti-", "un"];
-    let (na, nb) = (normalize_name(a), normalize_name(b));
+    let (na, nb) = (
+        normalize_name(strip_wrappers(a)),
+        normalize_name(strip_wrappers(b)),
+    );
     PREFIXES.iter().any(|p| {
         na.strip_prefix(p).is_some_and(|rest| rest == nb)
             || nb.strip_prefix(p).is_some_and(|rest| rest == na)
@@ -207,6 +210,9 @@ mod tests {
             ("the installs", "* install"),
             ("Zero", "where 0 already"),
             ("Failure", "No failure"),
+            ("Non-production database", "Production database."),
+            ("`Zero`", "non-zero"),
+            ("\"Failure\"", "**No failure**"),
         ] {
             assert!(!names_comparable(a, b), "{a} / {b}");
         }

@@ -147,33 +147,51 @@ async fn load_evidence(
     }
     let ids: Vec<Uuid> = records.iter().map(|r| r.id).collect();
     let names: HashMap<Uuid, &str> = records.iter().map(|r| (r.id, r.name.as_str())).collect();
-    let cosine: Vec<(Uuid, Uuid, f32)> = sqlx::query_as(
-        "WITH e AS MATERIALIZED ( \
-             SELECT id, embedding FROM entities \
-             WHERE id = ANY($1) AND embedding IS NOT NULL \
-         ) \
-         SELECT a.id, b.id, (1 - (a.embedding <=> b.embedding))::float4 \
-         FROM e a JOIN e b ON a.id < b.id \
-         WHERE (a.embedding <=> b.embedding) <= $2 \
-         ORDER BY a.embedding <=> b.embedding, a.id, b.id LIMIT 5000",
-    )
-    .bind(&ids)
-    .bind((1.0 - f64::from(threshold)).clamp(0.0, 1.0))
-    .fetch_all(pool)
-    .await?;
-    for (a, b, c) in cosine {
-        if c < threshold || !names_comparable(names[&a], names[&b]) {
-            continue;
+    // The name gate runs here rather than in SQL, so page through the closest
+    // pairs until the budget is filled with *comparable* ones: noise ranked
+    // above real duplicates must not use it up.
+    const PAGE: i64 = 5_000;
+    const SCAN_CAP: i64 = 50_000;
+    let max_distance = (1.0 - f64::from(threshold)).clamp(0.0, 1.0);
+    let mut kept = 0usize;
+    let mut offset = 0i64;
+    loop {
+        let page: Vec<(Uuid, Uuid, f32)> = sqlx::query_as(
+            "WITH e AS MATERIALIZED ( \
+                 SELECT id, embedding FROM entities \
+                 WHERE id = ANY($1) AND embedding IS NOT NULL \
+             ) \
+             SELECT a.id, b.id, (1 - (a.embedding <=> b.embedding))::float4 \
+             FROM e a JOIN e b ON a.id < b.id \
+             WHERE (a.embedding <=> b.embedding) <= $2 \
+             ORDER BY a.embedding <=> b.embedding, a.id, b.id LIMIT $3 OFFSET $4",
+        )
+        .bind(&ids)
+        .bind(max_distance)
+        .bind(PAGE)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
+        let fetched = page.len() as i64;
+        for (a, b, c) in page {
+            if c < threshold || !names_comparable(names[&a], names[&b]) {
+                continue;
+            }
+            kept += 1;
+            out.push(PairEvidence {
+                a,
+                b,
+                signals: MergeSignals {
+                    cosine: Some(c),
+                    text: Some(name_similarity(names[&a], names[&b])),
+                },
+                method: "embedding:cosine".into(),
+            });
         }
-        out.push(PairEvidence {
-            a,
-            b,
-            signals: MergeSignals {
-                cosine: Some(c),
-                text: Some(name_similarity(names[&a], names[&b])),
-            },
-            method: "embedding:cosine".into(),
-        });
+        offset += fetched;
+        if fetched < PAGE || kept >= PAGE as usize || offset >= SCAN_CAP {
+            break;
+        }
     }
     Ok(out)
 }
@@ -328,23 +346,21 @@ async fn detach(
 /// (code-comment fragments, filler, opposites): ones parked before names were
 /// checked would otherwise sit in the tray until someone dismissed each by
 /// hand.
-async fn dismiss_noise_pairs(pool: &PgPool, records: &[EntityRecord]) -> anyhow::Result<u64> {
-    let names: HashMap<String, &str> = records
-        .iter()
-        .map(|r| (r.id.to_string(), r.name.as_str()))
-        .collect();
-    let open: Vec<(Uuid, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT id, signals->>'a', signals->>'b' FROM review_queue \
-         WHERE state = 'open' AND target_kind = 'entity' AND reason = 'merge-band'",
+async fn dismiss_noise_pairs(pool: &PgPool) -> anyhow::Result<u64> {
+    // Names come straight from `entities`: the pass itself only loads the
+    // first LIVE_CAP, and a parked pair outside that window must still close.
+    let open: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT q.id, a.name, b.name FROM review_queue q \
+         JOIN entities a ON a.id::text = q.signals->>'a' \
+         JOIN entities b ON b.id::text = q.signals->>'b' \
+         WHERE q.state = 'open' AND q.target_kind = 'entity' AND q.reason = 'merge-band'",
     )
     .fetch_all(pool)
     .await?;
     let noise: Vec<Uuid> = open
         .into_iter()
-        .filter_map(|(id, a, b)| {
-            let (a, b) = (names.get(&a?)?, names.get(&b?)?);
-            (!names_comparable(a, b)).then_some(id)
-        })
+        .filter(|(_, a, b)| !names_comparable(a, b))
+        .map(|(id, _, _)| id)
         .collect();
     if noise.is_empty() {
         return Ok(0);
@@ -522,7 +538,7 @@ pub async fn entity_resolution_pass(
     )
     .await?;
 
-    dismiss_noise_pairs(pool, &records).await?;
+    dismiss_noise_pairs(pool).await?;
 
     // A pair held earlier may have just been merged: close stale tray items.
     if !merged_away.is_empty() {

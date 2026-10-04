@@ -356,7 +356,7 @@ pub fn entity_name_worth_keeping(name: &str) -> bool {
 
 /// A name without the prose or Markdown dressing around it: `"PostgreSQL"`,
 /// `**PostgreSQL**` and `PostgreSQL…` are all PostgreSQL.
-fn strip_wrappers(name: &str) -> &str {
+pub fn strip_wrappers(name: &str) -> &str {
     let lead = |c: char| matches!(c, '"' | '\'' | '“' | '”' | '‘' | '’' | '`' | '*' | '_');
     let trail = |c: char| lead(c) || matches!(c, '…' | '.');
     name.trim()
