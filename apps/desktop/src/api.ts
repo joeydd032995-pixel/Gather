@@ -535,6 +535,10 @@ export interface UnitSummary {
   status: string;
   subject_entity_id: string | null;
   valid_from: string | null;
+  /** Set by the list across every file: the file a statement was first found in. */
+  source_artifact_id?: string | null;
+  source_name?: string | null;
+  created_at?: string;
 }
 
 /**
@@ -559,6 +563,33 @@ export async function listUnits(filter: {
   });
   const body = await jsonOrThrow<{ items: UnitSummary[] }>(res);
   return body.items;
+}
+
+/** One page of everything Gather currently holds, across every file. */
+export interface FindingsPage {
+  items: UnitSummary[];
+  total: number;
+}
+
+export async function listFindings(filter: {
+  kind?: string;
+  q?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<FindingsPage> {
+  const params = new URLSearchParams({
+    live: "true",
+    limit: String(filter.limit ?? 100),
+    offset: String(filter.offset ?? 0),
+  });
+  if (filter.kind) params.set("kind", filter.kind);
+  if (filter.q?.trim()) params.set("q", filter.q.trim());
+  const res = await fetch(`${DAEMON_URL}/api/v1/atomic-units?${params}`, {
+    headers: authHeaders(),
+  });
+  const body = await jsonOrThrow<Partial<FindingsPage>>(res);
+  const items = Array.isArray(body.items) ? body.items : [];
+  return { items, total: typeof body.total === "number" ? body.total : items.length };
 }
 
 export interface Passage {

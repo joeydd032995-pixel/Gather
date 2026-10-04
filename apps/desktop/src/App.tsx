@@ -16,6 +16,7 @@ import { checkHealth, setApiToken, type HealthState } from "./api";
 import Clusters from "./Clusters";
 import Contradictions from "./Contradictions";
 import Entities from "./Entities";
+import Findings from "./Findings";
 import Graph from "./Graph";
 import { useAttention } from "./hooks/useAttention";
 import { useRuntime } from "./hooks/useRuntime";
@@ -404,6 +405,7 @@ export default function App() {
             {tab === "library" && (
               <Library selected={libraryFile} onSelect={setLibraryFile} onAddFiles={addFiles} uploadVersion={uploads.version} />
             )}
+            {tab === "findings" && <Findings onOpenFile={openFile} refreshKey={uploads.version} />}
             {tab === "projects" && (
               <Projects
                 selected={project}

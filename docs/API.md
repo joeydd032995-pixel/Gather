@@ -362,7 +362,12 @@ code, a table) has empty `key_points` and `summary`.
 Query: `kind` (`fact`, `claim`, `decision`, `preference`, `event`), `status` (`active`,
 `superseded`, `retracted`, `disputed`), `subject_entity_id`, `artifact_id` (units extracted
 from that artifact), `live=true` (only `active` or `disputed` units, the ones that still count as
-knowledge), `limit`, `offset`.
+knowledge), `q` (only statements containing that text, case-insensitive), `limit`, `offset`.
+
+The response is `{ items, total, limit, offset }`: `total` counts every unit matching the
+filters, not just this page. Each item also has `source_artifact_id` and `source_name`, the first
+file the statement was found in (null when it has none). The desktop app's **What Gather found**
+view, under Explore, is this list across every file.
 
 ### `GET /graph`
 
