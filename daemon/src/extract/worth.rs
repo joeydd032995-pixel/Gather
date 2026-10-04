@@ -104,6 +104,49 @@ const FILLER_NAMES: &[&str] = &[
     "else",
     "other",
     "another",
+    // Status and degree words: values of something, not things.
+    "off",
+    "on",
+    "yes",
+    "complete",
+    "partial",
+    "omitted",
+    "empty",
+    "full",
+    "same",
+    "different",
+    "real",
+    "very",
+    "first",
+    "last",
+    "next",
+];
+
+/// Lowercase words that start a fragment, not a name: "every task", "at
+/// least one", "using it".
+const LOWER_FRAGMENT_STARTERS: &[&str] = &[
+    "every", "each", "any", "some", "all", "both", "either", "neither", "another", "same", "such",
+    "other", "most", "few", "several", "at", "of", "in", "on", "per", "being", "having",
+];
+
+const NUMBER_WORDS: &[&str] = &[
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+];
+
+/// Whether a file name is source code (by extension). Comments and doc
+/// strings in such files read like sentences without saying anything worth
+/// learning, so their statements aren't extracted unless asked for.
+pub fn is_source_code_file(name: &str) -> bool {
+    name.rsplit_once('.')
+        .is_some_and(|(_, ext)| SOURCE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
+}
+
+/// File extensions that mean source code.
+pub const SOURCE_EXTENSIONS: &[&str] = &[
+    "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "go", "java", "kt", "kts", "c", "h", "cc",
+    "cpp", "cxx", "hpp", "cs", "swift", "rb", "php", "scala", "sh", "bash", "zsh", "ps1", "lua",
+    "dart", "sql", "css", "scss", "less", "vue", "svelte", "zig", "ex", "exs", "erl", "hs", "ml",
+    "clj", "r", "jl", "pl", "m", "mm", "groovy", "gradle", "proto",
 ];
 
 /// Words that end a fragment rather than a name: "null here", "where 0
@@ -305,6 +348,54 @@ pub fn entity_name_worth_keeping(name: &str) -> bool {
     let first = words[0].to_lowercase();
     if FRAGMENT_STARTERS.contains(&first.as_str()) {
         return false;
+    }
+    // Operators and code punctuation, quotes left inside the name, a stray
+    // apostrophe, unbalanced brackets: pieces of code or prose, not names.
+    if n.contains([
+        '≈', '~', '≠', '≤', '≥', '→', '←', '⇒', '±', '"', '`', '“', '”', '‘',
+    ]) || n.matches('(').count() != n.matches(')').count()
+        || n.matches('[').count() != n.matches(']').count()
+    {
+        return false;
+    }
+    let chars_vec: Vec<char> = n.chars().collect();
+    if chars_vec.iter().enumerate().any(|(i, &c)| {
+        c == '\''
+            && !(i > 0
+                && i + 1 < chars_vec.len()
+                && chars_vec[i - 1].is_alphanumeric()
+                && chars_vec[i + 1].is_alphanumeric())
+    }) {
+        return false;
+    }
+    let lower_first = words[0] == first;
+    if words.len() >= 2 {
+        // "every task", "something very", "zero impact", "at least one".
+        if lower_first
+            && (LOWER_FRAGMENT_STARTERS.contains(&first.as_str())
+                || FILLER_NAMES.contains(&first.as_str()))
+        {
+            return false;
+        }
+        if NUMBER_WORDS.contains(&first.as_str())
+            && words[1..]
+                .iter()
+                .all(|w| w.chars().all(|c| !c.is_uppercase()))
+        {
+            return false;
+        }
+        // "Replaying a run", "Adopting it", "Returning true": a verb phrase.
+        let second = words[1]
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_lowercase();
+        if first.chars().count() >= 5
+            && first.ends_with("ing")
+            && (FUNCTION_WORDS.contains(&second.as_str())
+                || LOWER_FRAGMENT_STARTERS.contains(&second.as_str())
+                || matches!(second.as_str(), "true" | "false" | "null"))
+        {
+            return false;
+        }
     }
     // Question words and lowercase articles start fragments ("where 0
     // already", "the installs"); "The Hague" keeps its capital.
@@ -821,6 +912,79 @@ mod tests {
             let units = crate::extract::rules::extract_units(text);
             assert_eq!(units.len(), 1, "{text}");
             assert!(unit_worth_keeping(&units[0]), "should keep: {text}");
+        }
+    }
+
+    #[test]
+    fn source_files_are_recognised_by_extension() {
+        for yes in ["main.rs", "App.tsx", "build.GRADLE", "a/b/c.py", "x.sql"] {
+            assert!(is_source_code_file(yes), "{yes}");
+        }
+        for no in [
+            "README.md",
+            "notes.txt",
+            "report.pdf",
+            "data.csv",
+            "Makefile",
+            "r",
+            ".rs.md",
+        ] {
+            assert!(!is_source_code_file(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn fragments_from_code_and_comments_are_not_names() {
+        // From a real review tray (code comments, doc strings and the prose
+        // around them).
+        for bad in [
+            "League average OPS ≈ 0.720",
+            "something)",
+            "nothing)",
+            "// a brace anywhere",
+            "/** The one-letter square",
+            "interrupted run\" invariant",
+            "start reading\" never",
+            "`.gitignore` excludes",
+            "'.gitignore' excludes",
+            "something dynamic (e.g",
+            "every task",
+            "materialising every",
+            "something very",
+            "something different",
+            "nothing overlapped",
+            "Zero impact",
+            "at least one",
+            "Replaying a run",
+            "Adopting it",
+            "Returning true",
+            "being replaced",
+            "one",
+            "off",
+            "Complete",
+            "Omitted",
+            "a tenant",
+            "the rest",
+            "a real statement",
+            "prototype/fn-ptr — null",
+        ] {
+            assert!(!entity_name_worth_keeping(bad), "should reject: {bad:?}");
+        }
+        for good in [
+            "Spring Boot",
+            "Boeing 747",
+            "One Direction",
+            "Two Sigma",
+            "Record.serialize",
+            "SINGLE_BATCH",
+            "P/L",
+            "TCP/IP",
+            "Acme (UK)",
+            "the file's",
+        ] {
+            // "the file's" is a fragment (lowercase article), the rest are names.
+            let expect = good != "the file's";
+            assert_eq!(entity_name_worth_keeping(good), expect, "{good:?}");
         }
     }
 }

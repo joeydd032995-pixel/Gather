@@ -65,6 +65,11 @@ pub struct Config {
     pub extraction_interval_secs: u64,
     /// Max rows claimed per queue per pass.
     pub extraction_batch: i64,
+    /// GATHER_EXTRACT_SOURCE_CODE: also read statements out of source-code
+    /// files (their comments and doc strings). Off by default: the files stay
+    /// stored and searchable, but comments rarely say anything worth learning
+    /// and fill the review tray with fragments.
+    pub extract_source_code: bool,
     /// GATHER_INBOX_DIR: a folder Gather watches for exports and documents
     /// dropped into it (read, then moved to `done/`). Unset = off.
     pub inbox_dir: Option<std::path::PathBuf>,
@@ -409,6 +414,7 @@ impl Config {
             log_json,
             allow_non_loopback,
             extraction_enabled: env_bool("GATHER_EXTRACTION_ENABLED", true),
+            extract_source_code: env_bool("GATHER_EXTRACT_SOURCE_CODE", false),
             extraction_interval_secs: var("GATHER_EXTRACTION_INTERVAL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -581,6 +587,7 @@ impl Config {
             log_json: false,
             allow_non_loopback: false,
             extraction_enabled: true,
+            extract_source_code: false,
             extraction_interval_secs: 30,
             extraction_batch: 8,
             inbox_dir: None,

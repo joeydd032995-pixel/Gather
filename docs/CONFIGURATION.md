@@ -81,6 +81,7 @@ Extracts PDF text, runs image OCR and produces atomic units.
 | `GATHER_EXTRACTION_ENABLED` | `true` | | Run the worker |
 | `GATHER_EXTRACTION_INTERVAL_SECS` | `30` | ≥ 1 | Seconds to wait when there is nothing to read. While work is queued, passes run back to back (a 200 ms pause between them) until the queue is empty |
 | `GATHER_EXTRACTION_BATCH` | `8` | 1–256 | Rows claimed per queue per pass |
+| `GATHER_EXTRACT_SOURCE_CODE` | `false` | `true`/`false` | Also read statements out of source-code files (by extension: `.rs`, `.ts`, `.py`, …). Off by default: those files stay stored and searchable, but comments and doc strings rarely say anything worth learning and fill the review tray with fragments |
 | `GATHER_EXTRACTION_AI_DUTY_PERCENT` | `60` (low: `30`) | 10–100 | While a local AI model is in use, the share of time the extraction worker may spend working. After each model request it rests long enough to stay within this share (at 30, 3 s of work is followed by 7 s of rest, up to 2 minutes), so a long pass cannot exceed it. Without it a model reading a big backlog would keep the processor near 100 %. `100` never rests. Not used without Ollama. In the desktop app, **Settings → AI model → Reading speed** sets it: Gentle 30, Balanced 60, Full speed 100 |
 
 Document sections are read a file at a time, oldest file first, so each file finishes before

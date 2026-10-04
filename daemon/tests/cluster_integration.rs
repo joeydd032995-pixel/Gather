@@ -12,6 +12,10 @@ use gather_daemon::config::Config;
 use gather_daemon::entities::similarity::name_similarity;
 use gather_daemon::{db, AppState};
 
+/// The clustering pass works on shared queues and one entity set, so the
+/// tests here take turns instead of racing each other's passes.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn test_state() -> Option<AppState> {
     let Ok(database_url) = std::env::var("DATABASE_URL") else {
         eprintln!("skipping integration test: DATABASE_URL not set");
@@ -115,6 +119,7 @@ async fn worker_auto_merges_duplicates_and_groups_topics() {
     let Some(state) = test_state().await else {
         return;
     };
+    let _turn = SERIAL.lock().await;
     // Entity resolution and topic grouping are asserted in ONE test with ONE
     // pass: cargo runs test fns in parallel, and two concurrent worker passes
     // over the same shared DB would split units across their FOR UPDATE SKIP
@@ -246,6 +251,7 @@ async fn tray_items_about_opposites_are_closed() {
     let Some(state) = test_state().await else {
         return;
     };
+    let _turn = SERIAL.lock().await;
     let salt = Uuid::new_v4().simple().to_string()[..8].to_string();
     let a = seed_entity(&state, &format!("zero{salt}")).await;
     let b = seed_entity(&state, &format!("non-zero{salt}")).await;
@@ -271,4 +277,51 @@ async fn tray_items_about_opposites_are_closed() {
     assert_eq!(tray, "dismissed", "opposites are not worth a question");
     assert_eq!(merged_into(&state, a).await, None);
     assert_eq!(merged_into(&state, b).await, None);
+}
+
+/// A pair learned only from source-code files is closed too: those files'
+/// comments are no longer read for statements, so nothing about them is worth
+/// a person's time.
+#[tokio::test]
+async fn tray_items_about_code_only_entities_are_closed() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let _turn = SERIAL.lock().await;
+    let salt = Uuid::new_v4().simple().to_string()[..8].to_string();
+    let a = seed_entity(&state, &format!("Hetzner{salt}")).await;
+    let b = seed_entity(&state, &format!("Hetzner Cloud{salt}")).await;
+    // Make every file behind them a source file.
+    sqlx::query(
+        "UPDATE artifacts SET original_filename = 'src-' || id::text || '.rs' WHERE id IN ( \
+           SELECT p.artifact_id FROM atomic_unit_provenance p \
+           JOIN atomic_units u ON u.id = p.atomic_unit_id \
+           WHERE u.subject_entity_id = ANY($1))",
+    )
+    .bind(vec![a, b])
+    .execute(&state.pool)
+    .await
+    .expect("rename sources");
+    let item: Uuid = sqlx::query_scalar(
+        "INSERT INTO review_queue (target_kind, target_id, reason, signals) \
+         VALUES ('entity', $1, 'merge-band', $2) RETURNING id",
+    )
+    .bind(pair_key(a, b))
+    .bind(serde_json::json!({ "a": a, "b": b, "score": 0.7 }))
+    .fetch_one(&state.pool)
+    .await
+    .expect("seed tray item");
+
+    run_one_pass(&state.pool, &state.config)
+        .await
+        .expect("cluster pass");
+
+    let (tray, why): (String, Option<String>) =
+        sqlx::query_as("SELECT state, signals->>'dismissed_by' FROM review_queue WHERE id = $1")
+            .bind(item)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert_eq!(tray, "dismissed");
+    assert_eq!(why.as_deref(), Some("source-code"));
 }

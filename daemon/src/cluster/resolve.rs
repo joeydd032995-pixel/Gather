@@ -349,34 +349,83 @@ async fn detach(
 async fn dismiss_noise_pairs(pool: &PgPool) -> anyhow::Result<u64> {
     // Names come straight from `entities`: the pass itself only loads the
     // first LIVE_CAP, and a parked pair outside that window must still close.
-    let open: Vec<(Uuid, String, String)> = sqlx::query_as(
-        "SELECT q.id, a.name, b.name FROM review_queue q \
+    let open: Vec<(Uuid, Uuid, Uuid, String, String)> = sqlx::query_as(
+        "SELECT q.id, a.id, b.id, a.name, b.name FROM review_queue q \
          JOIN entities a ON a.id::text = q.signals->>'a' \
          JOIN entities b ON b.id::text = q.signals->>'b' \
          WHERE q.state = 'open' AND q.target_kind = 'entity' AND q.reason = 'merge-band'",
     )
     .fetch_all(pool)
     .await?;
+    if open.is_empty() {
+        return Ok(0);
+    }
+    let mut closed = 0;
+
+    // Pairs about things that aren't names (comment fragments, filler, opposites).
     let noise: Vec<Uuid> = open
-        .into_iter()
-        .filter(|(_, a, b)| !names_comparable(a, b))
-        .map(|(id, _, _)| id)
+        .iter()
+        .filter(|(_, _, _, a, b)| !names_comparable(a, b))
+        .map(|(id, ..)| *id)
         .collect();
-    if noise.is_empty() {
+    closed += dismiss(pool, &noise, "name-gate").await?;
+
+    // Pairs where both entities were learned only from source-code files,
+    // whose comments are no longer read for statements.
+    let entities: Vec<Uuid> = open.iter().flat_map(|(_, a, b, ..)| [*a, *b]).collect();
+    let pattern = format!(
+        "\\.({})$",
+        crate::extract::worth::SOURCE_EXTENSIONS.join("|")
+    );
+    let code_only: std::collections::HashSet<Uuid> = sqlx::query_scalar(
+        "SELECT x.entity_id FROM ( \
+           SELECT subject_entity_id AS entity_id, id AS unit_id FROM atomic_units \
+           WHERE subject_entity_id = ANY($1) AND status <> 'retracted' \
+           UNION \
+           SELECT source_entity_id, atomic_unit_id FROM relationships \
+           WHERE source_entity_id = ANY($1) AND atomic_unit_id IS NOT NULL AND status = 'active' \
+           UNION \
+           SELECT target_entity_id, atomic_unit_id FROM relationships \
+           WHERE target_entity_id = ANY($1) AND atomic_unit_id IS NOT NULL AND status = 'active' \
+         ) x \
+         JOIN atomic_unit_provenance p ON p.atomic_unit_id = x.unit_id \
+         JOIN artifacts a ON a.id = p.artifact_id AND a.retracted_at IS NULL \
+         GROUP BY x.entity_id \
+         HAVING bool_and(lower(coalesce(a.original_filename, '')) ~ $2)",
+    )
+    .bind(&entities)
+    .bind(&pattern)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect();
+    let from_code: Vec<Uuid> = open
+        .iter()
+        .filter(|(_, a, b, ..)| code_only.contains(a) && code_only.contains(b))
+        .map(|(id, ..)| *id)
+        .collect();
+    closed += dismiss(pool, &from_code, "source-code").await?;
+    Ok(closed)
+}
+
+async fn dismiss(pool: &PgPool, ids: &[Uuid], why: &str) -> anyhow::Result<u64> {
+    if ids.is_empty() {
         return Ok(0);
     }
     let done = sqlx::query(
         "UPDATE review_queue SET state = 'dismissed', \
-                signals = signals || '{\"dismissed_by\": \"name-gate\"}'::jsonb \
+                signals = signals || jsonb_build_object('dismissed_by', $2::text) \
          WHERE id = ANY($1) AND state = 'open'",
     )
-    .bind(&noise)
+    .bind(ids)
+    .bind(why)
     .execute(pool)
     .await?
     .rows_affected();
     tracing::info!(
         dismissed = done,
-        "closed tray items about pairs that are not names"
+        why,
+        "closed tray items about pairs not worth asking"
     );
     Ok(done)
 }

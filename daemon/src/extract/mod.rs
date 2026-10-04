@@ -687,6 +687,30 @@ pub(crate) async fn load_chunks(
     Ok(chunks)
 }
 
+/// The artifacts among `chunks` that are source-code files, whose comments
+/// aren't read for statements (see `Config::extract_source_code`). Their
+/// chunks are still stamped as read, so they leave the queue.
+pub(crate) async fn source_code_artifacts(
+    pool: &PgPool,
+    config: &Config,
+    chunks: &[Chunk],
+) -> anyhow::Result<std::collections::HashSet<Uuid>> {
+    if config.extract_source_code || chunks.is_empty() {
+        return Ok(Default::default());
+    }
+    let ids: Vec<Uuid> = chunks.iter().map(|c| c.artifact_id).collect();
+    let names: Vec<(Uuid, Option<String>)> =
+        sqlx::query_as("SELECT id, original_filename FROM artifacts WHERE id = ANY($1)")
+            .bind(&ids)
+            .fetch_all(pool)
+            .await?;
+    Ok(names
+        .into_iter()
+        .filter(|(_, name)| name.as_deref().is_some_and(worth::is_source_code_file))
+        .map(|(id, _)| id)
+        .collect())
+}
+
 async fn process_unit_chunks(
     pool: &PgPool,
     config: &Config,
@@ -698,13 +722,18 @@ async fn process_unit_chunks(
     // present, env config otherwise.
     let live = LiveThresholds::load(pool, config).await?;
     let mut stats = ChunkStats::default();
+    let source_files = source_code_artifacts(pool, config, &chunks).await?;
     for chunk in &chunks {
         // Code, data tables and rows of figures aren't read for statements:
         // they match sentence shapes without saying anything. They are blanked
         // out (same length, so offsets still point into the chunk) and the
         // prose around them is read as usual. A chunk with no prose is still
         // stamped as read, so it isn't looked at again.
-        let readable = worth::readable(&chunk.text);
+        let readable = if source_files.contains(&chunk.artifact_id) {
+            None
+        } else {
+            worth::readable(&chunk.text)
+        };
         let mut units: Vec<(rules::ExtractedUnit, &'static str, Option<String>)> = match &readable {
             Some(text) => rules::extract_units(text)
                 .into_iter()
