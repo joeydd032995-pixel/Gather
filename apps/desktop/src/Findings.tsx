@@ -145,70 +145,72 @@ export default function Findings({
           onChange={setKind}
         />
       </Toolbar>
-      {error && (
-        <div className="view-callout">
-          <Callout title="Couldn't load what Gather found">{error}</Callout>
-        </div>
-      )}
-      {items === null && !error && <Skeleton rows={6} />}
-      {items !== null && items.length === 0 && (
-        <EmptyState
-          icon={filtered ? SearchX : Sparkles}
-          title={filtered ? "No statements match" : "Nothing learned yet"}
-        >
-          {filtered
-            ? "Try other words, or look at all kinds."
-            : "Statements appear here as Gather reads your files. Add some from the Library."}
-        </EmptyState>
-      )}
-      {items !== null && items.length > 0 && (
-        <div className="findings">
-          <p className="hint findings-count">
-            Showing {items.length} of {plural(total, "statement")}
-            {filtered ? " matching" : ""}, newest first.
-          </p>
-          <ul className="units findings-list">
-            {items.map((u) => (
-              <li key={u.id} className="unit finding">
-                <KindTag kind={u.kind} />
-                <div className="finding-body">
-                  <span className="unit-text">{u.statement}</span>
-                  <span className="finding-meta">
-                    {u.source_artifact_id ? (
-                      <button
-                        type="button"
-                        className="finding-source"
-                        onClick={() => onOpenFile(u.source_artifact_id!)}
-                        title="Open this file in the Library"
-                      >
-                        <FileText aria-hidden />
-                        {u.source_name || "Untitled file"}
-                      </button>
-                    ) : (
-                      <span className="finding-source none">No file</span>
-                    )}
-                    {u.created_at && (
-                      <When iso={u.created_at} className="hint" />
-                    )}
-                  </span>
-                </div>
-              </li>
-            ))}
-          </ul>
-          {hasMore && (
-            <div className="findings-more">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={loadMore}
-                loading={loadingMore}
-              >
-                Show more
-              </Button>
-            </div>
-          )}
-        </div>
-      )}
+      <div className="page">
+        {error && (
+          <div className="view-callout">
+            <Callout title="Couldn't load what Gather found">{error}</Callout>
+          </div>
+        )}
+        {items === null && !error && <Skeleton rows={6} />}
+        {items !== null && items.length === 0 && (
+          <EmptyState
+            icon={filtered ? SearchX : Sparkles}
+            title={filtered ? "No statements match" : "Nothing learned yet"}
+          >
+            {filtered
+              ? "Try other words, or look at all kinds."
+              : "Statements appear here as Gather reads your files. Add some from the Library."}
+          </EmptyState>
+        )}
+        {items !== null && items.length > 0 && (
+          <div className="findings">
+            <p className="hint findings-count">
+              Showing {items.length} of {plural(total, "statement")}
+              {filtered ? " matching" : ""}, newest first.
+            </p>
+            <ul className="units findings-list">
+              {items.map((u) => (
+                <li key={u.id} className="unit finding">
+                  <KindTag kind={u.kind} />
+                  <div className="finding-body">
+                    <span className="unit-text">{u.statement}</span>
+                    <span className="finding-meta">
+                      {u.source_artifact_id ? (
+                        <button
+                          type="button"
+                          className="finding-source"
+                          onClick={() => onOpenFile(u.source_artifact_id!)}
+                          title="Open this file in the Library"
+                        >
+                          <FileText aria-hidden />
+                          {u.source_name || "Untitled file"}
+                        </button>
+                      ) : (
+                        <span className="finding-source none">No file</span>
+                      )}
+                      {u.created_at && (
+                        <When iso={u.created_at} className="hint" />
+                      )}
+                    </span>
+                  </div>
+                </li>
+              ))}
+            </ul>
+            {hasMore && (
+              <div className="findings-more">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={loadMore}
+                  loading={loadingMore}
+                >
+                  Show more
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </>
   );
 }
