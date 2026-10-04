@@ -198,6 +198,8 @@ pub struct UnitListParams {
     /// Only units that still count as knowledge (`active` or `disputed`).
     #[serde(default)]
     pub live: bool,
+    /// Only units whose statement contains this text (case-insensitive).
+    pub q: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
@@ -209,6 +211,10 @@ pub async fn list_atomic_units(
     let limit = clamp_limit(params.limit, 50, 500);
     let offset = params.offset.unwrap_or(0).max(0);
 
+    let text = params.q.as_deref().map(str::trim).filter(|q| !q.is_empty());
+
+    // `source_*` is the first file the statement came from, so a list across
+    // every file can say where each one was found.
     let rows = sqlx::query(
         r#"
         SELECT u.id, u.kind::text AS kind, u.statement, u.confidence,
@@ -216,8 +222,18 @@ pub async fn list_atomic_units(
                u.valid_from, u.valid_to, u.status::text AS status,
                u.subject_entity_id, u.superseded_by_unit_id, u.created_at,
                (SELECT count(*) FROM atomic_unit_provenance p
-                WHERE p.atomic_unit_id = u.id) AS provenance_count
+                WHERE p.atomic_unit_id = u.id) AS provenance_count,
+               src.artifact_id AS source_artifact_id,
+               src.original_filename AS source_name
         FROM atomic_units u
+        LEFT JOIN LATERAL (
+            SELECT p.artifact_id, a.original_filename
+            FROM atomic_unit_provenance p
+            JOIN artifacts a ON a.id = p.artifact_id
+            WHERE p.atomic_unit_id = u.id
+            ORDER BY p.created_at, p.id
+            LIMIT 1
+        ) src ON true
         WHERE ($1::unit_kind IS NULL OR u.kind = $1::unit_kind)
           AND ($2::unit_status IS NULL OR u.status = $2::unit_status)
           AND ($3::uuid IS NULL OR u.subject_entity_id = $3)
@@ -225,7 +241,8 @@ pub async fn list_atomic_units(
                 SELECT 1 FROM atomic_unit_provenance p
                 WHERE p.atomic_unit_id = u.id AND p.artifact_id = $6))
           AND (NOT $7 OR u.status IN ('active', 'disputed'))
-        ORDER BY u.created_at DESC
+          AND ($8::text IS NULL OR strpos(lower(u.statement), lower($8)) > 0)
+        ORDER BY u.created_at DESC, u.id
         LIMIT $4 OFFSET $5
         "#,
     )
@@ -236,12 +253,44 @@ pub async fn list_atomic_units(
     .bind(offset)
     .bind(params.artifact_id)
     .bind(params.live)
+    .bind(text)
     .fetch_all(&state.pool)
     .await?;
 
-    let items: Vec<Value> = rows.iter().map(unit_row_to_json).collect();
+    let total: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM atomic_units u
+        WHERE ($1::unit_kind IS NULL OR u.kind = $1::unit_kind)
+          AND ($2::unit_status IS NULL OR u.status = $2::unit_status)
+          AND ($3::uuid IS NULL OR u.subject_entity_id = $3)
+          AND ($4::uuid IS NULL OR EXISTS (
+                SELECT 1 FROM atomic_unit_provenance p
+                WHERE p.atomic_unit_id = u.id AND p.artifact_id = $4))
+          AND (NOT $5 OR u.status IN ('active', 'disputed'))
+          AND ($6::text IS NULL OR strpos(lower(u.statement), lower($6)) > 0)
+        "#,
+    )
+    .bind(&params.kind)
+    .bind(&params.status)
+    .bind(params.subject_entity_id)
+    .bind(params.artifact_id)
+    .bind(params.live)
+    .bind(text)
+    .fetch_one(&state.pool)
+    .await?;
+
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            let mut unit = unit_row_to_json(row);
+            unit["source_artifact_id"] = json!(row.get::<Option<Uuid>, _>("source_artifact_id"));
+            unit["source_name"] = json!(row.get::<Option<String>, _>("source_name"));
+            unit
+        })
+        .collect();
     Ok(Json(
-        json!({ "items": items, "limit": limit, "offset": offset }),
+        json!({ "items": items, "total": total, "limit": limit, "offset": offset }),
     ))
 }
 

@@ -7,6 +7,7 @@ import {
   Inbox,
   Layers,
   Library,
+  Sparkles,
   Settings,
   SlidersHorizontal,
   Waypoints,
@@ -16,6 +17,7 @@ import {
 export type Tab =
   | "home"
   | "library"
+  | "findings"
   | "projects"
   | "graph"
   | "review"
@@ -49,6 +51,12 @@ export const NAV: NavGroup[] = [
     label: "Explore",
     items: [
       { id: "library", label: "Library", icon: Library, hint: "Browse and search everything" },
+      {
+        id: "findings",
+        label: "What Gather found",
+        icon: Sparkles,
+        hint: "Every statement Gather learned, across all files",
+      },
       {
         id: "projects",
         label: "Projects",

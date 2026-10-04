@@ -143,6 +143,29 @@ async fn library_views_follow_an_upload_through_extraction() {
         "{statements:?}"
     );
 
+    // The list across every file: filter by text (case-insensitively), say
+    // which file each statement came from, and count what matches.
+    let (_, found) = get_json(
+        &app,
+        &format!("/api/v1/atomic-units?live=true&q={}", tool.to_uppercase()),
+    )
+    .await;
+    let found_items = found["items"].as_array().unwrap();
+    assert!(!found_items.is_empty(), "{found}");
+    assert_eq!(found["total"].as_i64().unwrap(), found_items.len() as i64);
+    for u in found_items {
+        assert!(u["statement"].as_str().unwrap().contains(&tool), "{u}");
+    }
+    assert!(
+        found_items.iter().any(
+            |u| u["source_artifact_id"] == id.as_str() && u["source_name"] == filename.as_str()
+        ),
+        "{found}"
+    );
+    let (_, none) = get_json(&app, "/api/v1/atomic-units?live=true&q=zzzznomatch9x").await;
+    assert_eq!(none["total"], 0);
+    assert!(none["items"].as_array().unwrap().is_empty());
+
     // Content: the document's segments, in order, paged.
     let (status, content) = get_json(&app, &format!("/api/v1/artifacts/{id}/content")).await;
     assert_eq!(status, StatusCode::OK);

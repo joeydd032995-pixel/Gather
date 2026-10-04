@@ -952,7 +952,7 @@ dependencies = [
 
 [[package]]
 name = "gather-desktop"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "dunce",
  "getrandom 0.3.4",

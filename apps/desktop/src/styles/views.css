@@ -2145,3 +2145,57 @@ button.tree-row:focus-visible .tree-go {
 .setting-path {
   word-break: break-all;
 }
+
+/* What Gather found: every statement, across all files. */
+.findings {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: var(--s-4) var(--s-6) var(--s-10);
+}
+.findings-count {
+  margin: 0 0 var(--s-3);
+}
+.finding-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.finding-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  font-size: var(--t-xs);
+}
+.finding-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.finding-source svg {
+  flex: none;
+  width: 12px;
+  height: 12px;
+}
+.finding-source:hover:not(.none) {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.finding-source.none {
+  color: var(--text-3);
+  cursor: default;
+}
+.findings-more {
+  padding-top: var(--s-3);
+}
