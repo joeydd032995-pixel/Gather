@@ -20,7 +20,9 @@ use crate::decide::live::LiveThresholds;
 use crate::decide::{best_score, MergeSignals};
 use crate::entities::merge::unmerge_for_supersession_in;
 use crate::entities::merge_entities_in;
-use crate::entities::similarity::{features_similarity, name_similarity, NameFeatures};
+use crate::entities::similarity::{
+    features_similarity, name_similarity, names_comparable, NameFeatures,
+};
 use crate::safety::certificate::{Decision, InferenceCertificate, Predicate};
 use crate::safety::identity::{
     choose_survivor, plan, EntityRecord, IdentityConfig, IdentityPlan, Link, PairEvidence,
@@ -126,6 +128,9 @@ async fn load_evidence(
     let features: Vec<NameFeatures> = records.iter().map(|r| NameFeatures::new(&r.name)).collect();
     for (i, a) in records.iter().enumerate() {
         for (j, b) in records.iter().enumerate().skip(i + 1) {
+            if !names_comparable(&a.name, &b.name) {
+                continue;
+            }
             let text = features_similarity(&features[i], &features[j]);
             if text >= threshold {
                 out.push(PairEvidence {
@@ -142,33 +147,51 @@ async fn load_evidence(
     }
     let ids: Vec<Uuid> = records.iter().map(|r| r.id).collect();
     let names: HashMap<Uuid, &str> = records.iter().map(|r| (r.id, r.name.as_str())).collect();
-    let cosine: Vec<(Uuid, Uuid, f32)> = sqlx::query_as(
-        "WITH e AS MATERIALIZED ( \
-             SELECT id, embedding FROM entities \
-             WHERE id = ANY($1) AND embedding IS NOT NULL \
-         ) \
-         SELECT a.id, b.id, (1 - (a.embedding <=> b.embedding))::float4 \
-         FROM e a JOIN e b ON a.id < b.id \
-         WHERE (a.embedding <=> b.embedding) <= $2 \
-         ORDER BY a.embedding <=> b.embedding, a.id, b.id LIMIT 5000",
-    )
-    .bind(&ids)
-    .bind((1.0 - f64::from(threshold)).clamp(0.0, 1.0))
-    .fetch_all(pool)
-    .await?;
-    for (a, b, c) in cosine {
-        if c < threshold {
-            continue;
+    // The name gate runs here rather than in SQL, so page through the closest
+    // pairs until the budget is filled with *comparable* ones: noise ranked
+    // above real duplicates must not use it up.
+    const PAGE: i64 = 5_000;
+    const SCAN_CAP: i64 = 50_000;
+    let max_distance = (1.0 - f64::from(threshold)).clamp(0.0, 1.0);
+    let mut kept = 0usize;
+    let mut offset = 0i64;
+    loop {
+        let page: Vec<(Uuid, Uuid, f32)> = sqlx::query_as(
+            "WITH e AS MATERIALIZED ( \
+                 SELECT id, embedding FROM entities \
+                 WHERE id = ANY($1) AND embedding IS NOT NULL \
+             ) \
+             SELECT a.id, b.id, (1 - (a.embedding <=> b.embedding))::float4 \
+             FROM e a JOIN e b ON a.id < b.id \
+             WHERE (a.embedding <=> b.embedding) <= $2 \
+             ORDER BY a.embedding <=> b.embedding, a.id, b.id LIMIT $3 OFFSET $4",
+        )
+        .bind(&ids)
+        .bind(max_distance)
+        .bind(PAGE)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
+        let fetched = page.len() as i64;
+        for (a, b, c) in page {
+            if c < threshold || !names_comparable(names[&a], names[&b]) {
+                continue;
+            }
+            kept += 1;
+            out.push(PairEvidence {
+                a,
+                b,
+                signals: MergeSignals {
+                    cosine: Some(c),
+                    text: Some(name_similarity(names[&a], names[&b])),
+                },
+                method: "embedding:cosine".into(),
+            });
         }
-        out.push(PairEvidence {
-            a,
-            b,
-            signals: MergeSignals {
-                cosine: Some(c),
-                text: Some(name_similarity(names[&a], names[&b])),
-            },
-            method: "embedding:cosine".into(),
-        });
+        offset += fetched;
+        if fetched < PAGE || kept >= PAGE as usize || offset >= SCAN_CAP {
+            break;
+        }
     }
     Ok(out)
 }
@@ -317,6 +340,94 @@ async fn detach(
         }
     }
     Ok(())
+}
+
+/// Close tray items that ask about a pair no longer worth asking about
+/// (code-comment fragments, filler, opposites): ones parked before names were
+/// checked would otherwise sit in the tray until someone dismissed each by
+/// hand.
+async fn dismiss_noise_pairs(pool: &PgPool) -> anyhow::Result<u64> {
+    // Names come straight from `entities`: the pass itself only loads the
+    // first LIVE_CAP, and a parked pair outside that window must still close.
+    let open: Vec<(Uuid, Uuid, Uuid, String, String)> = sqlx::query_as(
+        "SELECT q.id, a.id, b.id, a.name, b.name FROM review_queue q \
+         JOIN entities a ON a.id::text = q.signals->>'a' \
+         JOIN entities b ON b.id::text = q.signals->>'b' \
+         WHERE q.state = 'open' AND q.target_kind = 'entity' AND q.reason = 'merge-band'",
+    )
+    .fetch_all(pool)
+    .await?;
+    if open.is_empty() {
+        return Ok(0);
+    }
+    let mut closed = 0;
+
+    // Pairs about things that aren't names (comment fragments, filler, opposites).
+    let noise: Vec<Uuid> = open
+        .iter()
+        .filter(|(_, _, _, a, b)| !names_comparable(a, b))
+        .map(|(id, ..)| *id)
+        .collect();
+    closed += dismiss(pool, &noise, "name-gate").await?;
+
+    // Pairs where both entities were learned only from source-code files,
+    // whose comments are no longer read for statements.
+    let entities: Vec<Uuid> = open.iter().flat_map(|(_, a, b, ..)| [*a, *b]).collect();
+    let pattern = format!(
+        "\\.({})$",
+        crate::extract::worth::SOURCE_EXTENSIONS.join("|")
+    );
+    let code_only: std::collections::HashSet<Uuid> = sqlx::query_scalar(
+        "SELECT x.entity_id FROM ( \
+           SELECT subject_entity_id AS entity_id, id AS unit_id FROM atomic_units \
+           WHERE subject_entity_id = ANY($1) AND status <> 'retracted' \
+           UNION \
+           SELECT source_entity_id, atomic_unit_id FROM relationships \
+           WHERE source_entity_id = ANY($1) AND atomic_unit_id IS NOT NULL AND status = 'active' \
+           UNION \
+           SELECT target_entity_id, atomic_unit_id FROM relationships \
+           WHERE target_entity_id = ANY($1) AND atomic_unit_id IS NOT NULL AND status = 'active' \
+         ) x \
+         JOIN atomic_unit_provenance p ON p.atomic_unit_id = x.unit_id \
+         JOIN artifacts a ON a.id = p.artifact_id AND a.retracted_at IS NULL \
+         GROUP BY x.entity_id \
+         HAVING bool_and(lower(coalesce(a.original_filename, '')) ~ $2)",
+    )
+    .bind(&entities)
+    .bind(&pattern)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect();
+    let from_code: Vec<Uuid> = open
+        .iter()
+        .filter(|(_, a, b, ..)| code_only.contains(a) && code_only.contains(b))
+        .map(|(id, ..)| *id)
+        .collect();
+    closed += dismiss(pool, &from_code, "source-code").await?;
+    Ok(closed)
+}
+
+async fn dismiss(pool: &PgPool, ids: &[Uuid], why: &str) -> anyhow::Result<u64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let done = sqlx::query(
+        "UPDATE review_queue SET state = 'dismissed', \
+                signals = signals || jsonb_build_object('dismissed_by', $2::text) \
+         WHERE id = ANY($1) AND state = 'open'",
+    )
+    .bind(ids)
+    .bind(why)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    tracing::info!(
+        dismissed = done,
+        why,
+        "closed tray items about pairs not worth asking"
+    );
+    Ok(done)
 }
 
 pub async fn entity_resolution_pass(
@@ -475,6 +586,8 @@ pub async fn entity_resolution_pass(
         None,
     )
     .await?;
+
+    dismiss_noise_pairs(pool).await?;
 
     // A pair held earlier may have just been merged: close stale tray items.
     if !merged_away.is_empty() {

@@ -910,3 +910,66 @@ async fn withdrawal_during_extraction_cannot_create_claims() {
         .await
         .unwrap();
 }
+
+/// Comments in source code read like sentences but say nothing worth keeping
+/// (and filled a real review tray with fragments). The file is stored and
+/// searchable and counts as read; prose files are extracted as usual.
+#[tokio::test]
+async fn source_code_is_stored_but_its_comments_are_not_read_for_statements() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let app = routes::build_router(state.clone());
+    let marker = Uuid::new_v4().simple().to_string();
+    let prose = format!(
+        "I use PostgreSQL{marker} for storage.\nWe decided on Hetzner{marker} for the backup target.\n"
+    );
+    let code = format!(
+        "// {}// {}fn main() {{}}\n",
+        prose.replace('\n', "\n// "),
+        ""
+    );
+    let code_name = format!("notes-{marker}.rs");
+    let prose_name = format!("notes-{marker}.md");
+    for (name, ctype, text) in [
+        (&code_name, "text/plain", code.as_str()),
+        (&prose_name, "text/markdown", prose.as_str()),
+    ] {
+        delete_fixture_artifact(&state, name).await;
+        let res = app
+            .clone()
+            .oneshot(multipart_request(name, ctype, text.as_bytes()))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED, "{name}");
+    }
+    drain_extraction(&state).await;
+
+    let units = |name: String| {
+        let pool = state.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(DISTINCT p.atomic_unit_id) FROM atomic_unit_provenance p \
+                 JOIN artifacts a ON a.id = p.artifact_id WHERE a.original_filename = $1",
+            )
+            .bind(name)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(units(code_name.clone()).await, 0, "no statements from code");
+    assert!(units(prose_name).await >= 1, "prose is still read");
+
+    // The code file is stored, its text searchable, and it counts as read.
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM document_segments s JOIN documents d ON d.id = s.document_id \
+         JOIN artifacts a ON a.id = d.artifact_id \
+         WHERE a.original_filename = $1 AND s.units_extracted_at IS NOT NULL",
+    )
+    .bind(&code_name)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert!(stored >= 1, "the file's text is stored and stamped as read");
+}

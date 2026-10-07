@@ -207,11 +207,17 @@ pub async fn run_pass(
         model: stored_model(model),
     };
     let stored = stored_model(model);
+    let source_files = super::source_code_artifacts(pool, config, &chunks).await?;
     for chunk in &chunks {
         // Code and data aren't read for statements (see worth.rs): they are
         // blanked out, and a chunk with no prose is counted as read with
         // nothing to store, sparing the model the call.
-        let answer = match super::worth::readable(&chunk.text) {
+        let readable = if source_files.contains(&chunk.artifact_id) {
+            None
+        } else {
+            super::worth::readable(&chunk.text)
+        };
+        let answer = match readable {
             Some(text) => {
                 let asked = std::time::Instant::now();
                 let answer = client.extract(&text).await;
