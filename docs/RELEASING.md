@@ -18,21 +18,21 @@ Pushing a `v*` tag builds the installers for Windows, macOS and Linux and publis
    commit and push the tag. Pushing the tag publishes automatically after all CI
    gates and packaged desktop lifecycle tests succeed.
 
-### Prepared v0.1.11 release
+### Prepared v0.1.12 release
 
-After merging the v0.1.11 preparation PR, run from a clean checkout:
+After merging the v0.1.12 preparation PR, run from a clean checkout:
 
 ```bash
 git switch main
 git pull --ff-only origin main
 python3 scripts/check-release-version.py
-git tag v0.1.11
-git push origin v0.1.11
+git tag v0.1.12
+git push origin v0.1.12
 ```
 
 Alternatively, use GitHub's **Releases → Draft a new release**, enter a new
-`v0.1.11` tag targeting the merged `main`, and copy
-[the prepared notes](releases/v0.1.11.md). Publishing creates the tag and starts
+`v0.1.12` tag targeting the merged `main`, and copy
+[the prepared notes](releases/v0.1.12.md). Publishing creates the tag and starts
 CI; installers and checksums appear only after the workflow succeeds.
 Pushing the tag from Git avoids publishing the release page before its assets
 are ready.
