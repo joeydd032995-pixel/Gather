@@ -18,9 +18,10 @@
     "The eval measures what is STORED: the extractor's output after the quality gate",
     "(extract/worth.rs). The junk-* cases (arithmetic, code, table rows, questions,",
     "filler, fragments) fit a sentence shape without saying anything, and must produce",
-    "nothing."
+    "nothing.",
+    "Cases from decision-settled-on onward cover the widened rule set: more ways of recording a choice, the verbs people use for what they run and where they keep it, rules they hold themselves to (\"I won't use X\" - a preference that asserts no edge), and spoken openers (\"Basically I use X\") stripped before matching. hedge-is-not-an-opener holds the line that a hedge is never stripped: doing so would state a possibility as a fact."
   ],
-  "threshold_precision": 0.90,
+  "threshold_precision": 0.9,
   "cases": [
     {
       "name": "decision-clean",
@@ -176,6 +177,127 @@
         { "kind": "claim", "statement": "Budget is $40,000", "subject": "Budget" },
         { "kind": "claim", "statement": "The budget is $1,000,000", "subject": "budget" }
       ]
+    },
+    {
+      "name": "decision-settled-on",
+      "input": "We settled on Hetzner CX22 for the backup target.",
+      "expected": [
+        { "kind": "decision", "statement": "We settled on Hetzner CX22 for the backup target", "subject": "Me" }
+      ]
+    },
+    {
+      "name": "decision-committed-to",
+      "input": "We committed to Postgres for the knowledge store.",
+      "expected": [
+        { "kind": "decision", "statement": "We committed to Postgres for the knowledge store", "subject": "Me" }
+      ]
+    },
+    {
+      "name": "decision-switched-from-to",
+      "input": "I switched from MySQL to Postgres for the knowledge store.",
+      "expected": [
+        { "kind": "decision", "statement": "I switched from MySQL to Postgres for the knowledge store", "subject": "Me" }
+      ]
+    },
+    {
+      "name": "first-person-run-and-keep",
+      "input": "I run the daemon on a Hetzner box. I keep backups on an external drive.",
+      "expected": [
+        { "kind": "fact", "statement": "I run the daemon on a Hetzner box", "subject": "Me" },
+        { "kind": "fact", "statement": "I keep backups on an external drive", "subject": "Me" }
+      ]
+    },
+    {
+      "name": "first-person-host-store-deploy",
+      "input": "We deploy Gather with systemd. I host the site on a Hetzner box. I store receipts in a folder per year.",
+      "expected": [
+        { "kind": "fact", "statement": "We deploy Gather with systemd", "subject": "Me" },
+        { "kind": "fact", "statement": "I host the site on a Hetzner box", "subject": "Me" },
+        { "kind": "fact", "statement": "I store receipts in a folder per year", "subject": "Me" }
+      ]
+    },
+    {
+      "name": "constraint-must-not",
+      "input": "I must not store customer data in the US.",
+      "expected": [
+        { "kind": "preference", "statement": "I must not store customer data in the US", "subject": "Me" }
+      ]
+    },
+    {
+      "name": "constraint-will-not",
+      "input": "I won't use Google Analytics on any site.",
+      "expected": [
+        { "kind": "preference", "statement": "I won't use Google Analytics on any site", "subject": "Me" }
+      ]
+    },
+    {
+      "name": "constraint-never-with-an-unlisted-verb",
+      "input": "I never commit secrets to the repository.",
+      "expected": [
+        { "kind": "preference", "statement": "I never commit secrets to the repository", "subject": "Me" }
+      ]
+    },
+    {
+      "name": "discourse-prefix-first-person",
+      "input": "Basically I use PostgreSQL for the knowledge store.",
+      "expected": [
+        { "kind": "fact", "statement": "I use PostgreSQL for the knowledge store", "subject": "Me" }
+      ]
+    },
+    {
+      "name": "discourse-prefix-decision",
+      "input": "Yeah, we settled on Hetzner CX22 for the backup target.",
+      "expected": [
+        { "kind": "decision", "statement": "we settled on Hetzner CX22 for the backup target", "subject": "Me" }
+      ]
+    },
+    {
+      "name": "discourse-prefix-numeric",
+      "input": "Honestly, the budget is $40,000.",
+      "expected": [
+        { "kind": "claim", "statement": "the budget is $40,000", "subject": "budget" }
+      ]
+    },
+    {
+      "name": "discourse-prefix-temporal",
+      "input": "So on 2026-04-01 I migrated the database to pgvector.",
+      "expected": [
+        { "kind": "event", "statement": "on 2026-04-01 I migrated the database to pgvector", "subject": null }
+      ]
+    },
+    {
+      "name": "marker-as-noun-keeps-its-subject",
+      "input": "Well is 40 metres.",
+      "expected": [
+        { "kind": "claim", "statement": "Well is 40 metres", "subject": "Well" }
+      ]
+    },
+    {
+      "name": "hedge-is-not-an-opener",
+      "input": "Maybe I use Postgres for the backend.",
+      "expected": []
+    },
+    {
+      "name": "decision-committed-to-a-plan",
+      "input": "We committed to a master plan for the migration.",
+      "expected": [
+        { "kind": "decision", "statement": "We committed to a master plan for the migration", "subject": "Me" }
+      ]
+    },
+    {
+      "name": "adversarial-committed-to-a-branch",
+      "input": "I committed to main before lunch.",
+      "expected": []
+    },
+    {
+      "name": "adversarial-run-into",
+      "input": "I run into trouble with the installer.",
+      "expected": []
+    },
+    {
+      "name": "adversarial-vacuous-constraint",
+      "input": "We can't do that right now.",
+      "expected": []
     }
   ]
 }

@@ -200,7 +200,7 @@ trailing `.!?`, so a golden statement only has to agree on wording, not formatti
 
 - **precision = usable_produced / produced** — the automatable analogue of the write-up's
   "≥70% of sampled units judged usable" gate. This is the number the test asserts on
-  (`threshold_precision` in the JSON, currently `0.70`).
+  (`threshold_precision` in the JSON, currently `0.90`).
 - **recall = matched_expected / expected** — informational only. The rules are
   high-precision/low-recall by design (Ollama supplements them when enabled), so recall is *not*
   gated; it is printed to make coverage regressions visible.
@@ -211,21 +211,40 @@ that produce an **unusable** unit (these are what cost precision), and facts the
 
 ```
 ── extraction quality (rule-based, offline) ──
-cases:       13
-produced:    12  (usable 10, spurious 2)
-labelled:    12  (found 10)
-precision:   83.3%  (gate ≥ 70%)
-recall:      83.3%  (informational — rules are high-precision/low-recall)
+cases:       41
+produced:    35  (usable 35, spurious 0)
+labelled:    37  (found 35)
+precision:   100.0%  (gate ≥ 90%)
+recall:      94.6%  (informational — rules are high-precision/low-recall)
 ```
 
 ### Baseline
 
-At the corpus's current 13 cases the rule extractor scores **83.3% precision, 83.3% recall**. The
-two precision misses are the intentional adversarial-vacuous cases ("I have no idea what to do
-next", "We decided to think about it later"); the two recall misses are the intentional
-implicit/third-person facts the deterministic patterns don't reach. That leaves ~13 points of
-head-room above the 70% gate, so an ordinary refactor won't trip it, but a change that starts
-emitting vacuous units will.
+At the corpus's current 41 cases the rule extractor scores **100% precision, 94.6% recall**. The
+two recall misses are the intentional implicit/third-person facts the deterministic patterns
+don't reach (`recall-miss-implicit-fact`, `recall-miss-third-person-fact`) — they are what the
+Ollama path is for. Every adversarial case now produces nothing, which is the point of them:
+they are the cases that go red first when a pattern is widened too far.
+
+Widening the rules (settled on / committed to / switched from, the verbs for what you run and
+where you keep it, "I won't use X", and dropping spoken openers) moved this corpus from
+**95.2% precision / 54.1% recall** to **100% / 94.6%**. Two of those points of precision came
+from guards added alongside the patterns rather than from the patterns themselves: without the
+version-control guard "I committed to main before lunch" scores as a decision (97.2% / 94.6%),
+and without dropping the opener "Honestly, the budget is $40,000" is stored under the subject
+"Honestly, the budget".
+
+### The model path — `llm_structural_gate_keeps_statements_and_drops_the_rest`
+
+The same test file carries a second, smaller scorer for the gate that applies to **Ollama** units
+only (`worth::structural_ok`, called from `extract/ollama.rs`), over
+`daemon/tests/fixtures/llm_statements.json`. The rule extractor copies a sentence out of the
+text, so it is a sentence already; a model writes its own prose and can hand back a heading, a
+fragment or half a sentence. `keep` holds statements a model plausibly returns that must survive
+— including short ones ("I use Rust.") and hedged ones ("is considering") — and `drop` holds the
+shapes that are not statements. Both sides must be perfect; it currently scores **10/10 kept,
+11/11 dropped**. Add to `keep` whenever a gate change costs a real statement, and to `drop`
+whenever a non-statement gets through.
 
 ### Extending the corpus
 
@@ -234,8 +253,13 @@ or badly. Write each `expected` statement as the **full sentence the extractor r
 trailing punctuation stripped) with the `kind` the rule assigns (`decision`, `fact`, `preference`,
 `event`, `claim`). To pin a *precision* case, add an adversarial input with `expected: []`; to
 track a known *recall* gap, add the input with its usable unit in `expected` and let it show up as a
-miss until a pattern (or Ollama) covers it. Keep `threshold_precision` at 0.70 unless the release
+miss until a pattern (or Ollama) covers it. Keep `threshold_precision` at 0.90 unless the release
 gate itself moves.
+
+When you widen a pattern, add the adversarial case in the same change: the input where the new
+wording means something else ("I committed to main" for `committed to`, "Well is 40 metres" for
+the spoken-opener stripper, "Maybe I use Postgres" for the hedge that must never be stripped).
+A widening measured only on the inputs it was written for measures nothing.
 
 ### How it relates to §2
 

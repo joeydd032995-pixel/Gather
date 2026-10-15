@@ -10,7 +10,7 @@
 //! needs no database and no Ollama.
 
 use gather_daemon::extract::rules::{extract_units, ExtractedUnit};
-use gather_daemon::extract::worth::{readable, unit_worth_keeping};
+use gather_daemon::extract::worth::{readable, structural_ok, unit_worth_keeping};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -173,5 +173,55 @@ fn rule_extractor_meets_precision_gate() {
         "extraction precision {:.1}% is below the {:.0}% gate",
         precision * 100.0,
         golden.threshold_precision * 100.0
+    );
+}
+
+#[derive(Deserialize)]
+struct LlmStatements {
+    keep: Vec<String>,
+    drop: Vec<String>,
+}
+
+/// The second half of the gate: what the *model* path keeps. The rule
+/// extractor copies a sentence out of the text, so it is a sentence already;
+/// a model writes its own prose, and `structural_ok` is the only thing
+/// standing between a heading or half a sentence and a stored unit. Scored
+/// the same way as the corpus above so a change to it can't quietly start
+/// costing facts (or quietly stop catching fragments).
+#[test]
+fn llm_structural_gate_keeps_statements_and_drops_the_rest() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/llm_statements.json"
+    );
+    let raw = std::fs::read_to_string(path).expect("read llm statements");
+    let fixture: LlmStatements = serde_json::from_str(&raw).expect("parse llm statements");
+
+    let kept: Vec<&String> = fixture.keep.iter().filter(|s| structural_ok(s)).collect();
+    let dropped: Vec<&String> = fixture.drop.iter().filter(|s| !structural_ok(s)).collect();
+
+    eprintln!("── llm structural gate ──");
+    eprintln!("statements kept:   {}/{}", kept.len(), fixture.keep.len());
+    eprintln!(
+        "non-statements dropped: {}/{}",
+        dropped.len(),
+        fixture.drop.len()
+    );
+    for s in fixture.keep.iter().filter(|s| !structural_ok(s)) {
+        eprintln!("  lost a statement: {s:?}");
+    }
+    for s in fixture.drop.iter().filter(|s| structural_ok(s)) {
+        eprintln!("  let through:      {s:?}");
+    }
+
+    assert_eq!(
+        kept.len(),
+        fixture.keep.len(),
+        "the gate dropped a statement a model should be allowed to return"
+    );
+    assert_eq!(
+        dropped.len(),
+        fixture.drop.len(),
+        "the gate let through something that is not a statement"
     );
 }

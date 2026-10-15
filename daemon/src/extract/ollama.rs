@@ -67,8 +67,15 @@ Respond with JSON only: {\"units\": [{\"kind\": \"fact|claim|decision|preference
 \"statement\": \"self-contained statement\", \"subject\": \"entity the statement is about\", \
 \"objects\": [{\"name\": \"entity\", \"relation\": \"snake_case_relation\"}], \
 \"evidence_span\": \"verbatim quote from the text\", \"confidence\": 0.0}]}. \
-Statements must be self-contained and dated where possible. \
-evidence_span MUST be copied verbatim from the input. No commentary.";
+Rules: one fact per unit, and split a sentence that states two. \
+Each statement must be a whole sentence that stands on its own, with every \
+pronoun replaced by the thing it refers to, dated where the text gives a date. \
+Never write a heading, a fragment, a question or an instruction as a statement. \
+Keep the author\'s hedging: \"might\", \"plans to\", \"is considering\" and \
+\"decided against\" must survive into the statement, never be stated as fact. \
+Take nothing from code, configuration, logs or tables. \
+evidence_span MUST be copied verbatim from the input. \
+If the text states no facts, answer {\"units\": []}. No commentary.";
 
 const DIGEST_SYSTEM_PROMPT: &str = "You summarize a document for its owner, using ONLY the \
 text provided. Respond with JSON only: {\"summary\": \"two or three plain sentences saying what \
@@ -487,11 +494,15 @@ pub(crate) fn parse_llm_units(parsed: &Value, chunk: &str) -> Vec<ExtractedUnit>
         else {
             continue;
         };
+        // A model writes its own prose, so unlike a copied sentence it can
+        // come back as a heading, a fragment or half a sentence. The rules
+        // never see this check.
         let Some(statement) = item
             .get("statement")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|s| !s.is_empty())
+            .filter(|s| crate::extract::worth::structural_ok(s))
         else {
             continue;
         };
@@ -683,6 +694,24 @@ mod tests {
         let units = parse_llm_units(&parsed, chunk);
         assert_eq!(units.len(), 1, "{units:?}");
         assert!(units[0].statement.contains("$90"));
+    }
+
+    #[test]
+    fn a_model_fragment_is_not_a_statement() {
+        let chunk = "We moved the backup target to Hetzner because the old box died.";
+        let parsed = serde_json::json!({
+            "units": [
+                { "kind": "fact", "statement": "because the old box died",
+                  "subject": "backup target", "objects": [],
+                  "evidence_span": "because the old box died", "confidence": 0.9 },
+                { "kind": "fact", "statement": "The backup target moved to Hetzner",
+                  "subject": "backup target", "objects": [],
+                  "evidence_span": "moved the backup target to Hetzner", "confidence": 0.9 }
+            ]
+        });
+        let units = parse_llm_units(&parsed, chunk);
+        assert_eq!(units.len(), 1, "{units:?}");
+        assert!(units[0].statement.starts_with("The backup target"));
     }
 
     #[test]
