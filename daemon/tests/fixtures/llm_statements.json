@@ -22,7 +22,8 @@
     "I use Rust.",
     "Gather runs offline by default.",
     "The backup target might move to Hetzner CX22 next quarter.",
-    "Anthropic employs the author on developer tools."
+    "Anthropic employs the author on developer tools.",
+    "Gather stores notes"
   ],
   "drop": [
     "and the database was migrated to pgvector",
@@ -35,6 +36,8 @@
     "He said \"it is fine",
     "What is the latency budget?",
     "The budget is:",
-    "to pgvector"
+    "to pgvector",
+    "Postgres migration plan",
+    "Hetzner CX22 backup target"
   ]
 }

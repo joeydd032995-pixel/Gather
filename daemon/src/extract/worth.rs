@@ -591,7 +591,35 @@ pub fn structural_ok(statement: &str) -> bool {
     if !letters.is_empty() && letters.iter().all(|c| c.is_uppercase()) {
         return false;
     }
-    !letters.is_empty()
+    if letters.is_empty() {
+        return false;
+    }
+    // A heading in ordinary case is still a heading: "Postgres migration
+    // plan" clears every check above without saying anything about Postgres.
+    says_something(&words)
+}
+
+/// Whether a statement asserts rather than names. A heading is a bare noun
+/// phrase; an ordinary sentence carries a function word ("the", "is", "in",
+/// "I") or a word inflected like a verb ("stores", "migrated",
+/// "considering"). Without a parser that is the test available, and it errs
+/// toward keeping: either signal on any word is enough. What it still lets
+/// through is a short phrase built on an irregular verb and no function word
+/// at all ("Joey ate lunch") — rarer than the headings it catches.
+fn says_something(words: &[&str]) -> bool {
+    words.iter().enumerate().any(|(i, w)| {
+        let w = w
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_lowercase();
+        if FUNCTION_WORDS.contains(&w.as_str()) {
+            return true;
+        }
+        // Only past the first word: "Stores" opens a heading as readily as a
+        // sentence, but "Gather stores notes" has its verb in the middle.
+        i > 0
+            && w.chars().count() >= 4
+            && (w.ends_with("ed") || w.ends_with("ing") || (w.ends_with('s') && !w.ends_with("ss")))
+    })
 }
 
 /// Whether one line of a chunk is code, markup or data rather than prose.
@@ -1091,5 +1119,8 @@ mod tests {
         assert!(!structural_ok("The daemon binds to"));
         assert!(!structural_ok("MIGRATION NOTES"));
         assert!(!structural_ok("The user said (see above"));
+        // A noun phrase in ordinary case is a heading, not a statement.
+        assert!(!structural_ok("Postgres migration plan"));
+        assert!(structural_ok("Gather stores notes"));
     }
 }

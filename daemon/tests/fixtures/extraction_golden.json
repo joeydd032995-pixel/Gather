@@ -278,6 +278,13 @@
       "expected": []
     },
     {
+      "name": "decision-committed-to-a-plan",
+      "input": "We committed to a master plan for the migration.",
+      "expected": [
+        { "kind": "decision", "statement": "We committed to a master plan for the migration", "subject": "Me" }
+      ]
+    },
+    {
       "name": "adversarial-committed-to-a-branch",
       "input": "I committed to main before lunch.",
       "expected": []

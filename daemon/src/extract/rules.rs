@@ -91,14 +91,60 @@ const VCS_TARGETS: &[&str] = &[
     "repository",
 ];
 
+/// What can follow a branch name without the name turning into a phrase:
+/// "main before lunch", "dev at 5pm", "master yesterday". Anything else and
+/// the word is modifying a noun, not naming a branch.
+const AFTER_VCS_TARGET: &[&str] = &[
+    "before",
+    "after",
+    "at",
+    "on",
+    "in",
+    "this",
+    "last",
+    "yesterday",
+    "today",
+    "tonight",
+    "earlier",
+    "later",
+    "again",
+    "then",
+    "and",
+    "so",
+    "but",
+    "instead",
+    "once",
+    "twice",
+    "when",
+    "while",
+    "because",
+    "from",
+    "with",
+    "around",
+    "by",
+    "now",
+];
+
 /// Whether a decision's object is really a version-control target. `clean`
 /// has already dropped a leading article, so "the repo" arrives as "repo".
+/// The first word matching is not enough: "a master plan for the migration"
+/// is a plan, and discarding it would lose a real decision.
 fn is_vcs_target(object: &str) -> bool {
-    object
-        .split_whitespace()
-        .next()
-        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
-        .is_some_and(|w| !w.chars().any(char::is_uppercase) && VCS_TARGETS.contains(&w))
+    let word = |w: &str| {
+        w.trim_matches(|c: char| !c.is_alphanumeric())
+            .to_lowercase()
+    };
+    let mut words = object.split_whitespace();
+    let Some(first) = words.next() else {
+        return false;
+    };
+    if first.chars().any(char::is_uppercase) || !VCS_TARGETS.contains(&word(first).as_str()) {
+        return false;
+    }
+    match words.next() {
+        None => true,
+        Some(next) => AFTER_VCS_TARGET.contains(&word(next).as_str()),
+    }
 }
 
 /// Spoken openers that say nothing about the world ("So I use X", "Yeah, we
@@ -500,6 +546,10 @@ mod tests {
             extract_units("We committed to Postgres for the knowledge store.").len(),
             1
         );
+        // The branch word only disqualifies the object when it IS the object.
+        let plan = extract_units("We committed to a master plan for the migration.");
+        assert_eq!(plan.len(), 1, "a master plan is a decision, not a branch");
+        assert_eq!(plan[0].kind, "decision");
     }
 
     #[test]
