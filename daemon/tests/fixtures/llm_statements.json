@@ -1,0 +1,40 @@
+{
+  "_doc": [
+    "Model-written statements, for the structural gate the Ollama path applies to",
+    "them (extract/worth.rs::structural_ok, called from extract/ollama.rs).",
+    "The rule extractor copies a sentence out of the text, so its output is a",
+    "sentence by construction and never sees this check. A model writes its own",
+    "prose and can hand back a heading, a fragment, or half a sentence that still",
+    "reads like English; those are what this gate is for.",
+    "keep = statements a model plausibly returns that must survive. They include",
+    "short ones (\"I use Rust.\") and hedged ones (\"is considering\"): a gate that",
+    "drops either costs real facts, and stripping a hedge would state a",
+    "possibility as a fact.",
+    "drop = the shapes that are not statements. Scored by tests/extraction_quality.rs."
+  ],
+  "keep": [
+    "Gather stores every note in PostgreSQL.",
+    "The daemon binds to loopback and refuses outbound traffic.",
+    "On 2026-04-01 the database was migrated to pgvector.",
+    "Joey prefers dark mode in every editor.",
+    "The team is considering moving the backup target to Hetzner.",
+    "The latency budget is 150 ms.",
+    "I use Rust.",
+    "Gather runs offline by default.",
+    "The backup target might move to Hetzner CX22 next quarter.",
+    "Anthropic employs the author on developer tools."
+  ],
+  "drop": [
+    "and the database was migrated to pgvector",
+    "which is why we moved to Hetzner",
+    "Because the daemon is offline",
+    "Migration notes",
+    "MIGRATION NOTES FOR PGVECTOR",
+    "The daemon binds to",
+    "The user said (see above",
+    "He said \"it is fine",
+    "What is the latency budget?",
+    "The budget is:",
+    "to pgvector"
+  ]
+}

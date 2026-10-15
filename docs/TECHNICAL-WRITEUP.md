@@ -894,13 +894,32 @@ loop every EXTRACTION_INTERVAL (default 30s):
 Deterministic, high-precision/low-recall patterns over sentence-split text:
 
 ```
-FIRST_PERSON_FACT   "I|my|we (am|is|are|use|have|prefer|live|work) …"        -> fact/preference
-DECISION            "(we|I) (decided|chose|switched to|will use|agreed) …"   -> decision (valid_from = msg time)
+FIRST_PERSON_FACT   "I|my|we (am|is|are|use|have|prefer|live|work|run       -> fact/preference
+                     |host|keep|store|deploy) …"
+DECISION            "(we|I) (decided|chose|picked|settled on|committed to   -> decision (valid_from = msg time)
+                     |switched [from X] to|will use|agreed|going with) …"
+CONSTRAINT          "(we|I) (must not|won't|cannot|refuse to|never) <v> …"   -> preference, attrs={object}, NO edge
 NUMERIC_ASSERTION   "<entity phrase> (is|costs|takes|weighs) <number><unit>" -> claim, attrs={value,unit}
 TEMPORAL_EVENT      "(on|since|until) <date>, <clause>"                      -> event, valid_from/valid_to
 DEFINITION          "<X> means|is defined as <Y>"                            -> fact + relationship(X, defined_as, Y)
 NEGATION            "no longer | not anymore | stopped <verb>ing"            -> closes valid_to on matching prior unit
 ```
+
+Two things are done to the sentence before the patterns see it, and two kinds of match are
+refused after:
+
+- **Spoken openers are dropped.** "Basically I use Postgres" and "Yeah, we settled on Hetzner"
+  are the same statements as without the opener, but every pattern except DECISION is anchored
+  at the start of the sentence, so the opener hid them. A marker is only dropped when a comma
+  follows it or what follows still opens a sentence, so "Well is 40 metres" keeps its subject.
+  The span moves with the text it points at. **Hedges are never dropped** — "might", "maybe",
+  "probably" are the modality §6 reads, and stripping one would state a possibility as a fact.
+- **A CONSTRAINT asserts no relationship.** "I won't use Google Analytics" is a rule the author
+  holds themselves to, so it is stored as a preference; the thing ruled out travels in `attrs`
+  rather than `objects`, because an edge would leave the graph saying they *do* use it. The
+  gate still requires that thing to be nameable, so "We can't do that right now" is not a rule.
+- **A branch is not a decision.** In a developer's notes "I committed to main" and "we switched
+  to dev" are version control. A decision whose object is a lower-case VCS target is dropped.
 
 Confidence: pattern base (0.6) + subject-resolution bonus (+0.1 if the subject maps to a known
 entity/alias) + source bonus (+0.1 user-authored message; −0.1 OCR text with `ocr_confidence`
@@ -913,14 +932,28 @@ entity/alias) + source bonus (+0.1 user-authored message; −0.1 OCR text with `
 prompt = SYSTEM: "Extract atomic factual statements from the text. Return JSON:
                   [{kind: fact|claim|decision|preference|event, statement, subject,
                     objects: [{name, relation}], evidence_span, confidence}]
-                  Statements must be self-contained and dated where possible. No commentary."
+                  One fact per unit; split a sentence that states two. Each statement is a
+                  whole sentence that stands on its own, every pronoun replaced by the thing
+                  it refers to, dated where the text gives a date. Never a heading, fragment,
+                  question or instruction. Keep the author's hedging — 'might', 'plans to',
+                  'is considering', 'decided against' must survive, never be stated as fact.
+                  Nothing from code, configuration, logs or tables. No commentary."
          USER:   chunk.text (≤ 2000 chars — segmentation guarantees this)
 
 out = POST http://127.0.0.1:11434/api/chat {model: GATHER_OLLAMA_MODEL, format: "json"}
 validate against JSON schema; drop items without evidence_span ⊆ chunk.text  # anti-hallucination
+drop items whose statement fails worth::structural_ok                        # model path only
 confidence = model_confidence × 0.9                    # LLM units never outrank rule hits
 extraction_method='llm_local', extraction_model='ollama:<model>'
 ```
+
+`structural_ok` is the model path's own gate, and the rules never see it. The rule extractor
+copies a sentence out of the text, so its output is a sentence by construction; a model writes
+its own prose and can return a heading, a fragment or half a sentence that still reads like
+English ("and the database was migrated", "The daemon binds to", "MIGRATION NOTES"). It asks for
+three words, balanced brackets and quotes, no opening conjunction, no dangling preposition and no
+all-caps heading — and deliberately nothing about length or hedging, so "I use Rust." and "The
+team is considering moving to Hetzner." both survive.
 
 If Ollama is unreachable the worker logs once and continues rule-based-only: LLM assist degrades
 gracefully and is never a dependency.

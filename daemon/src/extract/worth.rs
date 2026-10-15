@@ -126,7 +126,8 @@ const FILLER_NAMES: &[&str] = &[
 /// least one", "using it".
 const LOWER_FRAGMENT_STARTERS: &[&str] = &[
     "every", "each", "any", "some", "all", "both", "either", "neither", "another", "same", "such",
-    "other", "most", "few", "several", "at", "of", "in", "on", "per", "being", "having",
+    "other", "most", "few", "several", "at", "of", "in", "on", "per", "being", "having", "into",
+    "onto", "through",
 ];
 
 const NUMBER_WORDS: &[&str] = &[
@@ -162,6 +163,33 @@ const TRAILING_FILLER: &[&str] = &[
 const CLAUSE_WORDS: &[&str] = &[
     "in", "for", "on", "at", "with", "by", "from", "because", "that", "which", "when", "while",
     "and", "but", "or", "so", "if", "to", "where", "who",
+];
+
+/// Words that continue a sentence rather than start one: a "statement"
+/// opening with one is the tail of something else.
+const CONTINUATIONS: &[&str] = &[
+    "and",
+    "or",
+    "but",
+    "because",
+    "so",
+    "then",
+    "also",
+    "which",
+    "that",
+    "while",
+    "when",
+    "whereas",
+    "although",
+    "though",
+    "however",
+    "therefore",
+    "thus",
+    "plus",
+    "if",
+    "unless",
+    "whether",
+    "to",
 ];
 
 /// A statement that is mostly not words is not about anything.
@@ -509,7 +537,61 @@ pub fn unit_worth_keeping(unit: &ExtractedUnit) -> bool {
     {
         return false;
     }
+    // A constraint asserts no edge, so the thing it rules out is carried in
+    // attrs instead of objects — but it still has to be a thing. Without
+    // that, "We can't do that right now" would be stored as a standing rule.
+    if unit.attrs.get("pattern").and_then(|p| p.as_str()) == Some("constraint")
+        && unit
+            .attrs
+            .get("object")
+            .and_then(|o| o.as_str())
+            .and_then(entity_head)
+            .is_none()
+    {
+        return false;
+    }
     true
+}
+
+/// Extra structure required of a statement a *model* wrote, on top of the
+/// checks every unit gets. The rule extractor copies a sentence out of the
+/// text, so its output is a sentence by construction; a model writes its own
+/// prose and can hand back a heading, a fragment, or half a sentence that
+/// still reads like English. Applied on the Ollama path only (ollama.rs):
+/// running it over the rules would cost real facts for no gain.
+pub fn structural_ok(statement: &str) -> bool {
+    let s = strip_wrappers(statement).trim();
+    let words: Vec<&str> = s.split_whitespace().collect();
+    // Subject, verb, and something said about it.
+    if words.len() < 3 {
+        return false;
+    }
+    if s.ends_with([',', ':', ';', '?', '-', '—', '–']) {
+        return false;
+    }
+    if s.matches('(').count() != s.matches(')').count()
+        || s.matches('[').count() != s.matches(']').count()
+        || s.matches('"').count() % 2 != 0
+    {
+        return false;
+    }
+    let word = |w: &str| {
+        w.trim_matches(|c: char| !c.is_alphanumeric())
+            .to_lowercase()
+    };
+    if CONTINUATIONS.contains(&word(words[0]).as_str()) {
+        return false;
+    }
+    // "I migrated the database to": the sentence stops before its object.
+    if CLAUSE_WORDS.contains(&word(words[words.len() - 1]).as_str()) {
+        return false;
+    }
+    // A heading, not a sentence: "MIGRATION NOTES FOR PGVECTOR".
+    let letters: Vec<char> = s.chars().filter(|c| c.is_alphabetic()).collect();
+    if !letters.is_empty() && letters.iter().all(|c| c.is_uppercase()) {
+        return false;
+    }
+    !letters.is_empty()
 }
 
 /// Whether one line of a chunk is code, markup or data rather than prose.
@@ -986,5 +1068,28 @@ mod tests {
             let expect = good != "the file's";
             assert_eq!(entity_name_worth_keeping(good), expect, "{good:?}");
         }
+    }
+
+    #[test]
+    fn a_constraint_needs_something_to_constrain() {
+        use crate::extract::rules::extract_units;
+        let vacuous = extract_units("We can't do that right now.");
+        assert!(
+            vacuous.iter().all(|u| !unit_worth_keeping(u)),
+            "a rule about nothing is not a rule: {vacuous:?}"
+        );
+        let real = extract_units("I must not store customer data in the US.");
+        assert_eq!(real.len(), 1);
+        assert!(unit_worth_keeping(&real[0]));
+    }
+
+    #[test]
+    fn structural_ok_is_for_prose_a_model_wrote() {
+        assert!(structural_ok("I use Rust."));
+        assert!(structural_ok("The team is considering moving to Hetzner."));
+        assert!(!structural_ok("and the database was migrated"));
+        assert!(!structural_ok("The daemon binds to"));
+        assert!(!structural_ok("MIGRATION NOTES"));
+        assert!(!structural_ok("The user said (see above"));
     }
 }
