@@ -27,6 +27,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: daemon
+          # Restore everywhere, save only on the default branch. These are the
+          # largest entries in the repository's 10 GB cache budget and are
+          # rewritten on every lockfile change, so letting each branch and pull
+          # request save its own evicts other caches by LRU. The bundled
+          # PostgreSQL caches are what get evicted, and rebuilding Postgres from
+          # source costs a release build ~20 minutes on Windows (v0.1.13 hit
+          # exactly that, on a key byte-identical to v0.1.12's, which had hit).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: rustfmt
         working-directory: daemon
         run: cargo fmt --check
@@ -93,6 +101,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: daemon
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: install tesseract (OCR integration tests)
         run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
       - name: cargo test
@@ -148,6 +157,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: daemon
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: install restic + tesseract (OCR extraction path) + postgresql-client
         run: |
           sudo apt-get update
@@ -202,6 +212,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: daemon
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: install postgresql-client
         run: |
           sudo apt-get update
@@ -243,6 +254,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: daemon
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: install postgresql-client
         run: |
           sudo apt-get update
@@ -289,6 +301,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: daemon
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: release build
         working-directory: daemon
         run: cargo build --release --locked
@@ -347,6 +360,7 @@ jobs:
           workspaces: |
             daemon
             apps/desktop/src-tauri
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@v7
         with:
           node-version: 22
