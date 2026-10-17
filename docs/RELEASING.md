@@ -37,8 +37,11 @@ CI; installers and checksums appear only after the workflow succeeds.
 Pushing the tag from Git avoids publishing the release page before its assets
 are ready.
 
-Watch the tag's `ci` run in **Actions**. Verify that the release contains the
-Windows, macOS and Linux installers, standalone daemon archives and
+Watch the tag's `ci` run in **Actions**. A warm run takes about 25 minutes; if
+the bundled-PostgreSQL cache has been evicted the Windows job rebuilds Postgres
+from source and the run takes around 45. Either is normal — `build-desktop`
+fails at 90 minutes, which is the hang guard. Verify that the release contains
+the Windows, macOS and Linux installers, standalone daemon archives and
 `SHA256SUMS`. `latest.json` is present only when updater signing is configured.
 Do not move or overwrite a published tag; investigate a failed run and rerun
 after resolving its cause.
