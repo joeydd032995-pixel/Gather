@@ -12,7 +12,10 @@ const MAX_SEGMENT_CHARS: usize = 2000;
 
 /// Deterministic segmentation: split on markdown headings, then split any
 /// oversized section on paragraph boundaries so each segment stays under
-/// MAX_SEGMENT_CHARS (embedding-friendly and provenance-precise).
+/// MAX_SEGMENT_CHARS (embedding-friendly and provenance-precise). A paragraph
+/// that is itself over the cap is cut where the rule extractor would split a
+/// sentence anyway (see [`cut_point`]), so a cut does not halve a sentence the
+/// extractor could read.
 pub fn segment_text(text: &str) -> Vec<Segment> {
     Segments::new(text).collect()
 }
@@ -132,6 +135,57 @@ fn parse_heading(line: &str) -> Option<String> {
     }
 }
 
+/// The largest char boundary of `s` at or below `i`. (`str::floor_char_boundary`
+/// is not stable on our MSRV.)
+fn floor_boundary(s: &str, i: usize) -> usize {
+    let mut i = i.min(s.len());
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Where to end the next chunk of an oversized paragraph: a byte offset into
+/// `pending` (the paragraph's remaining text, longer than `max`) on a char
+/// boundary, at most `max` (or the first char, if that alone is longer).
+///
+/// The rule extractor reads one sentence at a time. It splits after `.`/`!`/`?`
+/// followed by whitespace and at every newline (`rules::sentences`), and it
+/// ignores any sentence over 400 bytes. A cut in the middle of a sentence hands
+/// the extractor two halves that are each short enough to be read as a
+/// statement of their own. So the cut goes where the extractor would have split
+/// anyway, preferring, in order: the last sentence end, the last newline, the
+/// last whitespace, and only then the hard cut at `max`. Offsets below `max / 4`
+/// are ignored so a stray early boundary does not leave a runt chunk behind.
+///
+/// Only the first `max + 1` bytes are read: the extra byte says whether a
+/// terminator at the very end of the window is followed by whitespace. That
+/// keeps a cut independent of how long the rest of the paragraph is.
+fn cut_point(pending: &str, max: usize) -> usize {
+    let window = &pending.as_bytes()[..floor_boundary(pending, pending.len().min(max + 1))];
+    let (mut newline, mut space) = (None, None);
+    for cut in ((max / 4).max(1)..=max.min(window.len())).rev() {
+        let next = window.get(cut).copied();
+        let before_space = next.is_some_and(|b| b.is_ascii_whitespace());
+        if matches!(window[cut - 1], b'.' | b'!' | b'?') && before_space {
+            return cut;
+        }
+        if newline.is_none() && next == Some(b'\n') {
+            newline = Some(cut);
+        }
+        if space.is_none() && before_space {
+            space = Some(cut);
+        }
+    }
+    newline
+        .or(space)
+        .unwrap_or_else(|| match floor_boundary(pending, max) {
+            // Only a cap smaller than one char gets here; still make progress.
+            0 => pending.chars().next().map_or(0, char::len_utf8),
+            cut => cut,
+        })
+}
+
 /// Splits one section body on paragraph boundaries into chunks of at most
 /// MAX_SEGMENT_CHARS, lazily. Pending text is `current` (at most one chunk,
 /// owned) followed by `tail`, a byte range of `body` that is never copied
@@ -183,22 +237,23 @@ impl<'a> Chunks<'a> {
         }
     }
 
-    /// Emit the first MAX_SEGMENT_CHARS bytes of the pending text (backed off
-    /// to a char boundary) and keep the rest pending.
+    /// Emit the next chunk of the pending text, ended where [`cut_point`]
+    /// says, and keep the rest pending.
     fn cut(&mut self) -> String {
         let clen = self.current.len();
-        let mut cut = MAX_SEGMENT_CHARS;
-        loop {
-            let on_boundary = if cut <= clen {
-                self.current.is_char_boundary(cut)
-            } else {
-                self.body.is_char_boundary(self.tail.0 + cut - clen)
-            };
-            if on_boundary {
-                break;
-            }
-            cut -= 1;
+        // `cut_point` reads at most MAX + 1 bytes, so copy only that much of
+        // the pending text: the whole of a huge paragraph would make every
+        // cut cost the paragraph's length.
+        let want = MAX_SEGMENT_CHARS + 1;
+        let mut head = String::with_capacity(want);
+        if clen >= want {
+            head.push_str(&self.current[..floor_boundary(&self.current, want)]);
+        } else {
+            head.push_str(&self.current);
+            let tail = &self.body[self.tail.0..self.tail.1];
+            head.push_str(&tail[..floor_boundary(tail, want - clen)]);
         }
+        let cut = cut_point(&head, MAX_SEGMENT_CHARS);
         if cut <= clen {
             let chunk = self.current[..cut].trim().to_string();
             self.current.drain(..cut);
@@ -225,7 +280,7 @@ impl Iterator for Chunks<'_> {
             return Some(self.body.to_string());
         }
         loop {
-            // A paragraph larger than the cap is split on char boundaries.
+            // A paragraph larger than the cap is cut where `cut_point` says.
             if self.pending_len() > MAX_SEGMENT_CHARS {
                 return Some(self.cut());
             }
@@ -268,7 +323,8 @@ mod tests {
     use super::*;
 
     /// The original eager implementation, kept to prove the lazy one
-    /// produces exactly the same segments.
+    /// produces exactly the same segments. It shares `cut_point`, so this
+    /// proves the lazy bookkeeping; the cut rule has its own tests below.
     fn reference(text: &str) -> Vec<(Option<String>, String)> {
         fn split(body: &str) -> Vec<String> {
             if body.len() <= MAX_SEGMENT_CHARS {
@@ -286,10 +342,7 @@ mod tests {
                 }
                 current.push_str(para);
                 while current.len() > MAX_SEGMENT_CHARS {
-                    let mut cut = MAX_SEGMENT_CHARS;
-                    while !current.is_char_boundary(cut) {
-                        cut -= 1;
-                    }
+                    let cut = cut_point(&current, MAX_SEGMENT_CHARS);
                     let rest = current.split_off(cut);
                     chunks.push(current.trim().to_string());
                     current = rest;
@@ -342,6 +395,14 @@ mod tests {
             "\n\n\n",
             "#nothead\n",
             "longword",
+            // Sentence ends and near-misses, so the oversized paragraphs
+            // above reach every branch of `cut_point`.
+            "Yes. ",
+            "Really? ",
+            "Done!\n",
+            "end.",
+            "3.5 ",
+            "e.g.",
         ];
         let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
         let mut rand = move || {
@@ -390,5 +451,174 @@ mod tests {
         let segs = segment_text(&long_para);
         assert!(segs.len() >= 3);
         assert!(segs.iter().all(|s| s.content.len() <= MAX_SEGMENT_CHARS));
+        // No sentence ends to cut at, so the cut is at a space: whole words.
+        assert!(segs
+            .iter()
+            .all(|s| s.content.starts_with("word") && s.content.ends_with("word")));
+    }
+
+    /// A xorshift generator, as in the parity test above.
+    fn rng(mut seed: u64) -> impl FnMut() -> u64 {
+        move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        }
+    }
+
+    #[test]
+    fn an_oversized_paragraph_is_cut_between_sentences() {
+        let sentence = "The quick brown fox jumps over the lazy dog near the river bank.";
+        let text = vec![sentence; 100].join(" "); // about 6.5 KB, one paragraph
+        let segs = segment_text(&text);
+        assert!(segs.len() >= 4);
+        let mut sentences = 0;
+        for seg in &segs {
+            let c = &seg.content;
+            assert!(c.len() <= MAX_SEGMENT_CHARS);
+            assert!(
+                c.starts_with("The quick") && c.ends_with("river bank."),
+                "{c:?}"
+            );
+            let starts = c.matches("The quick").count();
+            assert_eq!(
+                starts,
+                c.matches("river bank.").count(),
+                "a sentence was split"
+            );
+            sentences += starts;
+        }
+        assert_eq!(sentences, 100, "no sentence lost or repeated");
+    }
+
+    #[test]
+    fn paragraphs_that_fit_are_never_split() {
+        let words = [
+            "alpha",
+            "beta",
+            "gamma",
+            "delta",
+            "Sentence one.",
+            "why?",
+            "ok!",
+        ];
+        let mut rand = rng(0xDEAD_BEEF_CAFE_F00D);
+        for case in 0..200 {
+            let paragraphs: Vec<String> = (0..1 + rand() % 12)
+                .map(|_| {
+                    let target = 20 + (rand() % 1400) as usize; // always under the cap
+                    let mut p = String::new();
+                    while p.len() < target {
+                        if !p.is_empty() {
+                            p.push(if rand() % 9 == 0 { '\n' } else { ' ' });
+                        }
+                        p.push_str(words[(rand() % words.len() as u64) as usize]);
+                    }
+                    p
+                })
+                .collect();
+            let segs = segment_text(&paragraphs.join("\n\n"));
+            for p in &paragraphs {
+                assert!(
+                    segs.iter().any(|s| s.content.contains(p.as_str())),
+                    "case {case}: a paragraph of {} bytes was split",
+                    p.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cut_point_prefers_the_last_sentence_end() {
+        // Each sentence is 24 bytes, so its terminator is at 24k + 22 and the
+        // last end inside a 100-byte chunk leaves the cut at 95.
+        for end in ['.', '!', '?'] {
+            let text = format!("Alpha beta gamma delta{end} ").repeat(10);
+            assert_eq!(cut_point(&text, 100), 95, "{end}");
+        }
+    }
+
+    #[test]
+    fn cut_point_falls_back_to_the_last_newline_then_the_last_space() {
+        // No terminators: the last line break beats a later space.
+        let lines = "alpha beta gamma delta\n".repeat(10);
+        assert_eq!(cut_point(&lines, 100), 91);
+        // No line breaks either: the last space.
+        assert_eq!(cut_point(&"alpha ".repeat(50), 100), 95);
+    }
+
+    #[test]
+    fn cut_point_ignores_boundaries_too_early_to_be_worth_a_chunk() {
+        // The only sentence end is 10 bytes in, below max / 4: not worth a
+        // runt chunk, so this is the hard cut.
+        let text = format!("Short one. {}", "x".repeat(300));
+        assert_eq!(cut_point(&text, 100), 100);
+    }
+
+    #[test]
+    fn cut_point_needs_whitespace_after_a_terminator() {
+        // "3.5", "e.g.x" and "a.b" do not end a sentence, as for the extractor:
+        // the `.` at byte 99 is followed by `b`, so the cut is the last space.
+        let text = format!(
+            "{}{}.b{}",
+            "word ".repeat(10),
+            "a".repeat(49),
+            "c".repeat(60)
+        );
+        assert_eq!(cut_point(&text, 100), 49);
+        // The same `.` followed by a space (outside the chunk, inside the
+        // window) does end it.
+        let text = format!("{}. {}", "a".repeat(99), "b".repeat(50));
+        assert_eq!(cut_point(&text, 100), 100);
+    }
+
+    #[test]
+    fn cut_point_never_splits_a_char() {
+        // A 3-byte char straddles max + 1, so the window stops before it. The
+        // `.` that ends the window is then not known to be followed by a space
+        // (it is followed by "日"), and the cut is the space at byte 40.
+        let text = format!(
+            "{} {}.{}",
+            "x".repeat(40),
+            "y".repeat(57),
+            "日本語".repeat(20)
+        );
+        assert_eq!(cut_point(&text, 100), 40);
+        // Without any boundary it is today's hard cut, backed off to a char.
+        assert_eq!(cut_point(&"x".repeat(300), 100), 100);
+        assert_eq!(cut_point(&"é".repeat(150), 101), 100);
+        assert_eq!(cut_point(&"日".repeat(100), 100), 99);
+        // Only the first max + 1 bytes matter, however long the rest is.
+        let text = format!("{}. {}", "a".repeat(60), "b".repeat(10_000));
+        assert_eq!(cut_point(&text, 100), cut_point(&text[..101], 100));
+    }
+
+    #[test]
+    fn cut_point_always_makes_progress_and_stays_in_bounds() {
+        // A cap smaller than one char still advances by that char.
+        assert_eq!(cut_point("日本日本", 2), 3);
+        const PIECES: &[&str] = &["a", " ", "\n", ". ", "? ", "!", "é", "日", "word "];
+        let mut rand = rng(0x2545_F491_4F6C_DD1D);
+        for _ in 0..2000 {
+            let mut text = String::new();
+            while text.len() < 20 + (rand() % 200) as usize {
+                text.push_str(PIECES[(rand() % PIECES.len() as u64) as usize]);
+            }
+            for max in [8, 20, 64] {
+                if text.len() <= max {
+                    continue;
+                }
+                let cut = cut_point(&text, max);
+                assert!(
+                    (1..=max).contains(&cut),
+                    "{cut} outside 1..={max} for {text:?}"
+                );
+                assert!(
+                    text.is_char_boundary(cut),
+                    "{cut} splits a char in {text:?}"
+                );
+            }
+        }
     }
 }
