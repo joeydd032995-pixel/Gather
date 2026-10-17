@@ -831,9 +831,11 @@ All four paths converge on `atomic_units` + `atomic_unit_provenance`. **The work
 implemented and tested** (`daemon/src/extract/`: `mod.rs` loop, `pdf.rs`, `image.rs`, `rules.rs`,
 `ollama.rs`, `persist.rs`), alongside the synchronous upload-time parts (adapter normalization;
 markdown/text extraction + segmentation — `utf8-passthrough`, deterministic heading/paragraph
-splitter capped at 2000 chars). Workers claim work via the `pending → processing →
-completed|failed|skipped` status columns with `FOR UPDATE SKIP LOCKED` (stale `processing` rows
-reset at startup), and unit chunks are stamped `units_extracted_at` atomically with their units,
+splitter capped at 2000 chars; a paragraph over the cap is cut at its last sentence end, else
+line break, else space, the places the rule extractor itself splits). Workers claim work via the
+`pending → processing → completed|failed|skipped` status columns with `FOR UPDATE SKIP LOCKED`
+(stale `processing` rows reset at startup), and unit chunks are stamped `units_extracted_at`
+atomically with their units,
 so a crash mid-extraction is self-healing. Two §5.1 items are deliberately deferred: OCR fallback
 for scanned PDFs (needs a native rasterizer; such PDFs are marked `skipped` with
 `metadata.reason='scanned-pdf-needs-ocr'` and stay visible on the backlog gauge) and image
