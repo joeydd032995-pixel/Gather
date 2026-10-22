@@ -61,7 +61,7 @@ quick-xml = "0.42"
 
 [build-dependencies]
 tonic-prost-build = "0.14"
-protox = "0.9"
+protox = "0.10"
 
 [profile.release]
 lto = "thin"
