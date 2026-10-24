@@ -104,6 +104,10 @@ pub struct Config {
     pub ollama_num_ctx: Option<u32>,
     /// Send Ollama one request at a time, so only one model is busy at once.
     pub ollama_one_at_a_time: bool,
+    /// Unload a chat or vision model after this many requests (0 = never), so
+    /// the memory Ollama's runner accumulates across distinct prompts is
+    /// given back. The next request loads the model again.
+    pub ollama_refresh_after: u32,
     /// Run the background contradiction scanner.
     pub scan_enabled: bool,
     /// Seconds between scan passes.
@@ -388,6 +392,19 @@ impl Config {
             Err(_) if low => Some(2048),
             Err(_) => None,
         };
+        // Ollama's runner keeps a copy of every prompt it has answered, and
+        // Gather never repeats one, so a loaded model's memory only grows
+        // (about 15 MB per section for a 1B model, 54 MB for a 3B one).
+        // Unloading it now and then gives that back for a few seconds' reload;
+        // 10 keeps the growth under about 150 MB and 540 MB respectively.
+        let ollama_refresh_after = match set("GATHER_OLLAMA_REFRESH_AFTER") {
+            Ok(raw) => raw.trim().parse().map_err(|_| ConfigError::BadEnvValue {
+                var: "GATHER_OLLAMA_REFRESH_AFTER",
+                value: raw,
+                reason: "expected a whole number, 0 to never unload",
+            })?,
+            Err(_) => 10,
+        };
 
         let grpc_enabled = env_bool("GATHER_GRPC_ENABLED", true);
         let grpc_raw =
@@ -454,6 +471,7 @@ impl Config {
             ollama_one_at_a_time: set("GATHER_OLLAMA_ONE_AT_A_TIME")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(low),
+            ollama_refresh_after,
             scan_enabled: env_bool("GATHER_SCAN_ENABLED", true),
             scan_interval_secs: var("GATHER_SCAN_INTERVAL_SECS")
                 .ok()
@@ -602,6 +620,7 @@ impl Config {
             ollama_keep_alive: None,
             ollama_num_ctx: None,
             ollama_one_at_a_time: false,
+            ollama_refresh_after: 0,
             scan_enabled: true,
             scan_interval_secs: 600,
             scan_batch: 32,
@@ -744,6 +763,22 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(c.ollama_model, None);
+    }
+
+    #[test]
+    fn the_model_is_unloaded_now_and_then_unless_turned_off() {
+        for profile in ["standard", "low"] {
+            let c = config(&[("GATHER_MEMORY_PROFILE", profile)]).unwrap();
+            assert_eq!(c.ollama_refresh_after, 10, "{profile}");
+        }
+        let c = config(&[("GATHER_OLLAMA_REFRESH_AFTER", "12")]).unwrap();
+        assert_eq!(c.ollama_refresh_after, 12);
+        let c = config(&[("GATHER_OLLAMA_REFRESH_AFTER", "0")]).unwrap();
+        assert_eq!(c.ollama_refresh_after, 0, "0 never unloads");
+        let c = config(&[("GATHER_OLLAMA_REFRESH_AFTER", "")]).unwrap();
+        assert_eq!(c.ollama_refresh_after, 10, "blank means the default");
+        assert!(config(&[("GATHER_OLLAMA_REFRESH_AFTER", "often")]).is_err());
+        assert!(config(&[("GATHER_OLLAMA_REFRESH_AFTER", "-1")]).is_err());
     }
 
     #[test]

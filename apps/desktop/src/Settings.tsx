@@ -242,7 +242,11 @@ export default function Settings({
   );
 }
 
-/** Suggested models, small enough for a 4 GB computer. */
+/**
+ * Suggested models. The reading model needs about 2 GB while it works (measured:
+ * 1.9 GB for llama3.2:1b, 2.6 GB for llama3.2:3b), so it suits 8 GB or more; the
+ * search model needs about 0.4 GB and is the one for a 4 GB computer.
+ */
 const SUGGESTED_CHAT = "llama3.2:1b";
 const SUGGESTED_EMBED = "nomic-embed-text";
 
@@ -391,8 +395,10 @@ function AiSection() {
                 Model for reading files
               </label>
               <p className="setting-desc">
-                Pulls facts and relationships out of what you add. On a computer with about 4 GB of
-                memory, {SUGGESTED_CHAT} fits. Leave empty to use Ollama for search only.
+                Pulls facts and relationships out of what you add. It needs about 2 GB of free
+                memory while it works, so it suits a computer with 8 GB or more ({SUGGESTED_CHAT} is
+                the smallest sensible choice). Leave empty to use Ollama for search only, which
+                needs far less.
               </p>
               {missing(draft.chat_model) && (
                 <p className="setting-desc setting-warn">
@@ -406,7 +412,9 @@ function AiSection() {
                 className="input"
                 list={listId}
                 value={draft.chat_model}
-                placeholder={`None (e.g. ${SUGGESTED_CHAT})`}
+                placeholder={
+                  lowMemory ? "None (search only)" : `None (e.g. ${SUGGESTED_CHAT})`
+                }
                 spellCheck={false}
                 onChange={(e) => set({ chat_model: e.target.value })}
               />
@@ -462,9 +470,10 @@ function AiSection() {
           {lowMemory && draft.chat_model.trim() !== "" && (
             <div className="panel-pad">
               <Callout tone="warning" title="This computer has little memory">
-                A model that reads files uses about 1.5 GB while it works, and reading goes slower.
-                Gather unloads it a minute after it's done. If things get sluggish, clear the model
-                for reading files and keep search.
+                A model that reads files needs about 2 GB or more while it works, which is most of
+                what a computer this size has to spare, and reading goes slowly. Gather unloads it
+                regularly and a minute after it's done, but the computer may still freeze. We
+                recommend clearing the model for reading files and keeping search.
               </Callout>
             </div>
           )}
