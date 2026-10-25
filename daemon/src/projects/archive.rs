@@ -153,7 +153,10 @@ fn stream(
                         send(stop);
                         return;
                     }
-                    let name = raw.name().to_string();
+                    let name = raw.name().map_or_else(
+                        |_| String::from_utf8_lossy(raw.name_raw()).into_owned(),
+                        |n| n.into_owned(),
+                    );
                     if !send(Entry::Skipped {
                         path: name,
                         reason: "its path points outside the project".into(),
