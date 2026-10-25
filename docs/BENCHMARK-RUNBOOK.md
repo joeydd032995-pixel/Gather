@@ -211,16 +211,16 @@ that produce an **unusable** unit (these are what cost precision), and facts the
 
 ```
 ── extraction quality (rule-based, offline) ──
-cases:       41
-produced:    35  (usable 35, spurious 0)
-labelled:    37  (found 35)
+cases:       42
+produced:    36  (usable 36, spurious 0)
+labelled:    38  (found 36)
 precision:   100.0%  (gate ≥ 90%)
-recall:      94.6%  (informational — rules are high-precision/low-recall)
+recall:      94.7%  (informational — rules are high-precision/low-recall)
 ```
 
 ### Baseline
 
-At the corpus's current 41 cases the rule extractor scores **100% precision, 94.6% recall**. The
+At the corpus's current 42 cases the rule extractor scores **100% precision, 94.7% recall**. The
 two recall misses are the intentional implicit/third-person facts the deterministic patterns
 don't reach (`recall-miss-implicit-fact`, `recall-miss-third-person-fact`) — they are what the
 Ollama path is for. Every adversarial case now produces nothing, which is the point of them:
@@ -242,9 +242,43 @@ only (`worth::structural_ok`, called from `extract/ollama.rs`), over
 text, so it is a sentence already; a model writes its own prose and can hand back a heading, a
 fragment or half a sentence. `keep` holds statements a model plausibly returns that must survive
 — including short ones ("I use Rust.") and hedged ones ("is considering") — and `drop` holds the
-shapes that are not statements. Both sides must be perfect; it currently scores **10/10 kept,
-11/11 dropped**. Add to `keep` whenever a gate change costs a real statement, and to `drop`
+shapes that are not statements. Both sides must be perfect; it currently scores **11/11 kept,
+13/13 dropped**. Add to `keep` whenever a gate change costs a real statement, and to `drop`
 whenever a non-statement gets through.
+
+### Long documents — `cargo test --test chunking_quality`
+
+The golden corpus hands `extract_units()` whole sentences, so it cannot see what a *segment
+boundary* does. The extractor reads one sentence at a time and ignores any sentence over 400
+bytes, so a cut through the middle of a sentence gives it two halves that are each short enough
+to be stored as a statement of their own, and a fact that straddles the cut is lost.
+`segment_text` therefore ends an oversized paragraph (over 2,000 bytes with no blank line,
+typically extracted PDF text) at the last sentence end, else the last line break, else the last
+space, and only then at the byte limit — the places the extractor itself would split.
+
+`chunking_quality` checks that this makes segmenting invisible to the extractor. It generates 300
+seeded single-paragraph documents (4–8 KB, about 30% fact sentences among filler), stores
+statements from each the way the worker does, and compares three runs per document: the whole
+document (the reference), `segment_text`, and a copy of the old hard cut kept in the test as a
+control. It asserts that `segment_text` loses and invents nothing, and that the control does
+(otherwise the documents would not be exercising the cut).
+
+```
+── chunking quality (rule-based, offline) ──
+documents:        300  (300 longer than the 2000-byte cap), 4826 planted facts
+                      facts recovered   lost   invented   segments
+whole document         4826 (100.0%)      0         0        300
+sentence-aware cut     4826 (100.0%)      0         0        847
+hard cut (control)     4758 ( 98.6%)     68        49        841
+```
+
+*Lost* counts statements the reference stored that a run did not; *invented* counts statements
+the reference never stored, which are the halves of cut sentences. The new cut makes 6 more
+segments than the hard cut in 841 (0.7%). The documents are synthetic, so the numbers show the
+mechanism, not how often real documents hit it. Two limits remain: a stretch of more than about
+1,500 bytes with no sentence end, line break or space is still cut at the byte limit, and CJK
+full stops are not boundaries because the extractor does not split on them either. Only
+documents read after the change get the new boundaries; stored segments are left as they are.
 
 ### Extending the corpus
 
