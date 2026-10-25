@@ -6,6 +6,8 @@
 //! GATHER_ALLOW_NON_LOOPBACK override used for the bind address is set,
 //! preserving the "zero unauthorized outbound traffic" guarantee.
 
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -28,6 +30,11 @@ const MAX_JUDGE_TOKENS: u32 = 200;
 /// two models busy (and loaded) for Gather at once.
 static ONE_AT_A_TIME: Semaphore = Semaphore::const_new(1);
 
+/// Requests answered per model since it was last unloaded, keyed by Ollama
+/// address and model. Shared like `ONE_AT_A_TIME`: each worker builds its own
+/// client, but they all talk to the same loaded model.
+static ANSWERED: LazyLock<Mutex<HashMap<String, u32>>> = LazyLock::new(Mutex::default);
+
 pub struct OllamaClient {
     base: String,
     http: reqwest::Client,
@@ -40,6 +47,7 @@ pub struct OllamaClient {
     keep_alive: Option<String>,
     num_ctx: Option<u32>,
     one_at_a_time: bool,
+    refresh_after: u32,
 }
 
 /// Why a caption could not be produced.
@@ -127,6 +135,7 @@ impl OllamaClient {
             keep_alive: config.ollama_keep_alive.clone(),
             num_ctx: config.ollama_num_ctx,
             one_at_a_time: config.ollama_one_at_a_time,
+            refresh_after: config.ollama_refresh_after,
         }))
     }
 
@@ -137,6 +146,49 @@ impl OllamaClient {
             ONE_AT_A_TIME.acquire().await.ok()
         } else {
             None
+        }
+    }
+
+    /// Count one answered request for `model` and, every `refresh_after`
+    /// requests, ask Ollama to unload it.
+    ///
+    /// Ollama's runner keeps the state of every prompt it has answered, in
+    /// memory, in case one comes back. Gather's prompts are all different, so
+    /// that only grows: about 15 MB per section for a 1B model, 54 MB for a
+    /// 3B one, without a ceiling, which swamps a small computer. Unloading
+    /// drops it; the next request loads the model again, which takes a few
+    /// seconds. Ollama lets a request in flight finish before it unloads, so
+    /// workers that are not serialized by `turn()` can't cut each other off.
+    /// A failed unload is only logged: the model's own keep-alive still ends it.
+    async fn refresh_if_due(&self, model: &str) {
+        if self.refresh_after == 0 {
+            return;
+        }
+        let due = {
+            let mut answered = ANSWERED.lock().unwrap_or_else(PoisonError::into_inner);
+            let count = answered
+                .entry(format!("{}|{model}", self.base))
+                .or_insert(0);
+            *count += 1;
+            let due = *count >= self.refresh_after;
+            if due {
+                *count = 0;
+            }
+            due
+        };
+        if !due {
+            return;
+        }
+        // A generate request with no prompt and keep_alive 0 unloads a model.
+        let unloaded = self
+            .http
+            .post(format!("{}/api/generate", self.base))
+            .json(&json!({ "model": model, "keep_alive": 0 }))
+            .send()
+            .await
+            .and_then(|r| r.error_for_status());
+        if let Err(e) = unloaded {
+            tracing::warn!(error = %e, model, "could not unload the model; it stays in memory until Ollama's keep-alive ends");
         }
     }
 
@@ -253,6 +305,7 @@ impl OllamaClient {
             .json()
             .await
             .map_err(|e| CaptionError::Rejected(format!("ollama caption decode: {e}")))?;
+        self.refresh_if_due(model).await;
         let caption = body
             .get("response")
             .and_then(Value::as_str)
@@ -298,6 +351,7 @@ impl OllamaClient {
             .json()
             .await
             .map_err(|e| format!("ollama chat decode: {e}"))?;
+        self.refresh_if_due(self.chat_model()?).await;
         let content = body
             .pointer("/message/content")
             .and_then(Value::as_str)
@@ -340,6 +394,7 @@ impl OllamaClient {
             .json()
             .await
             .map_err(|e| format!("ollama chat decode: {e}"))?;
+        self.refresh_if_due(self.chat_model()?).await;
         let content = body
             .pointer("/message/content")
             .and_then(Value::as_str)
@@ -383,6 +438,7 @@ impl OllamaClient {
             .json()
             .await
             .map_err(|e| format!("ollama judge decode: {e}"))?;
+        self.refresh_if_due(self.chat_model()?).await;
         let content = body
             .pointer("/message/content")
             .and_then(Value::as_str)
@@ -641,6 +697,107 @@ mod tests {
             plain.body(json!({ "model": "m" }), true),
             json!({ "model": "m" })
         );
+    }
+
+    type Seen = std::sync::Arc<std::sync::Mutex<Vec<(&'static str, Value)>>>;
+
+    /// A stand-in Ollama that answers chat, embed and generate requests and
+    /// records each one in order. `/api/generate` answers `unload_status`.
+    async fn fake_ollama(unload_status: axum::http::StatusCode) -> (String, Seen) {
+        use axum::extract::State;
+        use axum::routing::post;
+        use axum::{Json, Router};
+
+        let seen = Seen::default();
+        let app = Router::new()
+            .route(
+                "/api/chat",
+                post(|State(s): State<Seen>, Json(b): Json<Value>| async move {
+                    s.lock().unwrap().push(("chat", b));
+                    Json(json!({ "message": { "content":
+                        r#"{"contradicts": false, "confidence": 0.5, "why": "x"}"# } }))
+                }),
+            )
+            .route(
+                "/api/generate",
+                post(
+                    move |State(s): State<Seen>, Json(b): Json<Value>| async move {
+                        s.lock().unwrap().push(("generate", b));
+                        (unload_status, Json(json!({ "done": true })))
+                    },
+                ),
+            )
+            .route(
+                "/api/embed",
+                post(|State(s): State<Seen>, Json(b): Json<Value>| async move {
+                    let n = b["input"].as_array().map_or(1, Vec::len);
+                    s.lock().unwrap().push(("embed", b));
+                    Json(json!({ "embeddings": vec![vec![0.0f32; 768]; n] }))
+                }),
+            )
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (url, seen)
+    }
+
+    fn client_for(url: &str, refresh_after: u32) -> OllamaClient {
+        let mut c = config_with_ollama(url, false);
+        c.ollama_model = Some("chat-model".to_string());
+        c.ollama_refresh_after = refresh_after;
+        OllamaClient::from_config(&c).unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_chat_model_is_unloaded_after_the_configured_number_of_requests() {
+        let (url, seen) = fake_ollama(axum::http::StatusCode::OK).await;
+        let client = client_for(&url, 3);
+        for _ in 0..7 {
+            client.judge("a", "b").await.unwrap();
+        }
+        let seen = seen.lock().unwrap();
+        let kinds: Vec<_> = seen.iter().map(|(k, _)| *k).collect();
+        assert_eq!(
+            kinds,
+            ["chat", "chat", "chat", "generate", "chat", "chat", "chat", "generate", "chat"],
+            "an unload follows every third answer, before the next request"
+        );
+        // An empty generate request with keep_alive 0 is how Ollama is asked
+        // to drop a model.
+        assert_eq!(seen[3].1, json!({ "model": "chat-model", "keep_alive": 0 }));
+    }
+
+    #[tokio::test]
+    async fn zero_never_unloads() {
+        let (url, seen) = fake_ollama(axum::http::StatusCode::OK).await;
+        let client = client_for(&url, 0);
+        for _ in 0..5 {
+            client.judge("a", "b").await.unwrap();
+        }
+        assert!(seen.lock().unwrap().iter().all(|(k, _)| *k == "chat"));
+    }
+
+    #[tokio::test]
+    async fn embedding_requests_do_not_count_towards_an_unload() {
+        // The embedding model keeps no prompt memory, and unloading it would
+        // only make the next search wait for a reload.
+        let (url, seen) = fake_ollama(axum::http::StatusCode::OK).await;
+        let client = client_for(&url, 2);
+        for _ in 0..5 {
+            client.embed(&["text".to_string()]).await.unwrap();
+        }
+        assert!(seen.lock().unwrap().iter().all(|(k, _)| *k == "embed"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_unload_does_not_fail_the_request() {
+        let (url, seen) = fake_ollama(axum::http::StatusCode::INTERNAL_SERVER_ERROR).await;
+        let client = client_for(&url, 1);
+        client.judge("a", "b").await.unwrap();
+        client.judge("a", "b").await.unwrap();
+        let kinds: Vec<_> = seen.lock().unwrap().iter().map(|(k, _)| *k).collect();
+        assert_eq!(kinds, ["chat", "generate", "chat", "generate"]);
     }
 
     #[tokio::test]

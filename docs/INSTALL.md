@@ -49,8 +49,9 @@ Settings shows which mode is in use. In low-memory mode:
   computer down.
 - If you use Ollama, Gather uses only its small embedding model (for search and matching
   names), one request at a time, and lets Ollama unload it a minute after the work is done.
-  Chat models need well over 1 GB of memory, which a 4 GB computer doesn't have to spare
-  next to the operating system. On 4 GB, also start Ollama with `OLLAMA_MAX_LOADED_MODELS=1`
+  Chat models need about 2 GB or more while they work (measured: 1.9 GB for `llama3.2:1b`,
+  2.6 GB for `llama3.2:3b`), which a 4 GB computer doesn't have to spare next to the operating
+  system. The search model needs about 0.4 GB. On 4 GB, also start Ollama with `OLLAMA_MAX_LOADED_MODELS=1`
   and `OLLAMA_NUM_PARALLEL=1`.
 
 Everything else works the same. To choose the mode yourself, start Gather with
@@ -216,8 +217,10 @@ Gather reads files with built-in rules. For search by meaning, and for more thor
 it can use a model running on this computer through [Ollama](https://ollama.com):
 
 1. Install Ollama and start it.
-2. Download the models, e.g. for a computer with about 4 GB of memory:
-   `ollama pull nomic-embed-text` (search) and `ollama pull llama3.2:1b` (reading files).
+2. Download the search model: `ollama pull nomic-embed-text`. If the computer has 8 GB of
+   memory or more and you want a model to read files too, add `ollama pull llama3.2:1b`. On a
+   computer with about 4 GB, skip the reading model and keep search only: the reading model
+   needs about 2 GB while it works and can make such a computer freeze.
 3. In Gather, open **Settings → AI model**, turn on **Use a local AI model**, press **Test** to
    check Gather can reach Ollama, pick the models and press **Save and restart**. Saving checks
    that the search model gives the 768-number vectors Gather's search uses, so Ollama must be
@@ -225,6 +228,13 @@ it can use a model running on this computer through [Ollama](https://ollama.com)
 
 Leave the model for reading files empty to use Ollama for search only, which needs far less
 memory.
+
+While a reading model works, Ollama keeps a copy of every section it has answered in memory, so
+its memory grows the longer it reads. Gather gives it back by unloading the model every 10 sections
+and loading it again on the next one (a few seconds, in the background; change it
+with `GATHER_OLLAMA_REFRESH_AFTER`). *Optional:* start Ollama with the environment variable
+`LLAMA_ARG_CACHE_RAM=0` and it never grows in the first place; see
+[CONFIGURATION.md](CONFIGURATION.md#local-llm-opt-in) for how to set it on each system.
 A model that reads files uses every processor core it can get. **Reading speed** in the same
 section limits how much of the time it works (Gentle is the default on a computer with little
 memory); if the computer still feels slow, clear the model for reading files and keep search. Files already in Gather keep what was found in them; the model reads files added after. To have it go back over the earlier ones, press **Read earlier files** under **Settings → Reading and logs**: it works in the spare time, shows how far it has got, can be stopped, and continues where it left off if started again. It only adds what the model finds; nothing is removed.
