@@ -517,7 +517,10 @@ fn list_zip(path: &Path) -> Result<Vec<String>, String> {
         if entry.is_dir() {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry.name().map_or_else(
+            |_| String::from_utf8_lossy(entry.name_raw()).into_owned(),
+            |n| n.into_owned(),
+        );
         let lower = name.to_ascii_lowercase();
         if [".json", ".jsonl", ".ndjson", ".md", ".markdown"]
             .iter()
