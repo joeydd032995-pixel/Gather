@@ -398,10 +398,10 @@ function AiSection() {
                 Model for reading files
               </label>
               <p className="setting-desc">
-                Pulls facts and relationships out of what you add. Without it Gather only finds
-                sentences in fixed shapes (like “We decided on X”), so the knowledge graph and
-                the contradiction check stay nearly empty. {SUGGESTED_CHAT} needs about 2 GB of
-                free memory while it works and suits a computer with 8 GB or more;{" "}
+                Pulls facts and relationships out of what you add. Without it Gather still keeps
+                plain sentences that state a figure, a date, a name or a decision, though fewer
+                and less well. {SUGGESTED_CHAT} needs about 2 GB of free memory while it works
+                and suits a computer with 8 GB or more;{" "}
                 {SUGGESTED_SMALL_CHAT} needs about 0.9 GB, fits a 4 GB computer and finds
                 fewer statements. Leave empty to use Ollama for search only, which needs far
                 less.
@@ -484,8 +484,8 @@ function AiSection() {
                 most of what a computer this size has to spare, and reading goes slowly. Gather
                 unloads it regularly and a minute after it's done, but the computer may still
                 freeze. {SUGGESTED_SMALL_CHAT} needs about 0.9 GB and finds fewer statements than a
-                larger model, but some. Without any model for reading files, only sentences in
-                fixed shapes are found.
+                larger model, but some. Without any model for reading files, Gather still keeps
+                plain sentences that state a figure, a date, a name or a decision.
               </Callout>
             </div>
           )}

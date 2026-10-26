@@ -12,6 +12,7 @@
 pub mod digest;
 pub mod digest_job;
 pub mod formats;
+pub mod general;
 pub mod image;
 pub mod ollama;
 pub mod pdf;
@@ -742,6 +743,25 @@ async fn process_unit_chunks(
             None => Vec::new(),
         };
         let mut llm_model = None;
+
+        // No reading model: the rules take only a few fixed sentence shapes,
+        // so also keep plain sentences that state a figure, a date, a name or
+        // a decision. They start below the rules' confidence and go to the
+        // review tray unless the subject is a nameable thing. With a model,
+        // its statements are better than sentences copied whole.
+        if config.extraction_general && ollama.and_then(|c| c.model.as_deref()).is_none() {
+            if let Some(text) = &readable {
+                let taken: Vec<(usize, usize)> = units
+                    .iter()
+                    .map(|(u, _, _)| (u.char_start, u.char_end))
+                    .collect();
+                units.extend(
+                    general::extract_units(text, &taken)
+                        .into_iter()
+                        .map(|u| (u, "rule_based", None)),
+                );
+            }
+        }
 
         if let (Some(text), Some((client, chat_model))) = (
             readable.as_deref(),

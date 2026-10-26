@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use gather_daemon::config::Config;
 use gather_daemon::extract;
+use gather_daemon::scan;
 use gather_daemon::{db, routes, AppState};
 
 async fn test_state() -> Option<AppState> {
@@ -79,8 +80,13 @@ async fn delete_fixture_artifact(state: &AppState, filename: &str) {
 /// is in flight" — a sibling test's pass may hold rows in 'processing' or be
 /// mid-write. Wait on the actual queue state instead, with a generous cap.
 async fn drain_extraction(state: &AppState) {
+    drain_extraction_with(state, None).await;
+}
+
+/// As [`drain_extraction`], with a reading model.
+async fn drain_extraction_with(state: &AppState, ollama: Option<&extract::ollama::OllamaClient>) {
     for _ in 0..200 {
-        extract::run_one_pass(&state.pool, &state.config, None)
+        extract::run_one_pass(&state.pool, &state.config, ollama)
             .await
             .expect("extraction pass");
         let (busy,): (i64,) = sqlx::query_as(
@@ -975,4 +981,186 @@ async fn source_code_is_stored_but_its_comments_are_not_read_for_statements() {
     .await
     .unwrap();
     assert!(stored >= 1, "the file's text is stored and stamped as read");
+}
+
+/// Units this artifact's text produced, as (statement, attrs).
+async fn units_of(state: &AppState, filename: &str) -> Vec<(String, Value)> {
+    sqlx::query(
+        "SELECT DISTINCT u.statement, u.attrs FROM atomic_units u \
+         JOIN atomic_unit_provenance p ON p.atomic_unit_id = u.id \
+         JOIN artifacts a ON a.id = p.artifact_id WHERE a.original_filename = $1 \
+         ORDER BY u.statement",
+    )
+    .bind(filename)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|r| (r.get("statement"), r.get("attrs")))
+    .collect()
+}
+
+async fn upload_text(state: &AppState, name: &str, text: &str) {
+    delete_fixture_artifact(state, name).await;
+    let res = routes::build_router(state.clone())
+        .oneshot(multipart_request(name, "text/markdown", text.as_bytes()))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::ACCEPTED, "{name}");
+}
+
+fn general_reading_state(mut state: AppState) -> AppState {
+    let mut config = Config::for_tests(std::env::var("DATABASE_URL").unwrap());
+    config.extraction_general = true;
+    state.config = Arc::new(config);
+    state
+}
+
+/// Ordinary notes hold few of the rules' fixed sentence shapes, so without a
+/// reading model almost nothing was found in them, and nothing downstream
+/// (graph, contradictions, merges, the review tray) had anything to work on.
+#[tokio::test]
+async fn ordinary_sentences_are_read_without_a_model() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let state = general_reading_state(state);
+    let m = Uuid::new_v4().simple().to_string();
+    let name = format!("ordinary-{m}.md");
+    upload_text(
+        &state,
+        &name,
+        &format!(
+            "The Zorblat{m} venue holds 300 people. Marta confirmed that the audit starts on 9 September.\n\n\
+             Thanks so much for yesterday, it was lovely to see everyone! Can you forward me the agenda?\n"
+        ),
+    )
+    .await;
+    drain_extraction(&state).await;
+
+    let units = units_of(&state, &name).await;
+    let read: Vec<&(String, Value)> = units
+        .iter()
+        .filter(|(_, attrs)| attrs["reader"] == "general")
+        .collect();
+    assert_eq!(read.len(), 2, "{units:?}");
+    assert!(
+        units
+            .iter()
+            .all(|(s, _)| !s.contains("Thanks") && !s.contains("agenda")),
+        "small talk and requests state nothing: {units:?}"
+    );
+    // The figure carries what the contradiction scan compares, and its subject
+    // became a thing in the graph.
+    let venue = read.iter().find(|(s, _)| s.contains("venue")).unwrap();
+    assert_eq!(venue.1["pattern"], "numeric");
+    assert_eq!(venue.1["value"], "300");
+    assert_eq!(venue.1["unit"], "people");
+    let (entities,): (i64,) = sqlx::query_as("SELECT count(*) FROM entities WHERE name ILIKE $1")
+        .bind(format!("%Zorblat{m}%"))
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    assert!(entities >= 1, "the venue is an entity");
+    // Below the rules' own 0.6.
+    let (confidence,): (f32,) = sqlx::query_as(
+        "SELECT max(u.confidence) FROM atomic_units u WHERE u.statement LIKE '%' || $1 || '%'",
+    )
+    .bind(format!("Zorblat{m}"))
+    .fetch_one(&state.pool)
+    .await
+    .unwrap();
+    assert!(confidence < 0.7, "{confidence}");
+}
+
+/// A model's own statements are better than sentences copied whole, so the
+/// ordinary reader is for when there is none.
+#[tokio::test]
+async fn a_reading_model_takes_the_place_of_the_ordinary_reader() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let mut state = general_reading_state(state);
+    let mut config = (*state.config).clone();
+    config.ollama_url = Some(spawn_fake_ollama().await);
+    config.ollama_model = Some("chat-model".to_string());
+    let client = extract::ollama::OllamaClient::from_config(&config)
+        .unwrap()
+        .unwrap();
+    state.config = Arc::new(config);
+
+    let m = Uuid::new_v4().simple().to_string();
+    let name = format!("modelled-{m}.md");
+    upload_text(
+        &state,
+        &name,
+        &format!("The Zorblat{m} venue holds 300 people. Marta confirmed that the audit starts on 9 September.\n"),
+    )
+    .await;
+    drain_extraction_with(&state, Some(&client)).await;
+    let units = units_of(&state, &name).await;
+    assert!(
+        units.iter().all(|(_, attrs)| attrs["reader"] != "general"),
+        "{units:?}"
+    );
+}
+
+/// The point of reading ordinary sentences: two notes that disagree about a
+/// figure are found, with no model at all.
+#[tokio::test]
+async fn two_notes_that_disagree_about_a_figure_are_set_against_each_other_without_a_model() {
+    let Some(state) = test_state().await else {
+        return;
+    };
+    let state = general_reading_state(state);
+    let m = Uuid::new_v4().simple().to_string();
+    for (name, text) in [
+        (
+            format!("depot-a-{m}.md"),
+            format!(
+                "Notes from the March visit. The Quorvex{m} depot holds 300 people when full.\n"
+            ),
+        ),
+        (
+            format!("depot-b-{m}.md"),
+            format!(
+                "Notes from the June visit. The Quorvex{m} depot holds 250 people when full.\n"
+            ),
+        ),
+    ] {
+        upload_text(&state, &name, &text).await;
+    }
+    for _ in 0..200 {
+        drain_extraction(&state).await;
+        scan::run_one_scan(&state.pool, &state.config, None)
+            .await
+            .expect("scan pass");
+        let (open,): (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM atomic_units WHERE contradiction_scanned_at IS NULL \
+             AND status = 'active' AND statement LIKE '%' || $1 || '%'",
+        )
+        .bind(format!("Quorvex{m}"))
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        if open == 0 {
+            break;
+        }
+    }
+    let found: Vec<(String, String)> = sqlx::query(
+        "SELECT c.detection_method, c.status::text AS status FROM contradictions c \
+         JOIN atomic_units a ON a.id = c.unit_a_id JOIN atomic_units b ON b.id = c.unit_b_id \
+         WHERE a.statement LIKE '%' || $1 || '%' AND b.statement LIKE '%' || $1 || '%'",
+    )
+    .bind(format!("Quorvex{m}"))
+    .fetch_all(&state.pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|r| (r.get("detection_method"), r.get("status")))
+    .collect();
+    assert_eq!(
+        found,
+        vec![("rule:numeric-mismatch".to_string(), "open".to_string())]
+    );
 }
