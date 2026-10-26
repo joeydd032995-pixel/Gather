@@ -94,13 +94,17 @@ const NON_STATEMENT_OPENERS: &[&str] = &[
     "warm",
     "bye",
     "goodbye",
-    "cc",
-    "re",
-    "fwd",
-    "subject",
-    "from",
-    "to",
     "sent",
+];
+
+/// Mail-header labels ("From: Dana", "Re: budget"). Without the colon these
+/// are ordinary words: "From 2022 to 2024 attendance rose from 80 to 140".
+const HEADER_LABELS: &[&str] = &["cc", "re", "fwd", "subject", "from", "to"];
+
+/// Words that open a noun phrase.
+const DETERMINERS: &[&str] = &[
+    "the", "a", "an", "this", "that", "these", "those", "my", "our", "your", "their", "his", "her",
+    "its", "some", "each", "every", "all", "any", "no",
 ];
 
 /// Auxiliaries, copulas and modals: the first of these ends a subject phrase.
@@ -551,6 +555,7 @@ const NUMBER_WORDS: &[&str] = &[
     "thousand",
     "million",
     "billion",
+    "zero",
     "dozen",
     "half",
     "third",
@@ -778,6 +783,22 @@ fn words(sentence: &str) -> Vec<(&str, String)> {
         .collect()
 }
 
+/// "has one maintainer", "with one exception": "one" is a count after a word
+/// that asks how many, and a pronoun or filler elsewhere ("one of the",
+/// "no one", "one day").
+fn counts_one(words: &[(&str, String)]) -> bool {
+    words.windows(3).any(|w| {
+        matches!(
+            w[0].1.as_str(),
+            "has" | "have" | "had" | "with" | "exactly" | "only"
+        ) && w[1].1 == "one"
+            && !matches!(
+                w[2].1.as_str(),
+                "of" | "more" | "another" | "or" | "day" | "way" | "thing"
+            )
+    })
+}
+
 /// What makes a sentence worth keeping: a figure, a date, a name, or a
 /// decision, report or plan. Without one it is an opinion or small talk.
 fn is_specific(sentence: &str, words: &[(&str, String)]) -> bool {
@@ -787,7 +808,8 @@ fn is_specific(sentence: &str, words: &[(&str, String)]) -> bool {
     }
     if words.iter().any(|(_, k)| {
         is_in(MONTHS, k) && k.len() > 3 || is_in(TIME_WORDS, k) || is_in(NUMBER_WORDS, k)
-    }) {
+    }) || counts_one(words)
+    {
         return true;
     }
     // A decision, report or preference verb says something when someone or
@@ -829,11 +851,11 @@ fn subject_of(words: &[(&str, String)]) -> Option<(String, usize)> {
     for (i, (_, k)) in words.iter().enumerate().take(limit) {
         // "Orders older than two years are archived": a verb-looking word that
         // opens a sentence is a noun when an auxiliary follows soon after.
-        let opens_as_noun = i == 0
+        let opens_as_noun = (i == 0 || (i == 1 && is_in(DETERMINERS, &words[0].1)))
             && !is_in(AUXILIARIES, k)
             && words
                 .iter()
-                .skip(1)
+                .skip(i + 1)
                 .take(6)
                 .any(|(_, a)| is_in(AUXILIARIES, a));
         if opens_as_noun {
@@ -857,6 +879,10 @@ fn subject_of(words: &[(&str, String)]) -> Option<(String, usize)> {
             // "The landlord, Mr Weber, wants ...": the first noun phrase.
             let first = phrase.join(" ");
             let first = first.split(',').next().unwrap_or("").trim().to_string();
+            // An article alone is no subject.
+            if is_in(DETERMINERS, &word_key(&first)) {
+                return Some((String::new(), i));
+            }
             // A phrase that runs into a relative clause ("A system that
             // suggests ...") or holds quoted or bracketed text is not a name.
             let last = word_key(first.split_whitespace().next_back().unwrap_or(""));
@@ -883,6 +909,18 @@ fn contraction_aux(k: &str) -> bool {
 }
 
 /// Whether `s`'s subject phrase is a pronoun or other non-name.
+/// "My landlord" names the landlord, as the rules read "My budget is ...".
+fn without_possessive(phrase: &str) -> String {
+    match phrase.split_once(char::is_whitespace) {
+        Some((first, rest))
+            if matches!(word_key(first).as_str(), "my" | "our") && !rest.trim().is_empty() =>
+        {
+            rest.trim().to_string()
+        }
+        _ => phrase.to_string(),
+    }
+}
+
 fn is_pronoun_phrase(subject: &str) -> bool {
     let k = word_key(subject.split_whitespace().next().unwrap_or(""));
     PRONOUN_SUBJECTS.contains(&k.as_str())
@@ -925,7 +963,8 @@ fn read(sentence: &str, statement: &str) -> Option<Reading> {
         return None;
     }
     let first_key = ws[0].1.as_str();
-    if is_in(NON_STATEMENT_OPENERS, first_key) && !p.first_person.is_match(sentence) {
+    let header = is_in(HEADER_LABELS, first_key) && ws[0].0.ends_with(':');
+    if (header || is_in(NON_STATEMENT_OPENERS, first_key)) && !p.first_person.is_match(sentence) {
         return None;
     }
     if !is_specific(sentence, &ws) {
@@ -936,6 +975,8 @@ fn read(sentence: &str, statement: &str) -> Option<Reading> {
     }
 
     let first_person = p.first_person.is_match(sentence);
+    // "My landlord lives in Paris" is about the landlord, not the author.
+    let speaker = first_person && !matches!(first_key, "my" | "our");
     let (subject_phrase, verb_at) = match subject_of(&ws) {
         Some((s, i)) => (Some(s), Some(i)),
         None => (None, None),
@@ -949,8 +990,8 @@ fn read(sentence: &str, statement: &str) -> Option<Reading> {
         None => return None,
     };
     let subject = match subject_phrase {
-        _ if first_person => Some("Me".to_string()),
-        Some(s) if !s.is_empty() && !is_pronoun_phrase(&s) => Some(s),
+        _ if speaker => Some("Me".to_string()),
+        Some(s) if !s.is_empty() && !is_pronoun_phrase(&s) => Some(without_possessive(&s)),
         _ => None,
     };
     let verb_key = ws[verb_at].1.as_str();
@@ -997,7 +1038,7 @@ fn read(sentence: &str, statement: &str) -> Option<Reading> {
         }
     }
 
-    let event_time = iso.and_then(|c| {
+    let event_time = iso.filter(|_| kind == "event").and_then(|c| {
         chrono::NaiveDate::parse_from_str(c.get(0)?.as_str(), "%Y-%m-%d")
             .ok()
             .and_then(|d| d.and_hms_opt(0, 0, 0))
@@ -1158,13 +1199,22 @@ fn figure_after(ws: &[(&str, String)], verb_at: usize) -> Option<(String, String
     let rest: Vec<&str> = ws[verb_at + 1..].iter().map(|(w, _)| *w).collect();
     let tail = rest.join(" ");
     let c = patterns().number_tail.captures(&tail)?;
+    let value_end = c.name("value")?.end();
     let value = c.name("value")?.as_str().to_string();
+    // "9:30" and "2025-06-30" are times and dates: the digits run on into the
+    // rest of one.
+    let mut after = tail[value_end..].chars();
+    if matches!(after.next(), Some(':' | '-' | '/'))
+        && after.next().is_some_and(|d| d.is_ascii_digit())
+    {
+        return None;
+    }
     let unit = c
         .name("unit")
         .map(|m| m.as_str().to_lowercase())
         .unwrap_or_default();
     // "12 March" and "9:30" are dates and times, not amounts.
-    if is_in(MONTHS, &unit) || is_in(TIME_WORDS, &unit) {
+    if is_in(MONTHS, &unit) || is_in(TIME_WORDS, &unit) || matches!(unit.as_str(), "am" | "pm") {
         return None;
     }
     // A unit that is only a grammar word says nothing about the figure.
@@ -1241,6 +1291,91 @@ mod tests {
             .into_iter()
             .map(|u| u.statement)
             .collect()
+    }
+
+    fn units(text: &str) -> Vec<ExtractedUnit> {
+        extract_units(text, &[])
+    }
+
+    #[test]
+    fn a_mail_header_is_not_read_but_prose_that_starts_with_the_same_word_is() {
+        assert!(statements("From: Dana Weber <dana@example.com>").is_empty());
+        assert!(statements("Subject: Quarterly budget figures for 2024").is_empty());
+        assert_eq!(
+            statements(
+                "From 2022 to 2024, the building's attendance rose from 80 to 140 visitors."
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn my_landlord_is_the_subject_of_a_sentence_about_the_landlord() {
+        let u = units("My landlord lives in Paris.");
+        assert_eq!(u.len(), 1);
+        assert_eq!(u[0].subject.as_deref(), Some("landlord"));
+        // Only I and we speak for the author.
+        let u = units("We rented the Leeds office in 2019.");
+        assert_eq!(u.len(), 1);
+        assert_eq!(u[0].subject.as_deref(), Some("Me"));
+    }
+
+    #[test]
+    fn a_date_in_a_fact_is_not_when_the_fact_became_true() {
+        let u = units("The audit deadline is 2025-06-30.");
+        assert_eq!(u.len(), 1);
+        assert_eq!(u[0].kind, "fact");
+        assert!(u[0].event_time.is_none(), "{:?}", u[0].event_time);
+        // Nor is it an amount.
+        assert_ne!(u[0].attrs["pattern"], "numeric", "{}", u[0].attrs);
+        // An event is dated by its own date.
+        let u = units("Marta moved to Leeds on 2024-03-01.");
+        assert_eq!(u.len(), 1);
+        assert_eq!(u[0].kind, "event");
+        assert!(u[0].event_time.is_some());
+    }
+
+    #[test]
+    fn counts_in_words_are_figures_only_where_they_count_something() {
+        assert_eq!(
+            statements("The project has one maintainer on call.").len(),
+            1
+        );
+        assert_eq!(statements("The project has zero open incidents.").len(), 1);
+        assert_eq!(
+            statements("The pilot ran with one exception in the second term.").len(),
+            1
+        );
+        assert!(statements("Honestly one never knows how these things go.").is_empty());
+        assert!(statements("It is one of those things we do sometimes.").is_empty());
+    }
+
+    #[test]
+    fn a_noun_that_looks_like_a_verb_after_the_article_stays_in_the_subject() {
+        let u = units("The orders older than two years are archived.");
+        assert_eq!(u.len(), 1);
+        assert_eq!(
+            u[0].subject.as_deref(),
+            Some("The orders older than two years")
+        );
+    }
+
+    #[test]
+    fn a_clock_time_is_not_an_amount() {
+        for text in [
+            "The project meeting starts at 9:30.",
+            "The project meeting starts at 12:30.",
+            "The project meeting starts at 9 pm.",
+            "The project meeting starts at 9am.",
+        ] {
+            let u = units(text);
+            assert_eq!(u.len(), 1, "{text}");
+            assert_ne!(u[0].attrs["pattern"], "numeric", "{text}: {}", u[0].attrs);
+        }
+        // A real amount after the same verb still is.
+        let u = units("The project budget is 9,000 euros.");
+        assert_eq!(u[0].attrs["pattern"], "numeric", "{}", u[0].attrs);
     }
 
     #[test]
