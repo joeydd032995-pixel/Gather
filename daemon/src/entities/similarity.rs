@@ -11,7 +11,7 @@
 //! containment cover that case, while still separating genuinely different
 //! names that happen to share a stem ("Java" vs "JavaScript").
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::extract::worth::{entity_name_worth_keeping, strip_wrappers};
 use crate::scan::score::{all_tokens, jaccard};
@@ -25,16 +25,13 @@ pub const DEFAULT_THRESHOLD: f32 = 0.6;
 /// "Non-zero", "Failure" and "No failure". Alike on the page, opposite in
 /// meaning, so never worth asking whether they are the same thing.
 fn is_negation_pair(a: &str, b: &str) -> bool {
-    const PREFIXES: [&str; 6] = ["non-", "non ", "not ", "no ", "anti-", "un"];
-    let (na, nb) = (
-        normalize_name(strip_wrappers(a)),
-        normalize_name(strip_wrappers(b)),
-    );
-    PREFIXES.iter().any(|p| {
-        na.strip_prefix(p).is_some_and(|rest| rest == nb)
-            || nb.strip_prefix(p).is_some_and(|rest| rest == na)
-    })
+    stripped_negation_pair(
+        &normalize_name(strip_wrappers(a)),
+        &normalize_name(strip_wrappers(b)),
+    )
 }
+
+const NEGATING_PREFIXES: [&str; 6] = ["non-", "non ", "not ", "no ", "anti-", "un"];
 
 /// Whether two entities are worth comparing at all: both must be names (not
 /// code comments, fragments or filler) and not opposites. Applied before any
@@ -146,6 +143,128 @@ pub fn features_similarity(a: &NameFeatures, b: &NameFeatures) -> f32 {
         .max(prefix_ratio(&a.normalized, &b.normalized))
 }
 
+/// A name reduced to what pair scoring needs, built once per name so that
+/// scoring every pair of n names does no per-pair allocation or hashing.
+/// Tokens and trigrams are interned to sorted, de-duplicated ids: the
+/// Jaccard of two id lists is the Jaccard of the strings they stand for.
+struct Prepared {
+    /// Passes [`names_comparable`]'s per-name checks (`entity_name_worth_keeping`).
+    worth: bool,
+    normalized: String,
+    chars: usize,
+    /// `normalize_name(strip_wrappers(name))`, the form [`is_negation_pair`] compares.
+    stripped: String,
+    tokens: Vec<u32>,
+    trigrams: Vec<u32>,
+}
+
+impl Prepared {
+    fn new(name: &str, ids: &mut HashMap<String, u32>) -> Self {
+        let normalized = normalize_name(name);
+        let mut intern = |s: String| -> u32 {
+            let next = ids.len() as u32;
+            *ids.entry(s).or_insert(next)
+        };
+        let mut tokens: Vec<u32> = all_tokens(&normalized)
+            .into_iter()
+            .map(&mut intern)
+            .collect();
+        tokens.sort_unstable();
+        tokens.dedup();
+        let mut trigrams: Vec<u32> = trigrams(&normalized).into_iter().map(&mut intern).collect();
+        trigrams.sort_unstable();
+        Self {
+            worth: entity_name_worth_keeping(name),
+            chars: normalized.chars().count(),
+            stripped: normalize_name(strip_wrappers(name)),
+            normalized,
+            tokens,
+            trigrams,
+        }
+    }
+}
+
+/// `intersection / union` of two sorted, de-duplicated id lists; 0 when
+/// either is empty.
+fn id_jaccard(a: &[u32], b: &[u32]) -> f32 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let (mut i, mut j, mut shared) = (0, 0, 0usize);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                shared += 1;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    shared as f32 / (a.len() + b.len() - shared) as f32
+}
+
+/// The most a Jaccard of two sets this size can reach (all of the smaller
+/// inside the larger).
+fn jaccard_ceiling(a: usize, b: usize) -> f32 {
+    if a == 0 || b == 0 {
+        0.0
+    } else {
+        a.min(b) as f32 / a.max(b) as f32
+    }
+}
+
+/// Every pair of names that [`names_comparable`] allows and
+/// [`name_similarity`] scores at `threshold` or more, as `(i, j, score)` with
+/// `i < j`, in index order. The same answer as scoring each pair with those
+/// two functions, without their per-pair allocations: pairs are checked
+/// against what their sizes allow before any list is intersected, so that
+/// 2,000 names take milliseconds, not the seconds a pair-by-pair pass does.
+pub fn similar_name_pairs(names: &[&str], threshold: f32) -> Vec<(usize, usize, f32)> {
+    let mut ids = HashMap::new();
+    let prepared: Vec<Prepared> = names.iter().map(|n| Prepared::new(n, &mut ids)).collect();
+    let mut out = Vec::new();
+    for (i, a) in prepared.iter().enumerate().filter(|(_, p)| p.worth) {
+        for (j, b) in prepared
+            .iter()
+            .enumerate()
+            .skip(i + 1)
+            .filter(|(_, p)| p.worth)
+        {
+            let score = if a.normalized.is_empty() || b.normalized.is_empty() {
+                0.0
+            } else if a.normalized == b.normalized {
+                1.0
+            } else {
+                // Each signal is at most its ceiling; when none can reach the
+                // threshold the pair is out without being intersected.
+                let ceiling = jaccard_ceiling(a.tokens.len(), b.tokens.len())
+                    .max(jaccard_ceiling(a.trigrams.len(), b.trigrams.len()))
+                    .max(jaccard_ceiling(a.chars, b.chars));
+                if ceiling < threshold {
+                    continue;
+                }
+                id_jaccard(&a.tokens, &b.tokens)
+                    .max(id_jaccard(&a.trigrams, &b.trigrams))
+                    .max(prefix_ratio(&a.normalized, &b.normalized))
+            };
+            if score >= threshold && !stripped_negation_pair(&a.stripped, &b.stripped) {
+                out.push((i, j, score));
+            }
+        }
+    }
+    out
+}
+
+/// [`is_negation_pair`] over names already stripped and normalized.
+fn stripped_negation_pair(na: &str, nb: &str) -> bool {
+    NEGATING_PREFIXES.iter().any(|p| {
+        na.strip_prefix(p).is_some_and(|rest| rest == nb)
+            || nb.strip_prefix(p).is_some_and(|rest| rest == na)
+    })
+}
+
 /// Score a candidate pair. `cosine_sim` is the pgvector cosine similarity when
 /// both entities have embeddings; it supersedes the text score, mirroring
 /// `scan::score::score_pair`'s treatment of unit similarity.
@@ -193,6 +312,198 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A spread of names a library really holds: duplicates differing in case,
+    /// punctuation or a suffix, opposites, wrapped and fragment-like names, and
+    /// many unrelated ones, from a fixed seed so a failure reproduces.
+    fn sample_names() -> Vec<String> {
+        let mut names: Vec<String> = [
+            "Postgres",
+            "PostgreSQL",
+            "postgres",
+            "New York",
+            "New York City",
+            "Java",
+            "JavaScript",
+            "Acme Holdings",
+            "Acme Holdings.",
+            "Jane Smith",
+            "J. Smith",
+            "Zero",
+            "Non-zero",
+            "Failure",
+            "No failure",
+            "`Zero`",
+            "\"Failure\"",
+            "* A zero",
+            "// null here",
+            "Me",
+            "a",
+            "Ab",
+            "42",
+            "the installs",
+            "C++",
+            ".NET",
+            "AI",
+            "ai-ml",
+            "AI ML",
+            // A prefix whose length ratio clears the bar while its token and
+            // trigram counts are too far apart to: only the prefix signal sees it.
+            "Aaaaaaaaaaaa",
+            "Aaaaaaaaaaaa bcdef",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let words = [
+            "orion",
+            "atlas",
+            "nimbus",
+            "helix",
+            "vega",
+            "lyra",
+            "migration",
+            "rollout",
+            "audit",
+            "budget",
+            "roadmap",
+            "backup",
+            "pipeline",
+            "dashboard",
+            "grafana",
+            "tailscale",
+            "rust",
+            "docker",
+            "kafka",
+            "redis",
+            "ollama",
+            "pgvector",
+            "berlin",
+            "lisbon",
+            "anthropic",
+        ];
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n as u64) as usize
+        };
+        for _ in 0..220 {
+            let mut parts: Vec<String> = (0..1 + next(3))
+                .map(|_| words[next(words.len())].to_string())
+                .collect();
+            if next(4) == 0 {
+                parts.push(format!("{}", next(40)));
+            }
+            let mut name = parts.join(" ");
+            match next(6) {
+                0 => name = name.to_uppercase(),
+                1 => name.push('.'),
+                2 => name = format!("Non-{name}"),
+                3 => name = format!("No {name}"),
+                4 => name.truncate(name.len().saturating_sub(next(4))),
+                _ => {}
+            }
+            names.push(name);
+        }
+        names
+    }
+
+    #[test]
+    fn similar_name_pairs_are_exactly_the_pairs_scored_one_by_one() {
+        let owned = sample_names();
+        let names: Vec<&str> = owned.iter().map(String::as_str).collect();
+        for threshold in [0.0, 0.3, 0.6, 0.9, 1.0] {
+            let mut expected = Vec::new();
+            for i in 0..names.len() {
+                for j in (i + 1)..names.len() {
+                    if !names_comparable(names[i], names[j]) {
+                        continue;
+                    }
+                    let score = name_similarity(names[i], names[j]);
+                    if score >= threshold {
+                        expected.push((i, j, score));
+                    }
+                }
+            }
+            let got = similar_name_pairs(&names, threshold);
+            let key = |p: &(usize, usize, f32)| (p.0, p.1);
+            assert_eq!(
+                got.iter().map(key).collect::<Vec<_>>(),
+                expected.iter().map(key).collect::<Vec<_>>(),
+                "pairs differ at threshold {threshold}"
+            );
+            for (g, e) in got.iter().zip(&expected) {
+                assert!(
+                    (g.2 - e.2).abs() < 1e-6,
+                    "{} / {}: {} vs {}",
+                    names[g.0],
+                    names[g.1],
+                    g.2,
+                    e.2
+                );
+            }
+            if threshold == 0.6 {
+                assert!(!got.is_empty(), "the sample should hold real duplicates");
+            }
+        }
+    }
+
+    /// How long the pairwise pass takes at the most names the suggestions
+    /// endpoint compares. Scoring each pair with `names_comparable` and
+    /// `name_similarity` took seconds here, long enough to stall the app.
+    /// `cargo test --release --lib entities::similarity::tests::scale -- --ignored --exact --nocapture`
+    #[test]
+    #[ignore]
+    fn scale() {
+        let words = [
+            "orion",
+            "atlas",
+            "nimbus",
+            "helix",
+            "vega",
+            "lyra",
+            "pegasus",
+            "titan",
+            "aurora",
+            "zephyr",
+            "comet",
+            "nova",
+            "migration",
+            "rollout",
+            "audit",
+            "budget",
+            "review",
+            "roadmap",
+            "backup",
+            "pipeline",
+            "dashboard",
+            "sync",
+            "gateway",
+            "billing",
+        ];
+        let owned: Vec<String> = (0..2_000)
+            .map(|i| {
+                format!(
+                    "{} {} {}",
+                    words[i % words.len()],
+                    words[(i / words.len()) % words.len()],
+                    i / 100
+                )
+            })
+            .collect();
+        let names: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let started = std::time::Instant::now();
+        let pairs = similar_name_pairs(&names, DEFAULT_THRESHOLD);
+        let took = started.elapsed();
+        println!("{} names: {} pairs in {took:?}", names.len(), pairs.len());
+        assert!(
+            took < std::time::Duration::from_secs(3),
+            "{} names took {took:?}",
+            names.len()
+        );
     }
 
     #[test]

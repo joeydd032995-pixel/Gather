@@ -170,35 +170,36 @@ pub async fn merge_suggestions(
     }
 
     // --- text pass (always runs) -------------------------------------------
-    for i in 0..entities.len() {
-        for j in (i + 1)..entities.len() {
-            let (a, b) = (&entities[i].0, &entities[j].0);
-            // Different explicit kinds are unlikely to be the same thing.
-            // Everything the extractor creates is 'other' (persist.rs), so
-            // this only separates deliberately typed entities.
-            if a.kind != b.kind && a.kind != "other" && b.kind != "other" {
-                continue;
-            }
-            if seen.contains(&(a.id, b.id)) || seen.contains(&(b.id, a.id)) {
-                continue;
-            }
-            if dismissed.contains(&(a.id, b.id)) {
-                continue;
-            }
-            if !similarity::names_comparable(&a.name, &b.name) {
-                continue;
-            }
-            let score = similarity::name_similarity(&a.name, &b.name);
-            if score < threshold {
-                continue;
-            }
-            scored.push(MergeSuggestion {
-                a: a.clone(),
-                b: b.clone(),
-                score,
-                method: similarity::pair_method(None),
-            });
+    // Scoring is pairwise and pure CPU, so it runs off the async workers: on a
+    // small machine a pass over a few thousand names would otherwise hold
+    // every worker, and with them every other request, until it finished.
+    let names: Vec<String> = entities.iter().map(|(e, _)| e.name.clone()).collect();
+    let pairs = tokio::task::spawn_blocking(move || {
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        similarity::similar_name_pairs(&refs, threshold)
+    })
+    .await
+    .map_err(|e| ApiError::Internal(e.into()))?;
+    for (i, j, score) in pairs {
+        let (a, b) = (&entities[i].0, &entities[j].0);
+        // Different explicit kinds are unlikely to be the same thing.
+        // Everything the extractor creates is 'other' (persist.rs), so
+        // this only separates deliberately typed entities.
+        if a.kind != b.kind && a.kind != "other" && b.kind != "other" {
+            continue;
         }
+        if seen.contains(&(a.id, b.id)) || seen.contains(&(b.id, a.id)) {
+            continue;
+        }
+        if dismissed.contains(&(a.id, b.id)) {
+            continue;
+        }
+        scored.push(MergeSuggestion {
+            a: a.clone(),
+            b: b.clone(),
+            score,
+            method: similarity::pair_method(None),
+        });
     }
 
     scored.sort_by(|x, y| y.score.total_cmp(&x.score));

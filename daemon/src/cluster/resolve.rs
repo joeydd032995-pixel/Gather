@@ -20,9 +20,7 @@ use crate::decide::live::LiveThresholds;
 use crate::decide::{best_score, MergeSignals};
 use crate::entities::merge::unmerge_for_supersession_in;
 use crate::entities::merge_entities_in;
-use crate::entities::similarity::{
-    features_similarity, name_similarity, names_comparable, NameFeatures,
-};
+use crate::entities::similarity::{name_similarity, names_comparable, similar_name_pairs};
 use crate::safety::certificate::{Decision, InferenceCertificate, Predicate};
 use crate::safety::identity::{
     choose_survivor, plan, EntityRecord, IdentityConfig, IdentityPlan, Link, PairEvidence,
@@ -125,25 +123,24 @@ async fn load_evidence(
     threshold: f32,
 ) -> anyhow::Result<Vec<PairEvidence>> {
     let mut out = Vec::new();
-    let features: Vec<NameFeatures> = records.iter().map(|r| NameFeatures::new(&r.name)).collect();
-    for (i, a) in records.iter().enumerate() {
-        for (j, b) in records.iter().enumerate().skip(i + 1) {
-            if !names_comparable(&a.name, &b.name) {
-                continue;
-            }
-            let text = features_similarity(&features[i], &features[j]);
-            if text >= threshold {
-                out.push(PairEvidence {
-                    a: a.id,
-                    b: b.id,
-                    signals: MergeSignals {
-                        cosine: None,
-                        text: Some(text),
-                    },
-                    method: "rule:name-similarity".into(),
-                });
-            }
-        }
+    // Pairwise and pure CPU: off the async workers, so a pass over a large
+    // library doesn't hold up the requests the app is making meanwhile.
+    let names: Vec<String> = records.iter().map(|r| r.name.clone()).collect();
+    let pairs = tokio::task::spawn_blocking(move || {
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        similar_name_pairs(&refs, threshold)
+    })
+    .await?;
+    for (i, j, text) in pairs {
+        out.push(PairEvidence {
+            a: records[i].id,
+            b: records[j].id,
+            signals: MergeSignals {
+                cosine: None,
+                text: Some(text),
+            },
+            method: "rule:name-similarity".into(),
+        });
     }
     let ids: Vec<Uuid> = records.iter().map(|r| r.id).collect();
     let names: HashMap<Uuid, &str> = records.iter().map(|r| (r.id, r.name.as_str())).collect();
