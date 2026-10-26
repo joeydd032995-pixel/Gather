@@ -516,9 +516,12 @@ async fn spawn_fake_ollama() -> String {
             .map(String::from)
     }
     async fn chat(Json(body): Json<Value>) -> Result<Json<Value>, StatusCode> {
-        let text = body
-            .pointer("/messages/1/content")
-            .and_then(Value::as_str)
+        // The text to read is the last message; the ones before it are the
+        // instructions and worked examples.
+        let text = body["messages"]
+            .as_array()
+            .and_then(|messages| messages.last())
+            .and_then(|message| message["content"].as_str())
             .unwrap_or("");
         if word(text, "Broken").is_some() {
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
