@@ -53,6 +53,8 @@ const MIN_K = 0.15;
 const MAX_K = 5;
 const MINIMAP_W = 176;
 const MINIMAP_H = 116;
+/** How long opening the graph may spend laying it out before drawing. */
+const SETTLE_BUDGET_MS = 800;
 /** The detail drawer's width, which the camera leaves room for. */
 const DRAWER_W = 360;
 
@@ -428,8 +430,31 @@ export default function Graph({
         if (!interacted.current) fit();
       });
     simRef.current = simulation;
-    // Fit early too, so the first frames aren't a speck in the middle.
-    const early = setTimeout(() => !interacted.current && fit(), 450);
+    // Opening the graph: lay it out without drawing. A frame costs far more
+    // to paint than to compute (software-drawn canvases, which small
+    // computers often fall back to, kept the page busy for seconds while the
+    // layout settled in the open), so the settling is done before anything
+    // is drawn. A big graph hands what is left to the animation. Changing
+    // a filter still rearranges what is on screen gently.
+    let settled = false;
+    if (!warm) {
+      simulation.stop();
+      const deadline = performance.now() + SETTLE_BUDGET_MS;
+      while (simulation.alpha() >= simulation.alphaMin() && performance.now() < deadline) {
+        simulation.tick();
+      }
+      settled = simulation.alpha() < simulation.alphaMin();
+      if (!settled) simulation.restart();
+    }
+    // The first size reading arrives with the stage's first frame, and the
+    // view is set from it: fit once it has.
+    const early = setTimeout(
+      () => {
+        requestDraw();
+        if (!interacted.current) fit();
+      },
+      settled ? 120 : 450,
+    );
     return () => {
       clearTimeout(early);
       simulation.stop();
