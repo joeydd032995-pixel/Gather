@@ -51,7 +51,10 @@ Settings shows which mode is in use. In low-memory mode:
   names), one request at a time, and lets Ollama unload it a minute after the work is done.
   Chat models need about 2 GB or more while they work (measured: 1.9 GB for `llama3.2:1b`,
   2.6 GB for `llama3.2:3b`), which a 4 GB computer doesn't have to spare next to the operating
-  system. The search model needs about 0.4 GB. On 4 GB, also start Ollama with `OLLAMA_MAX_LOADED_MODELS=1`
+  system. The one that fits is `smollm2:360m`, about 0.9 GB while it works: it finds fewer
+  statements than the larger ones (about a fifth of them in a test on ordinary notes, where
+  `llama3.2:1b` found about half), but some, where without any chat model Gather finds only
+  sentences in fixed shapes. The search model needs about 0.4 GB. On 4 GB, also start Ollama with `OLLAMA_MAX_LOADED_MODELS=1`
   and `OLLAMA_NUM_PARALLEL=1`.
 
 Everything else works the same. To choose the mode yourself, start Gather with
@@ -219,15 +222,23 @@ it can use a model running on this computer through [Ollama](https://ollama.com)
 1. Install Ollama and start it.
 2. Download the search model: `ollama pull nomic-embed-text`. If the computer has 8 GB of
    memory or more and you want a model to read files too, add `ollama pull llama3.2:1b`. On a
-   computer with about 4 GB, skip the reading model and keep search only: the reading model
-   needs about 2 GB while it works and can make such a computer freeze.
+   computer with about 4 GB, add `ollama pull smollm2:360m` instead: it needs about 0.9 GB while
+   it works, and finds some of what a larger model would. Without any model for reading files,
+   Gather finds only sentences in fixed shapes ("We decided on X", "My rent is 1,150 a month"),
+   which ordinary notes and documents rarely hold, so the knowledge graph, contradictions and
+   groups stay almost empty. A 2 GB model such as `llama3.2:1b` can make a 4 GB computer freeze.
 3. In Gather, open **Settings → AI model**, turn on **Use a local AI model**, press **Test** to
    check Gather can reach Ollama, pick the models and press **Save and restart**. Saving checks
    that the search model gives the 768-number vectors Gather's search uses, so Ollama must be
    running.
 
 Leave the model for reading files empty to use Ollama for search only, which needs far less
-memory.
+memory but means reading finds only those fixed sentence shapes.
+
+On a computer with little memory Gather gives a reading model short pieces of each section
+(400 bytes, cut at sentence ends) rather than the whole of it, because small models answer short
+passages far better; change it with `GATHER_OLLAMA_PIECE_BYTES`. Source code is never read for
+statements, whatever the model.
 
 While a reading model works, Ollama keeps a copy of every section it has answered in memory, so
 its memory grows the longer it reads. Gather gives it back by unloading the model every 10 sections

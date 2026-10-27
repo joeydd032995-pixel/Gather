@@ -48,6 +48,9 @@ pub struct OllamaClient {
     num_ctx: Option<u32>,
     one_at_a_time: bool,
     refresh_after: u32,
+    /// Longest stretch of a section sent to the reading model at once; 0 sends
+    /// whole sections.
+    piece_bytes: usize,
 }
 
 /// Why a caption could not be produced.
@@ -84,6 +87,29 @@ Keep the author\'s hedging: \"might\", \"plans to\", \"is considering\" and \
 Take nothing from code, configuration, logs or tables. \
 evidence_span MUST be copied verbatim from the input. \
 If the text states no facts, answer {\"units\": []}. No commentary.";
+
+/// Worked examples sent ahead of every section, as earlier turns of the chat.
+/// Without them the smaller models copy the answer format back with its
+/// placeholder words (or answer nothing); with them, `llama3.2:1b` went from
+/// finding none of the statements in ordinary notes to about half. They show
+/// a hedged claim kept hedged, one sentence split into two statements, a
+/// request left out, and a section with nothing to find.
+const EXTRACTION_EXAMPLES: [(&str, &str); 3] = [
+    (
+        "Priya moved the launch to 14 March because the vendor contract slipped. \
+We still need legal to sign off. Please bring your laptop.",
+        r#"{"units":[{"kind":"event","statement":"Priya moved the launch to 14 March because the vendor contract slipped.","subject":"Priya","objects":[{"name":"launch","relation":"moved"}],"evidence_span":"Priya moved the launch to 14 March because the vendor contract slipped.","confidence":0.9},{"kind":"claim","statement":"The launch still needs sign-off from legal.","subject":"launch","objects":[{"name":"legal","relation":"needs_signoff_from"}],"evidence_span":"We still need legal to sign off.","confidence":0.8}]}"#,
+    ),
+    (
+        "I think we should switch to Postgres at some point. My rent is 1,150 a month and \
+the lease ends in June 2027. Great talking to you!",
+        r#"{"units":[{"kind":"preference","statement":"The author thinks they should switch to Postgres at some point.","subject":"the author","objects":[{"name":"Postgres","relation":"may_switch_to"}],"evidence_span":"I think we should switch to Postgres at some point.","confidence":0.6},{"kind":"fact","statement":"The author's rent is 1,150 a month.","subject":"the author","objects":[],"evidence_span":"My rent is 1,150 a month","confidence":0.9},{"kind":"fact","statement":"The lease ends in June 2027.","subject":"the lease","objects":[],"evidence_span":"the lease ends in June 2027","confidence":0.9}]}"#,
+    ),
+    (
+        "Thanks again for the great meeting! Talk soon. Can you send me the slides?",
+        r#"{"units":[]}"#,
+    ),
+];
 
 const DIGEST_SYSTEM_PROMPT: &str = "You summarize a document for its owner, using ONLY the \
 text provided. Respond with JSON only: {\"summary\": \"two or three plain sentences saying what \
@@ -136,6 +162,7 @@ impl OllamaClient {
             num_ctx: config.ollama_num_ctx,
             one_at_a_time: config.ollama_one_at_a_time,
             refresh_after: config.ollama_refresh_after,
+            piece_bytes: config.ollama_piece_bytes,
         }))
     }
 
@@ -320,17 +347,60 @@ impl OllamaClient {
     /// LLM-assisted extraction over one chunk. Anti-hallucination gate: a
     /// unit is kept only if its evidence_span appears verbatim in the chunk;
     /// its char offsets come from that containment check.
+    ///
+    /// With `piece_bytes` set, the chunk goes to the model in pieces cut at
+    /// the ends of paragraphs and sentences; a piece that fails is skipped, so
+    /// the rest of the chunk is still read, and the offsets of what is found
+    /// still point into the whole chunk.
     pub async fn extract(&self, chunk: &str) -> Result<Vec<ExtractedUnit>, String> {
+        self.chat_model()?;
+        let mut units: Vec<ExtractedUnit> = Vec::new();
+        let (mut answered, mut failed) = (0usize, 0usize);
+        let mut last_error = String::new();
+        for (offset, piece) in split_pieces(chunk, self.piece_bytes) {
+            match self.extract_piece(piece).await {
+                Ok(found) => {
+                    answered += 1;
+                    for mut unit in found {
+                        // The same statement from two pieces (a sentence cut
+                        // short, a repeated line) is one statement.
+                        if units.iter().any(|u| u.statement == unit.statement) {
+                            continue;
+                        }
+                        unit.char_start += offset;
+                        unit.char_end += offset;
+                        units.push(unit);
+                    }
+                }
+                Err(e) => {
+                    failed += 1;
+                    last_error = e;
+                }
+            }
+        }
+        if answered == 0 && failed > 0 {
+            return Err(last_error);
+        }
+        if failed > 0 {
+            tracing::warn!(
+                failed,
+                answered,
+                error = %last_error,
+                "llm extraction failed on part of a section; the rest was read"
+            );
+        }
+        Ok(units)
+    }
+
+    /// One request: a piece of a section (or all of it).
+    async fn extract_piece(&self, chunk: &str) -> Result<Vec<ExtractedUnit>, String> {
         let body = Self::capped(
             self.body(
                 json!({
                     "model": self.chat_model()?,
                     "stream": false,
                     "format": "json",
-                    "messages": [
-                        { "role": "system", "content": EXTRACTION_SYSTEM_PROMPT },
-                        { "role": "user", "content": chunk },
-                    ],
+                    "messages": extraction_messages(chunk),
                 }),
                 true,
             ),
@@ -356,8 +426,14 @@ impl OllamaClient {
             .pointer("/message/content")
             .and_then(Value::as_str)
             .ok_or("ollama chat response missing message.content")?;
-        let parsed: Value = serde_json::from_str(content)
-            .map_err(|e| format!("model returned non-JSON content: {e}"))?;
+        // A reply that ran into the token limit is cut off mid-way, which a
+        // small model's long list of statements often does: keep the ones it
+        // finished rather than losing them all.
+        let parsed: Value = match serde_json::from_str(content) {
+            Ok(parsed) => parsed,
+            Err(e) => salvage_units(content)
+                .ok_or_else(|| format!("model returned non-JSON content: {e}"))?,
+        };
 
         Ok(parse_llm_units(&parsed, chunk))
     }
@@ -518,6 +594,117 @@ pub(crate) fn parse_model_digest(parsed: &Value) -> Result<ModelDigest, String> 
         takeaways,
         open_questions,
     })
+}
+
+/// The chat for one extraction request: the instructions, the worked
+/// examples as earlier turns, then the text to read.
+fn extraction_messages(chunk: &str) -> Value {
+    let mut messages = vec![json!({ "role": "system", "content": EXTRACTION_SYSTEM_PROMPT })];
+    for (text, answer) in EXTRACTION_EXAMPLES {
+        messages.push(json!({ "role": "user", "content": text }));
+        messages.push(json!({ "role": "assistant", "content": answer }));
+    }
+    messages.push(json!({ "role": "user", "content": chunk }));
+    Value::Array(messages)
+}
+
+/// The finished unit objects of a reply that was cut off before it closed,
+/// as the `{"units": [...]}` it would have been. None when there are none.
+fn salvage_units(content: &str) -> Option<Value> {
+    let list = content.find("\"units\"")?;
+    let rest = &content[list..];
+    let open = rest.find('[')?;
+    let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
+    let mut object_start = None;
+    let mut units = Vec::new();
+    for (i, byte) in rest.bytes().enumerate().skip(open + 1) {
+        if in_string {
+            match byte {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' => {
+                if depth == 0 {
+                    object_start = Some(i);
+                }
+                depth += 1;
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    if let Some(start) = object_start.take() {
+                        if let Ok(unit) = serde_json::from_str::<Value>(&rest[start..=i]) {
+                            units.push(unit);
+                        }
+                    }
+                }
+            }
+            b']' if depth == 0 => break,
+            _ => {}
+        }
+    }
+    (!units.is_empty()).then(|| json!({ "units": units }))
+}
+
+/// Where the last sentence in `window` ends (after the space or line break
+/// that follows its full stop, question mark or exclamation mark).
+fn last_sentence_end(window: &str) -> Option<usize> {
+    let bytes = window.as_bytes();
+    (0..bytes.len().saturating_sub(1))
+        .rev()
+        .find(|&i| matches!(bytes[i], b'.' | b'?' | b'!') && bytes[i + 1].is_ascii_whitespace())
+        .map(|i| i + 2)
+}
+
+/// `text` in pieces of at most `max` bytes, each with its byte offset into
+/// `text`, cut at the last paragraph end, sentence end, line end or space in
+/// reach (else at a character boundary). Pieces with nothing in them, such as
+/// the blanks left where code or tables were taken out, are left out. `max` 0,
+/// or text that already fits, gives the whole text as one piece.
+fn split_pieces(text: &str, max: usize) -> Vec<(usize, &str)> {
+    if text.trim().is_empty() {
+        return Vec::new();
+    }
+    if max == 0 || text.len() <= max {
+        return vec![(0, text)];
+    }
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let mut end = (start + max).min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end < text.len() {
+            let window = &text[start..end];
+            let cut = window
+                .rfind("\n\n")
+                .map(|i| i + 2)
+                .or_else(|| last_sentence_end(window))
+                .or_else(|| window.rfind('\n').map(|i| i + 1))
+                .or_else(|| window.rfind(' ').map(|i| i + 1))
+                .filter(|&cut| cut > 0);
+            if let Some(cut) = cut {
+                end = start + cut;
+            }
+        }
+        // A character wider than `max` still has to go somewhere.
+        if end == start {
+            end = start + text[start..].chars().next().map_or(1, char::len_utf8);
+        }
+        let piece = &text[start..end];
+        if !piece.trim().is_empty() {
+            pieces.push((start, piece));
+        }
+        start = end;
+    }
+    pieces
 }
 
 const VALID_KINDS: &[(&str, &str)] = &[
@@ -798,6 +985,273 @@ mod tests {
         client.judge("a", "b").await.unwrap();
         let kinds: Vec<_> = seen.lock().unwrap().iter().map(|(k, _)| *k).collect();
         assert_eq!(kinds, ["chat", "generate", "chat", "generate"]);
+    }
+
+    #[test]
+    fn pieces_tile_the_text_and_stay_within_the_limit() {
+        let text = "First paragraph, two sentences. Here is the second one.\n\n\
+                    Another paragraph follows, with a longer sentence that runs on for a while. \
+                    And a short one! Is this a question? Yes it is.\nA line break, then more words \
+                    without any full stop at all until the very end of the text";
+        for max in [20, 40, 60, 100, 1000] {
+            let pieces = split_pieces(text, max);
+            let mut rebuilt = String::new();
+            for (offset, piece) in &pieces {
+                assert_eq!(&text[*offset..*offset + piece.len()], *piece, "max {max}");
+                assert!(
+                    piece.len() <= max.max(text.len().min(max)),
+                    "max {max}: {piece:?}"
+                );
+                rebuilt.push_str(piece);
+            }
+            assert_eq!(rebuilt, text, "max {max}: nothing lost, nothing repeated");
+        }
+    }
+
+    #[test]
+    fn pieces_end_where_a_sentence_ends() {
+        let text = "Alpha beta gamma. Delta epsilon zeta. Eta theta iota. Kappa lambda mu.";
+        let pieces = split_pieces(text, 40);
+        assert_eq!(
+            pieces,
+            vec![
+                (0, "Alpha beta gamma. Delta epsilon zeta. "),
+                (38, "Eta theta iota. Kappa lambda mu.")
+            ]
+        );
+        let paragraphs = "One sentence here. Another one.\n\nSecond paragraph starts. It goes on.";
+        assert_eq!(
+            split_pieces(paragraphs, 40)[0].1,
+            "One sentence here. Another one.\n\n"
+        );
+    }
+
+    #[test]
+    fn pieces_handle_unbroken_runs_and_wide_characters() {
+        // No break to cut at: cut at a character boundary, never inside one.
+        let run = "é".repeat(50);
+        for (offset, piece) in split_pieces(&run, 7) {
+            assert!(piece.len() <= 7 && piece.chars().all(|c| c == 'é'));
+            assert!(run.is_char_boundary(offset));
+        }
+        // A limit smaller than one character still moves forward.
+        let pieces = split_pieces("日本語", 1);
+        assert_eq!(pieces.iter().map(|(_, p)| *p).collect::<String>(), "日本語");
+    }
+
+    #[test]
+    fn pieces_skip_blanks_and_keep_short_or_unlimited_text_whole() {
+        assert!(split_pieces("  \n\n \t", 50).is_empty());
+        assert!(split_pieces("", 50).is_empty());
+        assert_eq!(split_pieces("short text", 50), vec![(0, "short text")]);
+        let long = "word ".repeat(100);
+        assert_eq!(
+            split_pieces(&long, 0),
+            vec![(0, long.as_str())],
+            "0 sends it whole"
+        );
+        // A stretch blanked out (code or a table taken from the section) sends
+        // nothing: no piece is only spaces.
+        let blanked = format!("Real prose here. {}Real prose again.", " ".repeat(300));
+        let pieces = split_pieces(&blanked, 60);
+        assert!(pieces.iter().all(|(_, p)| !p.trim().is_empty()));
+        assert!(pieces.iter().any(|(_, p)| p.contains("again")));
+    }
+
+    #[test]
+    fn a_reply_cut_off_mid_way_keeps_the_units_it_finished() {
+        let cut = r#"{"units":[{"kind":"fact","statement":"A { brace } in text, and a \"quote\".","evidence_span":"x"},{"kind":"fact","statement":"Second.","evidence_span":"y"},{"kind":"fact","statement":"Third is cut of"#;
+        let salvaged = salvage_units(cut).unwrap();
+        let units = salvaged["units"].as_array().unwrap();
+        assert_eq!(units.len(), 2, "the unfinished third is dropped");
+        assert_eq!(
+            units[0]["statement"],
+            "A { brace } in text, and a \"quote\"."
+        );
+        assert_eq!(units[1]["statement"], "Second.");
+        // Nothing finished, or not a reply at all: nothing to keep.
+        assert!(salvage_units(r#"{"units":[{"kind":"fact","statement":"cut"#).is_none());
+        assert!(salvage_units("the model rambled").is_none());
+        assert!(salvage_units(r#"{"other": [1, 2"#).is_none());
+        // A closed list is whatever it holds.
+        assert_eq!(
+            salvage_units(r#"{"units":[{"a":1}],"trailing": tru"#).unwrap()["units"],
+            json!([{ "a": 1 }])
+        );
+    }
+
+    #[test]
+    fn the_worked_examples_are_themselves_valid_answers() {
+        // Each answer must pass the checks every reply does (verbatim
+        // evidence, whole-sentence statements), or the model is taught to
+        // write what would be thrown away.
+        for (text, answer) in EXTRACTION_EXAMPLES {
+            let parsed: Value = serde_json::from_str(answer).unwrap();
+            let written = parsed["units"].as_array().unwrap().len();
+            assert_eq!(parse_llm_units(&parsed, text).len(), written, "{text}");
+        }
+        let messages = extraction_messages("the section");
+        let messages = messages.as_array().unwrap();
+        assert_eq!(messages.len(), 2 + 2 * EXTRACTION_EXAMPLES.len());
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages.last().unwrap()["content"], "the section");
+        assert_eq!(messages.last().unwrap()["role"], "user");
+    }
+
+    type Requests = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
+
+    /// A stand-in chat endpoint: records each request, and answers the nth
+    /// (counting from 0) with whatever `reply(n, request)` says.
+    async fn fake_chat<F>(reply: F) -> (String, Requests)
+    where
+        F: Fn(usize, &Value) -> (axum::http::StatusCode, String) + Send + Sync + 'static,
+    {
+        use axum::extract::State;
+        use axum::routing::post;
+        use axum::{Json, Router};
+
+        let requests = Requests::default();
+        let reply = std::sync::Arc::new(reply);
+        let app = Router::new()
+            .route(
+                "/api/chat",
+                post(
+                    move |State(log): State<Requests>, Json(body): Json<Value>| {
+                        let reply = reply.clone();
+                        async move {
+                            let n = {
+                                let mut log = log.lock().unwrap();
+                                log.push(body.clone());
+                                log.len() - 1
+                            };
+                            let (status, content) = reply(n, &body);
+                            (status, Json(json!({ "message": { "content": content } })))
+                        }
+                    },
+                ),
+            )
+            .with_state(requests.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (url, requests)
+    }
+
+    fn reading_client(url: &str, piece_bytes: usize) -> OllamaClient {
+        let mut c = config_with_ollama(url, false);
+        c.ollama_model = Some("chat-model".to_string());
+        c.ollama_piece_bytes = piece_bytes;
+        OllamaClient::from_config(&c).unwrap().unwrap()
+    }
+
+    /// The last line of the text the model was asked to read, as a unit.
+    fn quote_the_first_sentence(request: &Value) -> String {
+        let text = request["messages"].as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap();
+        let sentence = text.split_inclusive(". ").next().unwrap().trim();
+        json!({ "units": [{
+            "kind": "fact", "statement": sentence, "evidence_span": sentence,
+        }] })
+        .to_string()
+    }
+
+    const SECTION: &str = "The first sentence is here. The second sentence follows it. \
+        The third sentence is a little longer than the others. A fourth sentence closes it.";
+
+    #[tokio::test]
+    async fn a_long_section_is_read_in_pieces_and_offsets_point_into_the_whole() {
+        let (url, requests) =
+            fake_chat(|_, req| (axum::http::StatusCode::OK, quote_the_first_sentence(req))).await;
+        let client = reading_client(&url, 70);
+        let units = client.extract(SECTION).await.unwrap();
+
+        let requests = requests.lock().unwrap();
+        assert!(requests.len() >= 2, "{} requests", requests.len());
+        for request in requests.iter() {
+            let messages = request["messages"].as_array().unwrap();
+            let piece = messages.last().unwrap()["content"].as_str().unwrap();
+            assert!(piece.len() <= 70, "{piece:?}");
+            assert_eq!(
+                messages.len(),
+                2 + 2 * EXTRACTION_EXAMPLES.len(),
+                "every request carries the worked examples"
+            );
+        }
+        assert_eq!(units.len(), requests.len(), "one first sentence per piece");
+        for unit in &units {
+            assert_eq!(
+                &SECTION[unit.char_start..unit.char_end],
+                unit.statement,
+                "the span is the quoted text, located in the whole section"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn without_a_piece_size_the_whole_section_is_one_request() {
+        let (url, requests) =
+            fake_chat(|_, req| (axum::http::StatusCode::OK, quote_the_first_sentence(req))).await;
+        let units = reading_client(&url, 0).extract(SECTION).await.unwrap();
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert_eq!(units.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_piece_that_fails_does_not_cost_the_others() {
+        let (url, requests) = fake_chat(|n, req| {
+            if n == 1 {
+                (axum::http::StatusCode::INTERNAL_SERVER_ERROR, String::new())
+            } else {
+                (axum::http::StatusCode::OK, quote_the_first_sentence(req))
+            }
+        })
+        .await;
+        let units = reading_client(&url, 70).extract(SECTION).await.unwrap();
+        let asked = requests.lock().unwrap().len();
+        assert_eq!(units.len(), asked - 1, "all but the failed piece");
+
+        // When every piece fails, the failure is reported as before.
+        let (url, _) =
+            fake_chat(|_, _| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, String::new())).await;
+        assert!(reading_client(&url, 70).extract(SECTION).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_cut_off_reply_still_yields_its_finished_units() {
+        let cut = r#"{"units":[{"kind":"fact","statement":"The first sentence is here.","evidence_span":"The first sentence is here."},{"kind":"fact","statement":"The second sentence follows it.","evidence_span":"The second sentence follows it."},{"kind":"fact","statement":"The third sent"#;
+        let (url, _) = fake_chat(move |_, _| (axum::http::StatusCode::OK, cut.to_string())).await;
+        let units = reading_client(&url, 0).extract(SECTION).await.unwrap();
+        let statements: Vec<_> = units.iter().map(|u| u.statement.as_str()).collect();
+        assert_eq!(
+            statements,
+            [
+                "The first sentence is here.",
+                "The second sentence follows it."
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_same_statement_from_two_pieces_is_kept_once() {
+        // A line repeated through a section (a page footer, a refrain) comes
+        // back from every piece that holds it.
+        let section = "The totals are final. Filler words here to pad out. \
+                       The totals are final. Filler words once more to pad.";
+        let (url, requests) =
+            fake_chat(|_, req| (axum::http::StatusCode::OK, quote_the_first_sentence(req))).await;
+        let units = reading_client(&url, 50).extract(section).await.unwrap();
+        assert_eq!(requests.lock().unwrap().len(), 4, "four pieces");
+        let statements: Vec<_> = units.iter().map(|u| u.statement.as_str()).collect();
+        assert_eq!(
+            statements,
+            [
+                "The totals are final.",
+                "Filler words here to pad out.",
+                "Filler words once more to pad."
+            ]
+        );
+        assert_eq!(units[0].char_start, 0, "the first one is the one kept");
     }
 
     #[tokio::test]

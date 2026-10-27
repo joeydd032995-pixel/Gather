@@ -108,6 +108,11 @@ pub struct Config {
     /// the memory Ollama's runner accumulates across distinct prompts is
     /// given back. The next request loads the model again.
     pub ollama_refresh_after: u32,
+    /// Longest stretch of a section the reading model is given at once, in
+    /// bytes (0 = the whole section). Small models answer short passages far
+    /// better than 2,000-byte ones, so the low-memory profile cuts sections
+    /// into pieces of this size at sentence ends.
+    pub ollama_piece_bytes: usize,
     /// Run the background contradiction scanner.
     pub scan_enabled: bool,
     /// Seconds between scan passes.
@@ -406,6 +411,20 @@ impl Config {
             Err(_) => 10,
         };
 
+        // A 2,000-byte section holds more statements than a small model can
+        // list in one answer, and its reply is cut off mid-way. On the
+        // measured models (360m, 1B) 400-byte pieces found the most; a model
+        // that handles whole sections needs no cutting.
+        let ollama_piece_bytes = match set("GATHER_OLLAMA_PIECE_BYTES") {
+            Ok(raw) => raw.trim().parse().map_err(|_| ConfigError::BadEnvValue {
+                var: "GATHER_OLLAMA_PIECE_BYTES",
+                value: raw,
+                reason: "expected a whole number of bytes, 0 to send whole sections",
+            })?,
+            Err(_) if low => 400,
+            Err(_) => 0,
+        };
+
         let grpc_enabled = env_bool("GATHER_GRPC_ENABLED", true);
         let grpc_raw =
             var("GATHER_GRPC_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:7602".to_string());
@@ -472,6 +491,7 @@ impl Config {
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(low),
             ollama_refresh_after,
+            ollama_piece_bytes,
             scan_enabled: env_bool("GATHER_SCAN_ENABLED", true),
             scan_interval_secs: var("GATHER_SCAN_INTERVAL_SECS")
                 .ok()
@@ -621,6 +641,7 @@ impl Config {
             ollama_num_ctx: None,
             ollama_one_at_a_time: false,
             ollama_refresh_after: 0,
+            ollama_piece_bytes: 0,
             scan_enabled: true,
             scan_interval_secs: 600,
             scan_batch: 32,
@@ -779,6 +800,33 @@ mod tests {
         assert_eq!(c.ollama_refresh_after, 10, "blank means the default");
         assert!(config(&[("GATHER_OLLAMA_REFRESH_AFTER", "often")]).is_err());
         assert!(config(&[("GATHER_OLLAMA_REFRESH_AFTER", "-1")]).is_err());
+    }
+
+    #[test]
+    fn small_computers_give_the_model_short_pieces_unless_told_otherwise() {
+        let c = config(&[("GATHER_MEMORY_PROFILE", "low")]).unwrap();
+        assert_eq!(c.ollama_piece_bytes, 400);
+        let c = config(&[("GATHER_MEMORY_PROFILE", "standard")]).unwrap();
+        assert_eq!(
+            c.ollama_piece_bytes, 0,
+            "whole sections on a bigger computer"
+        );
+        let c = config(&[
+            ("GATHER_MEMORY_PROFILE", "low"),
+            ("GATHER_OLLAMA_PIECE_BYTES", "0"),
+        ])
+        .unwrap();
+        assert_eq!(c.ollama_piece_bytes, 0, "0 sends whole sections");
+        let c = config(&[("GATHER_OLLAMA_PIECE_BYTES", "600")]).unwrap();
+        assert_eq!(c.ollama_piece_bytes, 600);
+        let c = config(&[
+            ("GATHER_MEMORY_PROFILE", "low"),
+            ("GATHER_OLLAMA_PIECE_BYTES", " "),
+        ])
+        .unwrap();
+        assert_eq!(c.ollama_piece_bytes, 400, "blank means the default");
+        assert!(config(&[("GATHER_OLLAMA_PIECE_BYTES", "short")]).is_err());
+        assert!(config(&[("GATHER_OLLAMA_PIECE_BYTES", "-5")]).is_err());
     }
 
     #[test]

@@ -244,10 +244,13 @@ export default function Settings({
 
 /**
  * Suggested models. The reading model needs about 2 GB while it works (measured:
- * 1.9 GB for llama3.2:1b, 2.6 GB for llama3.2:3b), so it suits 8 GB or more; the
- * search model needs about 0.4 GB and is the one for a 4 GB computer.
+ * 1.9 GB for llama3.2:1b, 2.6 GB for llama3.2:3b), so it suits 8 GB or more; on a
+ * 4 GB computer smollm2:360m (about 0.9 GB) is the one that fits, and finds fewer
+ * statements (about a fifth in a test on ordinary notes, where llama3.2:1b found
+ * about half). The search model needs about 0.4 GB.
  */
 const SUGGESTED_CHAT = "llama3.2:1b";
+const SUGGESTED_SMALL_CHAT = "smollm2:360m";
 const SUGGESTED_EMBED = "nomic-embed-text";
 
 /** Whether Ollama lists `name` ("x" is listed as "x:latest"). */
@@ -395,10 +398,13 @@ function AiSection() {
                 Model for reading files
               </label>
               <p className="setting-desc">
-                Pulls facts and relationships out of what you add. It needs about 2 GB of free
-                memory while it works, so it suits a computer with 8 GB or more ({SUGGESTED_CHAT} is
-                the smallest sensible choice). Leave empty to use Ollama for search only, which
-                needs far less.
+                Pulls facts and relationships out of what you add. Without it Gather only finds
+                sentences in fixed shapes (like “We decided on X”), so the knowledge graph and
+                the contradiction check stay nearly empty. {SUGGESTED_CHAT} needs about 2 GB of
+                free memory while it works and suits a computer with 8 GB or more;{" "}
+                {SUGGESTED_SMALL_CHAT} needs about 0.9 GB, fits a 4 GB computer and finds
+                fewer statements. Leave empty to use Ollama for search only, which needs far
+                less.
               </p>
               {missing(draft.chat_model) && (
                 <p className="setting-desc setting-warn">
@@ -413,7 +419,9 @@ function AiSection() {
                 list={listId}
                 value={draft.chat_model}
                 placeholder={
-                  lowMemory ? "None (search only)" : `None (e.g. ${SUGGESTED_CHAT})`
+                  lowMemory
+                    ? `None (e.g. ${SUGGESTED_SMALL_CHAT})`
+                    : `None (e.g. ${SUGGESTED_CHAT})`
                 }
                 spellCheck={false}
                 onChange={(e) => set({ chat_model: e.target.value })}
@@ -467,13 +475,17 @@ function AiSection() {
               />
             </div>
           </div>
-          {lowMemory && draft.chat_model.trim() !== "" && (
+          {lowMemory &&
+            draft.chat_model.trim() !== "" &&
+            draft.chat_model.trim() !== SUGGESTED_SMALL_CHAT && (
             <div className="panel-pad">
               <Callout tone="warning" title="This computer has little memory">
-                A model that reads files needs about 2 GB or more while it works, which is most of
-                what a computer this size has to spare, and reading goes slowly. Gather unloads it
-                regularly and a minute after it's done, but the computer may still freeze. We
-                recommend clearing the model for reading files and keeping search.
+                A model that reads files usually needs about 2 GB or more while it works, which is
+                most of what a computer this size has to spare, and reading goes slowly. Gather
+                unloads it regularly and a minute after it's done, but the computer may still
+                freeze. {SUGGESTED_SMALL_CHAT} needs about 0.9 GB and finds fewer statements than a
+                larger model, but some. Without any model for reading files, only sentences in
+                fixed shapes are found.
               </Callout>
             </div>
           )}
