@@ -113,6 +113,10 @@ pub struct Config {
     /// better than 2,000-byte ones, so the low-memory profile cuts sections
     /// into pieces of this size at sentence ends.
     pub ollama_piece_bytes: usize,
+    /// With no reading model, also keep ordinary sentences that state a figure,
+    /// a date, a name or a decision (`extract::general`), beyond the fixed
+    /// shapes the rules take.
+    pub extraction_general: bool,
     /// Run the background contradiction scanner.
     pub scan_enabled: bool,
     /// Seconds between scan passes.
@@ -492,6 +496,7 @@ impl Config {
                 .unwrap_or(low),
             ollama_refresh_after,
             ollama_piece_bytes,
+            extraction_general: env_bool("GATHER_EXTRACTION_GENERAL", true),
             scan_enabled: env_bool("GATHER_SCAN_ENABLED", true),
             scan_interval_secs: var("GATHER_SCAN_INTERVAL_SECS")
                 .ok()
@@ -642,6 +647,7 @@ impl Config {
             ollama_one_at_a_time: false,
             ollama_refresh_after: 0,
             ollama_piece_bytes: 0,
+            extraction_general: false,
             scan_enabled: true,
             scan_interval_secs: 600,
             scan_batch: 32,
@@ -827,6 +833,13 @@ mod tests {
         assert_eq!(c.ollama_piece_bytes, 400, "blank means the default");
         assert!(config(&[("GATHER_OLLAMA_PIECE_BYTES", "short")]).is_err());
         assert!(config(&[("GATHER_OLLAMA_PIECE_BYTES", "-5")]).is_err());
+    }
+
+    #[test]
+    fn ordinary_sentences_are_read_without_a_model_unless_turned_off() {
+        assert!(config(&[]).unwrap().extraction_general);
+        let off = config(&[("GATHER_EXTRACTION_GENERAL", "false")]).unwrap();
+        assert!(!off.extraction_general);
     }
 
     #[test]

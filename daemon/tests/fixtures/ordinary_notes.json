@@ -1,0 +1,1005 @@
+{
+ "_doc": [
+  "Ordinary notes and documents for the no-model reader (daemon/src/extract/general.rs).",
+  "Each case pairs a passage with the sentences a person would pick out as stating something",
+  "specific and checkable: a fact, number, date, decision, plan, commitment or preference.",
+  "Greetings, thanks, questions, requests, headings and vague opinions are not expected, and",
+  "cases with an empty list are passages that should yield nothing. The sets were written one",
+  "after another as the reader was built, so they are regression sets, not blind tests;",
+  "the last two (blind, blind2) were each held out when first used."
+ ],
+ "cases": [
+  {
+   "name": "ordinary/committee-minutes",
+   "input": "Minutes of the 4 March committee meeting. Present: the chair, the treasurer and two members. The treasurer reported a balance of 2,340 pounds in the club account. The committee voted to raise annual fees from 30 to 35 pounds. The next meeting will be held on 8 April at the village hall. Apologies were received from Mr Okafor.",
+   "expected": [
+    {
+     "statement": "The treasurer reported a balance of 2,340 pounds in the club account"
+    },
+    {
+     "statement": "The committee voted to raise annual fees from 30 to 35 pounds"
+    },
+    {
+     "statement": "The next meeting will be held on 8 April at the village hall"
+    },
+    {
+     "statement": "Apologies were received from Mr Okafor"
+    }
+   ]
+  },
+  {
+   "name": "ordinary/wrapped-pdf-text",
+   "input": "The pilot programme ran in four schools between September 2021 and June\n2022. Attendance in the participating classes improved by 6 percent compared\nwith the previous year. Teachers reported that the new reading materials were\neasier to use. The authors recommend extending the programme to twelve schools.",
+   "expected": [
+    {
+     "statement": "The pilot programme ran in four schools between September 2021 and June 2022"
+    },
+    {
+     "statement": "Attendance in the participating classes improved by 6 percent compared with the previous year"
+    },
+    {
+     "statement": "Teachers reported that the new reading materials were easier to use"
+    },
+    {
+     "statement": "The authors recommend extending the programme to twelve schools"
+    }
+   ]
+  },
+  {
+   "name": "ordinary/personal-email",
+   "input": "Hi Ana, thanks for the photos! The flat is 62 square metres and the rent is 1,180 euros a month, bills not included. The landlord, Mr Weber, wants a deposit of two months before we sign. I'll transfer it on Friday. Let me know what you think.",
+   "expected": [
+    {
+     "statement": "The flat is 62 square metres and the rent is 1,180 euros a month, bills not included"
+    },
+    {
+     "statement": "The landlord, Mr Weber, wants a deposit of two months before we sign"
+    },
+    {
+     "statement": "I'll transfer it on Friday"
+    }
+   ]
+  },
+  {
+   "name": "ordinary/readme-style",
+   "input": "# Tidepool\n\nTidepool is a command line tool for tracking tide tables. It stores data in a local SQLite file. The default port for the optional web view is 8088. Version 2.3 dropped support for Windows 7. To build from source you need Go 1.21 or newer.",
+   "expected": [
+    {
+     "statement": "Tidepool is a command line tool for tracking tide tables"
+    },
+    {
+     "statement": "It stores data in a local SQLite file"
+    },
+    {
+     "statement": "The default port for the optional web view is 8088"
+    },
+    {
+     "statement": "Version 2.3 dropped support for Windows 7"
+    },
+    {
+     "statement": "To build from source you need Go 1.21 or newer"
+    }
+   ]
+  },
+  {
+   "name": "ordinary/project-update",
+   "input": "Quick status for the kitchen renovation. The cabinets arrive on 21 May. Joao said the electrician can start the week after. We chose the grey quartz worktop over the oak one because it is easier to clean. The total quote so far is 14,800 dollars.",
+   "expected": [
+    {
+     "statement": "The cabinets arrive on 21 May"
+    },
+    {
+     "statement": "Joao said the electrician can start the week after"
+    },
+    {
+     "statement": "We chose the grey quartz worktop over the oak one because it is easier to clean"
+    },
+    {
+     "statement": "The total quote so far is 14,800 dollars"
+    }
+   ]
+  },
+  {
+   "name": "ordinary/journal-2",
+   "input": "Slept badly again. Finally booked the dentist for 2 June at 9:30. Dad turns seventy next month and Mum wants a surprise dinner at the Italian place on Elm Street. I told her I would handle the invitations. Need coffee.",
+   "expected": [
+    {
+     "statement": "Finally booked the dentist for 2 June at 9:30"
+    },
+    {
+     "statement": "Dad turns seventy next month and Mum wants a surprise dinner at the Italian place on Elm Street"
+    },
+    {
+     "statement": "I told her I would handle the invitations"
+    }
+   ]
+  },
+  {
+   "name": "ordinary/research-abstract",
+   "input": "We surveyed 412 small businesses in the north of England. Fewer than a third had a written cyber security policy. Firms that had suffered a breach in the last year were twice as likely to have one. We conclude that awareness campaigns alone are unlikely to change behaviour.",
+   "expected": [
+    {
+     "statement": "We surveyed 412 small businesses in the north of England"
+    },
+    {
+     "statement": "Fewer than a third had a written cyber security policy"
+    },
+    {
+     "statement": "Firms that had suffered a breach in the last year were twice as likely to have one"
+    },
+    {
+     "statement": "We conclude that awareness campaigns alone are unlikely to change behaviour"
+    }
+   ]
+  },
+  {
+   "name": "ordinary/chatter-3",
+   "input": "Hope you had a lovely weekend! Just checking in to see how things are going. No rush at all on the reply. Speak soon.",
+   "expected": []
+  },
+  {
+   "name": "ordinary/chatter-4",
+   "input": "Can you forward me the agenda? Also, did anyone book the room? Thanks a lot, really appreciate it. Please let me know.",
+   "expected": []
+  },
+  {
+   "name": "ordinary/instructions-only",
+   "input": "Step 1: Preheat the oven. Step 2: Mix the flour and butter. Remember to grease the tin. Do not open the door while baking.",
+   "expected": []
+  },
+  {
+   "name": "ordinary/contract-notes",
+   "input": "Summary of the supplier agreement. The initial term is 24 months from 1 January 2025. Either party may terminate with 90 days written notice. Payment is due within 30 days of invoice. Late payments accrue interest at 4 percent per annum.",
+   "expected": [
+    {
+     "statement": "The initial term is 24 months from 1 January 2025"
+    },
+    {
+     "statement": "Either party may terminate with 90 days written notice"
+    },
+    {
+     "statement": "Payment is due within 30 days of invoice"
+    },
+    {
+     "statement": "Late payments accrue interest at 4 percent per annum"
+    }
+   ]
+  },
+  {
+   "name": "ordinary/travel-journal",
+   "input": "We landed in Porto at 6:45 and took the metro into town. The guesthouse charges 55 euros a night. Beatriz recommended the bookshop near the river, so we went there first. Tomorrow we take the train to Coimbra.",
+   "expected": [
+    {
+     "statement": "We landed in Porto at 6:45 and took the metro into town"
+    },
+    {
+     "statement": "The guesthouse charges 55 euros a night"
+    },
+    {
+     "statement": "Beatriz recommended the bookshop near the river, so we went there first"
+    },
+    {
+     "statement": "Tomorrow we take the train to Coimbra"
+    }
+   ]
+  },
+  {
+   "name": "ordinary/class-notes",
+   "input": "Lecture 6: Photosynthesis. Chlorophyll absorbs mostly red and blue light. The light reactions take place in the thylakoid membranes. The Calvin cycle fixes carbon dioxide into sugar. The exam covers chapters 4 to 7 and takes place on 12 December.",
+   "expected": [
+    {
+     "statement": "Chlorophyll absorbs mostly red and blue light"
+    },
+    {
+     "statement": "The light reactions take place in the thylakoid membranes"
+    },
+    {
+     "statement": "The Calvin cycle fixes carbon dioxide into sugar"
+    },
+    {
+     "statement": "The exam covers chapters 4 to 7 and takes place on 12 December"
+    }
+   ]
+  },
+  {
+   "name": "ordinary/team-retro",
+   "input": "Retro notes. We shipped the invoicing module two weeks late. The main cause was the unclear spec from finance. Priya will write a one page template for future specs. We also agreed to stop doing Friday releases. Morale is generally good.",
+   "expected": [
+    {
+     "statement": "We shipped the invoicing module two weeks late"
+    },
+    {
+     "statement": "The main cause was the unclear spec from finance"
+    },
+    {
+     "statement": "Priya will write a one page template for future specs"
+    },
+    {
+     "statement": "We also agreed to stop doing Friday releases"
+    }
+   ]
+  },
+  {
+   "name": "ordinary/garden-notes",
+   "input": "Planted the tomatoes on 14 May, about 60 cm apart. The frost warning is for the 16th, so I covered them overnight. I prefer the cherry variety because they ripen sooner. Compost bin is nearly full.",
+   "expected": [
+    {
+     "statement": "Planted the tomatoes on 14 May, about 60 cm apart"
+    },
+    {
+     "statement": "The frost warning is for the 16th, so I covered them overnight"
+    },
+    {
+     "statement": "I prefer the cherry variety because they ripen sooner"
+    }
+   ]
+  },
+  {
+   "name": "ordinary/news-like",
+   "input": "The city council approved a 3.2 million dollar budget for the new library on Tuesday. Construction will begin in March and is expected to take eighteen months. The mayor said the building would be open to the public by autumn 2027. Opponents argue the money would be better spent on road repairs.",
+   "expected": [
+    {
+     "statement": "The city council approved a 3.2 million dollar budget for the new library on Tuesday"
+    },
+    {
+     "statement": "Construction will begin in March and is expected to take eighteen months"
+    },
+    {
+     "statement": "The mayor said the building would be open to the public by autumn 2027"
+    },
+    {
+     "statement": "Opponents argue the money would be better spent on road repairs"
+    }
+   ]
+  },
+  {
+   "name": "ordinary/freelance-notes",
+   "input": "Invoice 0412 for the Hartley account was sent on 3 June for 1,900 dollars. Hartley pays within 14 days as a rule. I charge 75 dollars an hour for design work and 60 for revisions. The logo project is due on the 28th.",
+   "expected": [
+    {
+     "statement": "Invoice 0412 for the Hartley account was sent on 3 June for 1,900 dollars"
+    },
+    {
+     "statement": "Hartley pays within 14 days as a rule"
+    },
+    {
+     "statement": "I charge 75 dollars an hour for design work and 60 for revisions"
+    },
+    {
+     "statement": "The logo project is due on the 28th"
+    }
+   ]
+  },
+  {
+   "name": "ordinary/health-2",
+   "input": "Follow-up with Dr Chen on Thursday. My resting heart rate averaged 58 over the last month. She suggested I keep the same dose of the medication for now. We will recheck bloods in three months. Feeling much better overall.",
+   "expected": [
+    {
+     "statement": "My resting heart rate averaged 58 over the last month"
+    },
+    {
+     "statement": "She suggested I keep the same dose of the medication for now"
+    },
+    {
+     "statement": "We will recheck bloods in three months"
+    }
+   ]
+  },
+  {
+   "name": "ordinary/doc-config",
+   "input": "The service listens on port 7601 by default. Set GATHER_PORT to change it. Logs are written to the logs folder and rotate at 10 MB. Authentication is off when the service is bound to localhost.",
+   "expected": [
+    {
+     "statement": "The service listens on port 7601 by default"
+    },
+    {
+     "statement": "Logs are written to the logs folder and rotate at 10 MB"
+    },
+    {
+     "statement": "Authentication is off when the service is bound to localhost"
+    }
+   ]
+  },
+  {
+   "name": "ordinary/family-plans",
+   "input": "Plans for August. We are renting the cottage in Wales from the 9th to the 23rd. My sister is bringing her two dogs. Ravi has decided not to come because of work. The ferry costs 210 pounds return for the car.",
+   "expected": [
+    {
+     "statement": "We are renting the cottage in Wales from the 9th to the 23rd"
+    },
+    {
+     "statement": "My sister is bringing her two dogs"
+    },
+    {
+     "statement": "Ravi has decided not to come because of work"
+    },
+    {
+     "statement": "The ferry costs 210 pounds return for the car"
+    }
+   ]
+  },
+  {
+   "name": "ordinary/budget-a",
+   "input": "Conference planning notes, version one. The conference budget is 12,000 dollars. The venue holds 300 people. Registration opens on 1 March.",
+   "expected": [
+    {
+     "statement": "The conference budget is 12,000 dollars"
+    },
+    {
+     "statement": "The venue holds 300 people"
+    },
+    {
+     "statement": "Registration opens on 1 March"
+    }
+   ]
+  },
+  {
+   "name": "ordinary/budget-b",
+   "input": "Conference planning notes, version two. The conference budget is 15,500 dollars. The venue holds 250 people. Registration opens on 15 March.",
+   "expected": [
+    {
+     "statement": "The conference budget is 15,500 dollars"
+    },
+    {
+     "statement": "The venue holds 250 people"
+    },
+    {
+     "statement": "Registration opens on 15 March"
+    }
+   ]
+  },
+  {
+   "name": "ordinary/opinion-heavy",
+   "input": "I really enjoyed the film. The ending was a bit predictable though. It felt a little long in the middle. Would watch again.",
+   "expected": []
+  },
+  {
+   "name": "ordinary/mixed-email",
+   "input": "Dear team, I hope this finds you well. As discussed, the audit starts on 9 September and will last three weeks. Please send your documents by the 2nd. The auditor is Ms Lindqvist from Nordic Assurance. Kind regards, Sam",
+   "expected": [
+    {
+     "statement": "As discussed, the audit starts on 9 September and will last three weeks"
+    },
+    {
+     "statement": "The auditor is Ms Lindqvist from Nordic Assurance"
+    }
+   ]
+  },
+  {
+   "name": "prose/meeting-notes",
+   "input": "Notes from Tuesday's planning call. Marcus said the migration to the new billing system will finish by the end of May. The finance team is worried about the double entry during the cutover, so Lena will run both systems side by side for two weeks. Budget for the contractor is capped at $18,000.",
+   "expected": [
+    {
+     "statement": "Marcus said the migration to the new billing system will finish by the end of May."
+    },
+    {
+     "statement": "Lena will run both systems side by side for two weeks."
+    },
+    {
+     "statement": "The budget for the contractor is capped at $18,000."
+    }
+   ]
+  },
+  {
+   "name": "prose/journal",
+   "input": "Went for a long run along the river this morning and felt great afterwards. I've decided to sign up for the Lisbon half marathon in October. My knee still clicks on the downhill parts, so I'll see the physio on Friday.",
+   "expected": [
+    {
+     "statement": "I've decided to sign up for the Lisbon half marathon in October."
+    },
+    {
+     "statement": "My knee still clicks on the downhill parts."
+    },
+    {
+     "statement": "I'll see the physio on Friday."
+    }
+   ]
+  },
+  {
+   "name": "prose/email-update",
+   "input": "Hi all, quick update on the website. The new checkout went live on 3 April and conversion has risen from 2.1% to 2.9% since. Dmitri is fixing the mobile layout bug and expects to ship it next week. Please send me any other issues by Thursday.",
+   "expected": [
+    {
+     "statement": "The new checkout went live on 3 April."
+    },
+    {
+     "statement": "Conversion has risen from 2.1% to 2.9% since the new checkout went live."
+    },
+    {
+     "statement": "Dmitri is fixing the mobile layout bug and expects to ship it next week."
+    }
+   ]
+  },
+  {
+   "name": "prose/travel-plan",
+   "input": "We booked the flights to Osaka for 12 September, returning on the 26th. The hotel near Namba costs 14,000 yen a night and includes breakfast. Aiko suggested we skip Kyoto this time and spend two days in Nara instead.",
+   "expected": [
+    {
+     "statement": "We booked the flights to Osaka for 12 September, returning on the 26th."
+    },
+    {
+     "statement": "The hotel near Namba costs 14,000 yen a night and includes breakfast."
+    },
+    {
+     "statement": "Aiko suggested we skip Kyoto this time and spend two days in Nara instead."
+    }
+   ]
+  },
+  {
+   "name": "prose/finance-note",
+   "input": "Reviewed the household budget. Rent is going up to 1,350 a month from January. We spent roughly 420 on groceries in March, which is over the 350 we planned. I want to move 200 a month into the savings account.",
+   "expected": [
+    {
+     "statement": "Rent is going up to 1,350 a month from January."
+    },
+    {
+     "statement": "We spent roughly 420 on groceries in March, over the 350 we planned."
+    },
+    {
+     "statement": "I want to move 200 a month into the savings account."
+    }
+   ]
+  },
+  {
+   "name": "prose/project-status",
+   "input": "The parser rewrite is about 70% done. Sofia found that the old tokenizer drops unicode quotes, which explains the bug reports from last month. We agreed to drop support for Python 3.8 in the next release. Benchmarks show the new parser is roughly three times faster.",
+   "expected": [
+    {
+     "statement": "The parser rewrite is about 70% done."
+    },
+    {
+     "statement": "Sofia found that the old tokenizer drops unicode quotes."
+    },
+    {
+     "statement": "We agreed to drop support for Python 3.8 in the next release."
+    },
+    {
+     "statement": "Benchmarks show the new parser is roughly three times faster."
+    }
+   ]
+  },
+  {
+   "name": "prose/health-note",
+   "input": "Doctor's visit on 9 June. Blood pressure was 128 over 82, which she said is fine but worth watching. She asked me to cut back on salt and come back in six months. I stopped taking the ibuprofen last week.",
+   "expected": [
+    {
+     "statement": "Blood pressure was 128 over 82 at the doctor's visit on 9 June."
+    },
+    {
+     "statement": "The doctor asked me to cut back on salt and come back in six months."
+    },
+    {
+     "statement": "I stopped taking the ibuprofen last week."
+    }
+   ]
+  },
+  {
+   "name": "prose/hedged",
+   "input": "I might switch the newsletter to a different provider at some point, but nothing is decided. Raj is considering moving to Berlin next year. The current provider charges 39 dollars a month.",
+   "expected": [
+    {
+     "statement": "I might switch the newsletter to a different provider at some point, but nothing is decided."
+    },
+    {
+     "statement": "Raj is considering moving to Berlin next year."
+    },
+    {
+     "statement": "The current provider charges 39 dollars a month."
+    }
+   ]
+  },
+  {
+   "name": "prose/research-notes",
+   "input": "The 2019 survey covered 1,200 households in three regions. Median household income in the northern region was 31,000, about 12% below the national figure. The authors conclude that transport costs, not wages, explain most of the gap.",
+   "expected": [
+    {
+     "statement": "The 2019 survey covered 1,200 households in three regions."
+    },
+    {
+     "statement": "Median household income in the northern region was 31,000, about 12% below the national figure."
+    },
+    {
+     "statement": "The authors conclude that transport costs, not wages, explain most of the gap."
+    }
+   ]
+  },
+  {
+   "name": "prose/personal-prefs",
+   "input": "Honestly I prefer working in the morning, my focus is gone by three. We always meet at the cafe on Harbour Street on Sundays. Mum's birthday is on the 4th of November and she likes orchids.",
+   "expected": [
+    {
+     "statement": "I prefer working in the morning because my focus is gone by three."
+    },
+    {
+     "statement": "We always meet at the cafe on Harbour Street on Sundays."
+    },
+    {
+     "statement": "Mum's birthday is on the 4th of November and she likes orchids."
+    }
+   ]
+  },
+  {
+   "name": "prose/decision-log",
+   "input": "After comparing the three quotes we picked Brightline for the office internet. It is 89 a month on a 24 month contract, installation is free. Tomas will cancel the old line once the new one is working.",
+   "expected": [
+    {
+     "statement": "We picked Brightline for the office internet after comparing three quotes."
+    },
+    {
+     "statement": "Brightline costs 89 a month on a 24 month contract and installation is free."
+    },
+    {
+     "statement": "Tomas will cancel the old line once the new one is working."
+    }
+   ]
+  },
+  {
+   "name": "prose/chatter-1",
+   "input": "Thanks so much for yesterday, it was lovely to see everyone! Let me know if you want to do it again soon. Hope your week is going well.",
+   "expected": []
+  },
+  {
+   "name": "prose/chatter-2",
+   "input": "Sounds good. Can you send me the link again? I couldn't find it in my inbox. Also, how was the weekend?",
+   "expected": []
+  },
+  {
+   "name": "prose/heading-and-list",
+   "input": "## Next steps\n\n- Book the venue\n- Send invitations\n- Order food\n\nThe venue holds 60 people and costs 450 for the evening.",
+   "expected": [
+    {
+     "statement": "The venue holds 60 people and costs 450 for the evening."
+    }
+   ]
+  },
+  {
+   "name": "blind/history-para",
+   "input": "The harbour at Valmere was built in 1842 by a local merchant guild. By 1900 it handled more than half of the region's grain exports. A fire destroyed the eastern warehouses in 1911, and they were never rebuilt. The port was closed to commercial traffic in 1974.",
+   "expected": [
+    {
+     "statement": "The harbour at Valmere was built in 1842 by a local merchant guild"
+    },
+    {
+     "statement": "By 1900 it handled more than half of the region's grain exports"
+    },
+    {
+     "statement": "A fire destroyed the eastern warehouses in 1911, and they were never rebuilt"
+    },
+    {
+     "statement": "The port was closed to commercial traffic in 1974"
+    }
+   ]
+  },
+  {
+   "name": "blind/sports-report",
+   "input": "Rovers beat United 3-1 at home on Saturday. Mensah scored twice in the second half. The win lifts Rovers to fourth in the table. Their next fixture is away at Athletic on 19 October.",
+   "expected": [
+    {
+     "statement": "Rovers beat United 3-1 at home on Saturday"
+    },
+    {
+     "statement": "Mensah scored twice in the second half"
+    },
+    {
+     "statement": "The win lifts Rovers to fourth in the table"
+    },
+    {
+     "statement": "Their next fixture is away at Athletic on 19 October"
+    }
+   ]
+  },
+  {
+   "name": "blind/product-manual",
+   "input": "The kettle holds 1.7 litres and switches itself off when the water boils. The base unit is rated at 2,200 watts. The warranty lasts for 24 months from the date of purchase. Do not immerse the base in water.",
+   "expected": [
+    {
+     "statement": "The kettle holds 1.7 litres and switches itself off when the water boils"
+    },
+    {
+     "statement": "The base unit is rated at 2,200 watts"
+    },
+    {
+     "statement": "The warranty lasts for 24 months from the date of purchase"
+    }
+   ]
+  },
+  {
+   "name": "blind/chat-thread",
+   "input": "ok so the deploy is moving to thursday. Lena confirmed the database migration finished last night. we still need sign off from security. I'll ping Omar in the morning.",
+   "expected": [
+    {
+     "statement": "the deploy is moving to thursday"
+    },
+    {
+     "statement": "Lena confirmed the database migration finished last night"
+    },
+    {
+     "statement": "we still need sign off from security"
+    },
+    {
+     "statement": "I'll ping Omar in the morning"
+    }
+   ]
+  },
+  {
+   "name": "blind/cv-bio",
+   "input": "Nadia Rahman is a landscape architect based in Leeds. She studied at the University of Sheffield and graduated in 2012. In 2018 she founded Greenhand Studio, which now employs nine people. She is currently working on a park redesign for Bradford council.",
+   "expected": [
+    {
+     "statement": "Nadia Rahman is a landscape architect based in Leeds"
+    },
+    {
+     "statement": "She studied at the University of Sheffield and graduated in 2012"
+    },
+    {
+     "statement": "In 2018 she founded Greenhand Studio, which now employs nine people"
+    },
+    {
+     "statement": "She is currently working on a park redesign for Bradford council"
+    }
+   ]
+  },
+  {
+   "name": "blind/marketing-fluff",
+   "input": "Experience the future of productivity. Our award-winning platform helps teams everywhere do their best work. Join thousands of happy customers today. Sign up now and see the difference.",
+   "expected": []
+  },
+  {
+   "name": "blind/legal-boilerplate",
+   "input": "All rights reserved. No part of this publication may be reproduced without prior permission. This website uses cookies to improve your experience. By continuing to browse you agree to our terms.",
+   "expected": []
+  },
+  {
+   "name": "blind/ui-labels",
+   "input": "Settings\nProfile\nNotifications\nSign out\nSave changes\nCancel",
+   "expected": []
+  },
+  {
+   "name": "blind/tech-blog",
+   "input": "We migrated the search index from Elasticsearch to Postgres in March. Query latency dropped from 340 ms to 90 ms at the 95th percentile. The migration took three engineers about two weeks. We kept Elasticsearch running in read-only mode for a month as a fallback.",
+   "expected": [
+    {
+     "statement": "We migrated the search index from Elasticsearch to Postgres in March"
+    },
+    {
+     "statement": "Query latency dropped from 340 ms to 90 ms at the 95th percentile"
+    },
+    {
+     "statement": "The migration took three engineers about two weeks"
+    },
+    {
+     "statement": "We kept Elasticsearch running in read-only mode for a month as a fallback"
+    }
+   ]
+  },
+  {
+   "name": "blind/recipe-notes",
+   "input": "Grandma's bread recipe needs 500 grams of flour and 320 ml of water. The dough should rise for about two hours. Bake at 220 degrees for 35 minutes. It keeps for three days in a cloth bag.",
+   "expected": [
+    {
+     "statement": "Grandma's bread recipe needs 500 grams of flour and 320 ml of water"
+    },
+    {
+     "statement": "The dough should rise for about two hours"
+    },
+    {
+     "statement": "It keeps for three days in a cloth bag"
+    }
+   ]
+  },
+  {
+   "name": "blind/board-minutes",
+   "input": "The board met on 17 July. Revenue for the second quarter was 4.1 million, up 8 percent on last year. The CFO, Ms Adeyemi, warned that costs in logistics are rising faster than expected. Directors approved the purchase of the Leeds warehouse for 2.6 million. Mr Park abstained.",
+   "expected": [
+    {
+     "statement": "The board met on 17 July"
+    },
+    {
+     "statement": "Revenue for the second quarter was 4.1 million, up 8 percent on last year"
+    },
+    {
+     "statement": "The CFO, Ms Adeyemi, warned that costs in logistics are rising faster than expected"
+    },
+    {
+     "statement": "Directors approved the purchase of the Leeds warehouse for 2.6 million"
+    },
+    {
+     "statement": "Mr Park abstained"
+    }
+   ]
+  },
+  {
+   "name": "blind/diary-fragments",
+   "input": "Rain all day. Called the bank about the mortgage; the rate goes up to 4.9 percent in January. Hannah wants to repaint the hallway before then. Nothing on telly.",
+   "expected": [
+    {
+     "statement": "Called the bank about the mortgage; the rate goes up to 4.9 percent in January"
+    },
+    {
+     "statement": "Hannah wants to repaint the hallway before then"
+    }
+   ]
+  },
+  {
+   "name": "blind/user-story",
+   "input": "As a returning customer I can see my previous orders. The orders page lists the last 50 orders. Each order shows its date, total and delivery status. Orders older than two years are archived.",
+   "expected": [
+    {
+     "statement": "The orders page lists the last 50 orders"
+    },
+    {
+     "statement": "Each order shows its date, total and delivery status"
+    },
+    {
+     "statement": "Orders older than two years are archived"
+    }
+   ]
+  },
+  {
+   "name": "blind/wrapped-report",
+   "input": "Total household water use in the district fell by 11 percent between 2019\nand 2023, according to the utility's annual report. Most of the decline came\nfrom commercial users. The report notes that leakage still accounts for about\na fifth of all water lost.",
+   "expected": [
+    {
+     "statement": "Total household water use in the district fell by 11 percent between 2019 and 2023, according to the utility's annual report"
+    },
+    {
+     "statement": "Most of the decline came from commercial users"
+    },
+    {
+     "statement": "The report notes that leakage still accounts for about a fifth of all water lost"
+    }
+   ]
+  },
+  {
+   "name": "blind/opinions",
+   "input": "Honestly the new layout is a mess. I find the colours quite ugly. It was nicer before. Maybe that's just me.",
+   "expected": []
+  },
+  {
+   "name": "blind/questions-only",
+   "input": "Who is coming on Friday? Do we have enough chairs? Has anyone spoken to the caterer? What time does it start?",
+   "expected": []
+  },
+  {
+   "name": "blind/school-newsletter",
+   "input": "Sports day will take place on Wednesday 12 June, weather permitting. Pupils should bring a water bottle and a hat. The school fete raised 1,350 pounds for the library. Mrs Dalton retires at the end of term after 31 years of teaching.",
+   "expected": [
+    {
+     "statement": "Sports day will take place on Wednesday 12 June, weather permitting"
+    },
+    {
+     "statement": "The school fete raised 1,350 pounds for the library"
+    },
+    {
+     "statement": "Mrs Dalton retires at the end of term after 31 years of teaching"
+    }
+   ]
+  },
+  {
+   "name": "blind/security-notes",
+   "input": "The staging database was exposed to the internet for roughly six hours on 3 February. No customer records were stored there. The cause was a firewall rule added during a migration. We rotated all credentials the same day.",
+   "expected": [
+    {
+     "statement": "The staging database was exposed to the internet for roughly six hours on 3 February"
+    },
+    {
+     "statement": "No customer records were stored there"
+    },
+    {
+     "statement": "The cause was a firewall rule added during a migration"
+    },
+    {
+     "statement": "We rotated all credentials the same day"
+    }
+   ]
+  },
+  {
+   "name": "blind/property-listing",
+   "input": "Spacious three bedroom house with a south facing garden. Council tax band D. The property was last refurbished in 2019 and has a new boiler. Asking price 385,000 pounds. Viewing by appointment only.",
+   "expected": [
+    {
+     "statement": "The property was last refurbished in 2019 and has a new boiler"
+    },
+    {
+     "statement": "Asking price 385,000 pounds"
+    }
+   ]
+  },
+  {
+   "name": "blind/mixed-meeting",
+   "input": "Quick sync. Nothing major. Aisha is out until the 24th. The vendor contract renews on 1 November at 18,000 euros a year, up from 16,500. We should probably renegotiate. Lunch afterwards?",
+   "expected": [
+    {
+     "statement": "Aisha is out until the 24th"
+    },
+    {
+     "statement": "The vendor contract renews on 1 November at 18,000 euros a year, up from 16,500"
+    }
+   ]
+  },
+  {
+   "name": "blind2/release-notes",
+   "input": "Version 4.2 adds support for dark mode and fixes a crash when opening empty files. The minimum supported macOS version is now 12. Export to PDF is about 30 percent faster than in 4.1. The old plugin API was removed.",
+   "expected": [
+    {
+     "statement": "Version 4.2 adds support for dark mode and fixes a crash when opening empty files"
+    },
+    {
+     "statement": "The minimum supported macOS version is now 12"
+    },
+    {
+     "statement": "Export to PDF is about 30 percent faster than in 4.1"
+    },
+    {
+     "statement": "The old plugin API was removed"
+    }
+   ]
+  },
+  {
+   "name": "blind2/transcript",
+   "input": "Dana: I'll take the vendor call on Tuesday.\nMarco: Good. The quote they sent is 9,400 for the first year.\nDana: That's higher than the 8,000 we budgeted.\nMarco: Right, so we need to push back.",
+   "expected": [
+    {
+     "statement": "I'll take the vendor call on Tuesday"
+    },
+    {
+     "statement": "The quote they sent is 9,400 for the first year"
+    },
+    {
+     "statement": "That's higher than the 8,000 we budgeted"
+    }
+   ]
+  },
+  {
+   "name": "blind2/email-quoted",
+   "input": "Thanks Priya. The flight lands at 14:20 on Friday, terminal 2.\n\n> On Mon, Priya wrote:\n> Can you confirm your arrival time?\n\nI will take a taxi to the hotel.",
+   "expected": [
+    {
+     "statement": "The flight lands at 14:20 on Friday, terminal 2"
+    },
+    {
+     "statement": "I will take a taxi to the hotel"
+    }
+   ]
+  },
+  {
+   "name": "blind2/paper-excerpt",
+   "input": "Participants were randomly assigned to one of two conditions. Those in the treatment group (n = 64) received weekly text messages for\neight weeks, while the control group (n = 61) received none. At follow-up, the treatment group\nreported significantly lower stress scores than controls. No adverse events were recorded.",
+   "expected": [
+    {
+     "statement": "Participants were randomly assigned to one of two conditions"
+    },
+    {
+     "statement": "Those in the treatment group (n = 64) received weekly text messages for eight weeks, while the control group (n = 61) received none"
+    },
+    {
+     "statement": "At follow-up, the treatment group reported significantly lower stress scores than controls"
+    },
+    {
+     "statement": "No adverse events were recorded"
+    }
+   ]
+  },
+  {
+   "name": "blind2/bullet-facts",
+   "input": "Facts about the cabin:\n- Sleeps six people\n- Wood stove, no central heating\n- The nearest shop is 11 km away in Alder Creek\n- Check-in is after 3 pm on Saturdays",
+   "expected": [
+    {
+     "statement": "The nearest shop is 11 km away in Alder Creek"
+    },
+    {
+     "statement": "Check-in is after 3 pm on Saturdays"
+    }
+   ]
+  },
+  {
+   "name": "blind2/faq",
+   "input": "How long does shipping take? Orders usually arrive within five working days. Can I return an item? Yes, returns are accepted for 30 days after delivery. Shipping to the Highlands costs an extra 6 pounds.",
+   "expected": [
+    {
+     "statement": "Orders usually arrive within five working days"
+    },
+    {
+     "statement": "Returns are accepted for 30 days after delivery"
+    },
+    {
+     "statement": "Shipping to the Highlands costs an extra 6 pounds"
+    }
+   ]
+  },
+  {
+   "name": "blind2/personal-finance",
+   "input": "Paid off the credit card on the 5th, 1,240 in total. The car insurance renews in September at 612, which is 40 more than last year. Considering switching to Direct Line. Savings are at 8,300 now.",
+   "expected": [
+    {
+     "statement": "Paid off the credit card on the 5th, 1,240 in total"
+    },
+    {
+     "statement": "The car insurance renews in September at 612, which is 40 more than last year"
+    },
+    {
+     "statement": "Savings are at 8,300 now"
+    }
+   ]
+  },
+  {
+   "name": "blind2/chatter-5",
+   "input": "Morning all. Lovely day out there isn't it. Anyone fancy a coffee? I'm heading down in five minutes.",
+   "expected": []
+  },
+  {
+   "name": "blind2/slogan-lines",
+   "input": "Built for speed. Designed for people. Trusted by teams around the world. Try it free today.",
+   "expected": []
+  },
+  {
+   "name": "blind2/reflection",
+   "input": "I've been thinking about changing jobs. The commute takes ninety minutes each way now since the office moved to Reading. Sam says the team in Bristol is hiring. I think I would prefer to stay in a smaller company.",
+   "expected": [
+    {
+     "statement": "The commute takes ninety minutes each way now since the office moved to Reading"
+    },
+    {
+     "statement": "Sam says the team in Bristol is hiring"
+    },
+    {
+     "statement": "I think I would prefer to stay in a smaller company"
+    }
+   ]
+  },
+  {
+   "name": "blind2/lab-notes",
+   "input": "Sample B3 was heated to 80 degrees for 20 minutes. The pH dropped from 7.4 to 6.8 over that time. Dr Alvarez repeated the run on Thursday and got the same result. The balance in room 204 needs recalibrating.",
+   "expected": [
+    {
+     "statement": "Sample B3 was heated to 80 degrees for 20 minutes"
+    },
+    {
+     "statement": "The pH dropped from 7.4 to 6.8 over that time"
+    },
+    {
+     "statement": "Dr Alvarez repeated the run on Thursday and got the same result"
+    },
+    {
+     "statement": "The balance in room 204 needs recalibrating"
+    }
+   ]
+  },
+  {
+   "name": "blind2/invoice-text",
+   "input": "Invoice number 20931. Date of issue 12 August. Amount due 2,450 dollars. Payment terms net 30. Thank you for your business.",
+   "expected": [
+    {
+     "statement": "Amount due 2,450 dollars"
+    }
+   ]
+  },
+  {
+   "name": "blind2/hr-policy",
+   "input": "Employees are entitled to 25 days of annual leave plus public holidays. Unused leave of up to five days may be carried over to the next year. Requests must be approved by a line manager. The probation period lasts six months.",
+   "expected": [
+    {
+     "statement": "Employees are entitled to 25 days of annual leave plus public holidays"
+    },
+    {
+     "statement": "Unused leave of up to five days may be carried over to the next year"
+    },
+    {
+     "statement": "The probation period lasts six months"
+    }
+   ]
+  },
+  {
+   "name": "blind2/mixed-notes",
+   "input": "Ideas for the newsletter. Interview the baker on Mill Road. Mention that the library now opens on Sundays. Not sure about the quiz. The deadline for copy is 6 December.",
+   "expected": [
+    {
+     "statement": "The library now opens on Sundays"
+    },
+    {
+     "statement": "The deadline for copy is 6 December"
+    }
+   ]
+  }
+ ]
+}
